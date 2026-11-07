@@ -14,6 +14,7 @@ Crop hints from layout prevent screen content being cut off.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -89,19 +90,31 @@ def run(
             if seg_start <= float(w.get("start", 0)) < seg_start + seg_duration
         ]
 
+        overlays_opt = params.get("edu_overlays")
+        other_aspect = isinstance(overlays_opt, dict) and overlays_opt.get("aspect", "9:16") != "9:16"
         try:
-            compose_vertical_clip(
-                input_video_path=input_video_path,
-                output_path=out,
-                crop_hints=layout_crop_hints,
-                start_time=seg_start,
-                duration=seg_duration,
-            )
-            output_paths.append(out)
+            if not other_aspect:    # compose_vertical_clip only makes 9:16; other aspects re-cut the source themselves
+                compose_vertical_clip(
+                    input_video_path=input_video_path,
+                    output_path=out,
+                    crop_hints=layout_crop_hints,
+                    start_time=seg_start,
+                    duration=seg_duration,
+                )
+                output_paths.append(out)
             logger.info(
                 "[educational] Clip %d: start=%.1fs dur=%.1fs words=%d layout=%s",
                 i + 1, seg_start, seg_duration, len(seg_words), layout_mode,
             )
+            if overlays_opt:
+                done = _apply_overlays(out, input_video_path, word_timestamps, seg_start, seg_duration, i + 1,
+                                       params, enrichment)
+                if other_aspect:
+                    if not done:    # no plain clip exists yet in this path: the user still gets one
+                        compose_vertical_clip(input_video_path=input_video_path, output_path=out,
+                                              crop_hints=layout_crop_hints, start_time=seg_start,
+                                              duration=seg_duration)
+                    output_paths.append(out)
         except Exception as exc:
             logger.warning("[educational] Clip %d failed: %s", i + 1, exc)
 
@@ -117,6 +130,36 @@ def run(
         "word_timestamps_count": len(word_timestamps),
         "warnings": enrichment.get("warnings", []),
     }
+
+
+def _apply_overlays(clip_path: str, input_video_path: str, words: List[Dict], seg_start: float, seg_duration: float,
+                    index: int, params: Dict[str, Any], enrichment: Dict[str, Any]) -> bool:
+    """Educational v2 (params["edu_overlays"], default off). The plain clip stays in place if anything goes wrong."""
+    options = dict(params["edu_overlays"]) if isinstance(params["edu_overlays"], dict) else {}
+    options.setdefault("llm_opt_in", params.get("llm") == "on")
+    options.setdefault("video_id", Path(input_video_path).stem)
+    try:
+        from modes.educational.overlays import apply_overlays
+        from modes.educational.overlays.compose import render_base
+        tmp = str(Path(clip_path).with_name(Path(clip_path).stem + ".v2.mp4"))
+        base = clip_path
+        aspect = options.get("aspect", "9:16")
+        if aspect != "9:16":
+            base = str(Path(clip_path).with_name(Path(clip_path).stem + ".base.mp4"))
+            render_base(input_video_path, base, seg_start, seg_duration, aspect)
+        report = apply_overlays(base, tmp, words, seg_start, seg_duration, options)
+        os.replace(tmp, clip_path)
+        sidecar = Path(tmp).with_suffix(".overlays.json")
+        if sidecar.exists():
+            os.replace(sidecar, Path(clip_path).with_suffix(".overlays.json"))
+        if base != clip_path:
+            os.unlink(base)
+        enrichment.setdefault("warnings", []).extend(report.get("warnings", []))
+        return True
+    except Exception as exc:  # noqa: BLE001 — a card must never cost the user the clip
+        logger.warning("[educational] overlays skipped for clip %d: %s", index, type(exc).__name__)
+        enrichment.setdefault("warnings", []).append(f"edu_overlays_failed: {type(exc).__name__}")
+        return False
 
 
 def _detect_layout(layout_segments: List[Dict]) -> str:
