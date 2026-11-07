@@ -19,7 +19,8 @@ for m in ("mediapipe", "ultralytics", "faster_whisper", "ctranslate2", "scenedet
 print("imports ok")
 PY
 ok "dependencies import together (torch/numpy/opencv/mediapipe/ultralytics/faster-whisper)"
-pip check >/dev/null 2>&1 && ok "pip check clean" || { pip check || true; fail "pip check reported conflicts"; }
+if python3 -m pip --version >/dev/null 2>&1; then CHK="python3 -m pip check"; else CHK="uv pip check"; fi   # uv venvs have no pip
+$CHK >/dev/null 2>&1 && ok "dependency check clean ($CHK)" || { $CHK || true; fail "dependency check reported conflicts"; }
 command -v ffmpeg >/dev/null && ffmpeg -hide_banner -version | head -1
 
 # 2. image hygiene: non-root, no SONYA source, no secrets in the environment
