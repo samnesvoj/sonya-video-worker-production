@@ -47,10 +47,6 @@ nvidia-cusparse-cu12==12.3.1.170 \
     # via
     #   nvidia-cusolver-cu12
     #   torch
-nvidia-ml-py==13.615.71 \
-    --hash=sha256:959bf4adf6fe1308e4bd739e722236b0d1ec8392e2cefad33ff70c311380b9b6 \
-    --hash=sha256:bebe4e48f51b1dc75028c0815cb7bfa14a31a5bb80be70c9d980c6036953fc3d
-    # via ultralytics
 nvidia-nccl-cu12==2.21.5 \
     --hash=sha256:8579076d30a8c24988834445f8d633c697d42397e92ffc3f63fa26766d25e0a0
     # via torch

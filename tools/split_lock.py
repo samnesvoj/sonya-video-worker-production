@@ -11,7 +11,8 @@ import hashlib, pathlib, re, sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 LOCK = ROOT / "requirements" / "worker.lock.txt"
 OUT = ROOT / "requirements" / "split"
-GROUPS = [("01-cuda-libs", re.compile(r"^(nvidia-|cuda-)")), ("02-torch", re.compile(r"^(torch|torchvision|triton)$"))]
+# nvidia-ml-py (NVML bindings, tiny, imported by ultralytics) is NOT a CUDA library layer: it stays in 03-rest.
+GROUPS = [("01-cuda-libs", re.compile(r"^(nvidia-(?!ml-py)|cuda-)")), ("02-torch", re.compile(r"^(torch|torchvision|triton)$"))]
 
 
 def blocks(text: str):
