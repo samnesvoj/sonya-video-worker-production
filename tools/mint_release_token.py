@@ -26,7 +26,8 @@ def app_jwt(app_id: str, key_pem: bytes) -> str:
     return (head + b"." + body + b"." + _b64(sig)).decode()
 
 
-def mint(repo: str, opener=urllib.request.urlopen, environ=os.environ) -> str:
+def mint_full(repo: str, opener=urllib.request.urlopen, environ=os.environ) -> dict:
+    """The whole installation-token response (token + permissions + repositories + expires_at). Callers must never print `token`."""
     with open(environ["GH_APP_PRIVATE_KEY_FILE"], "rb") as f:
         jwt = app_jwt(environ["GH_APP_ID"], f.read())
     req = urllib.request.Request(
@@ -35,7 +36,11 @@ def mint(repo: str, opener=urllib.request.urlopen, environ=os.environ) -> str:
         headers={"Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sonya-release-token"}, method="POST")
     with opener(req, timeout=20) as r:
-        return json.load(r)["token"]
+        return json.load(r)
+
+
+def mint(repo: str, opener=urllib.request.urlopen, environ=os.environ) -> str:
+    return mint_full(repo, opener, environ)["token"]
 
 
 if __name__ == "__main__":

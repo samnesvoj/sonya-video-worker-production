@@ -23,7 +23,18 @@ def test_health_binds_loopback_only():
     assert '("127.0.0.1"' in src and "0.0.0.0" not in src
 
 
+def _dummy_models(tmp_path):
+    """Pre-place stand-in model files so the readiness test does not wait on (unreachable) S3 retries."""
+    import re
+    for cfg in ("virality",):
+        for lp in re.findall(r"local_path:\s*(\S+)", (ROOT / "modes" / cfg / "mode.yaml").read_text()):
+            f = tmp_path / "m" / lp
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(b"dummy")
+
+
 def _env(tmp_path, **extra):
+    _dummy_models(tmp_path)
     e = {k: v for k, v in os.environ.items() if not k.startswith(("S3_", "BACKEND_", "WORKER_", "ENABLED_"))}
     e.update(SONYA_SKIP_GPU_CHECK="1", SONYA_READY_FILE=str(tmp_path / "ready"), MODELS_LOCAL_DIR=str(tmp_path / "m"),
              BACKEND_API_URL="https://api.example", WORKER_SECRET="SECRET-VALUE-XYZ", S3_ENDPOINT_URL="http://127.0.0.1:9",

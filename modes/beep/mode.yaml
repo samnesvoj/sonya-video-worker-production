@@ -1,0 +1,25 @@
+name: beep
+version: "1.0"
+description: >
+  BEEP: ASR words -> profanity detection -> mute/beep/custom sound -> export. Needs only the ASR model.
+
+models:
+  whisper_base_config:
+    s3_path: models/whisper-base/config.json
+    local_path: whisper-base/config.json
+    optional: false
+  whisper_base_model:
+    s3_path: models/whisper-base/model.bin
+    local_path: whisper-base/model.bin
+    optional: false
+  whisper_base_tokenizer:
+    s3_path: models/whisper-base/tokenizer.json
+    local_path: whisper-base/tokenizer.json
+    optional: false
+  whisper_base_vocabulary:
+    s3_path: models/whisper-base/vocabulary.txt
+    local_path: whisper-base/vocabulary.txt
+    optional: false
+
+output:
+  format: mp4

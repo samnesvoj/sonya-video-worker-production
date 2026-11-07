@@ -19,11 +19,26 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin sonya \
  && mkdir -p /opt/sonya/releases /opt/sonya/models /work/tmp /run/sonya /opt/sonya-bootstrap \
  && chown -R sonya:sonya /opt/sonya /work /run/sonya
 
-# Hash-locked deps. torch 2.5.1+cu124 wheels bundle the CUDA runtime; the driver comes from the host (NVIDIA runtime).
+# Hash-locked deps in THREE layers (big + stable first): Docker/Vast download layers in parallel and reuse an unchanged big layer from the
+# host cache. requirements/split/*.lock.txt are generated from worker.lock.txt by tools/split_lock.py (CI checks they match).
 # The +cu124 wheels live on the PyTorch index, not on PyPI: the lock pins them (with hashes) but cannot carry the index URL.
+# Each RUN also removes build-time-only files (C/CUDA headers, static libs) IN THE SAME LAYER so the size really shrinks.
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
-COPY requirements/worker.lock.txt /opt/sonya-bootstrap/worker.lock.txt
-RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" -r /opt/sonya-bootstrap/worker.lock.txt
+# SPLIT_DIR / LOCK_FILE let CI build a CANDIDATE dependency set (e.g. a patched PyTorch) from the same Dockerfile; defaults = production.
+ARG SPLIT_DIR=requirements/split
+ARG LOCK_FILE=requirements/worker.lock.txt
+ENV SP=/usr/local/lib/python3.11/site-packages
+COPY ${SPLIT_DIR}/01-cuda-libs.lock.txt /tmp/req/01.txt
+RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" -r /tmp/req/01.txt \
+ && { find "$SP/nvidia" -type d -name include -prune -exec rm -rf {} + || true; } \
+ && { find "$SP/nvidia" -name '*.a' -delete || true; } && rm -rf /tmp/req/01.txt /root/.cache
+COPY ${SPLIT_DIR}/02-torch.lock.txt /tmp/req/02.txt
+RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" -r /tmp/req/02.txt \
+ && rm -rf "$SP/torch/include" "$SP/torch/share" /tmp/req/02.txt /root/.cache
+COPY ${SPLIT_DIR}/03-rest.lock.txt /tmp/req/03.txt
+RUN pip install --require-hashes --no-deps -r /tmp/req/03.txt && rm -rf /tmp/req/03.txt /root/.cache
+# The full lock (hash-checked by bootstrap against the release) stays as a tiny read-only file.
+COPY ${LOCK_FILE} /opt/sonya-bootstrap/worker.lock.txt
 
 COPY bootstrap/sonya_bootstrap.py bootstrap/healthd.py bootstrap/entrypoint.sh /opt/sonya-bootstrap/
 RUN chmod 0555 /opt/sonya-bootstrap/*.py /opt/sonya-bootstrap/entrypoint.sh && chmod 0444 /opt/sonya-bootstrap/worker.lock.txt

@@ -1,0 +1,266 @@
+{
+ "schema_version": 1,
+ "generated": "2026-11-07",
+ "scope": "first full GPU test: virality + beep",
+ "models_root_on_worker": "$MODELS_LOCAL_DIR (=/opt/sonya/models); S3 keys live in the MODELS_S3_BUCKET bucket",
+ "models": [
+  {
+   "key": "yolo11n",
+   "local_path": "common/yolo11n.pt",
+   "s3_path": "models/common/yolo11n.pt",
+   "used_by": [
+    "virality"
+   ],
+   "loaded_by": "scripts/shared/enhancers/sonya_enhancer.py (YOLO_COMMON_ENABLED, default on) -> scripts/shared/vision/yolo_common.py",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Ultralytics YOLO11n detection",
+    "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n.pt",
+    "license": "AGPL-3.0 (Ultralytics)"
+   },
+   "notes": "Stock weights if the Mac mini file hash equals public_sha256; if it differs, the Mac mini file is the reference (it produced the tested results).",
+   "public_sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+   "public_size": 5613764
+  },
+  {
+   "key": "yolo11n_pose",
+   "local_path": "common/yolo11n-pose.pt",
+   "s3_path": "models/common/yolo11n-pose.pt",
+   "used_by": [
+    "virality"
+   ],
+   "loaded_by": "scripts/shared/enhancers/sonya_enhancer.py (YOLO_POSE_ENABLED, default on) -> yolo_common.detect_pose",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Ultralytics YOLO11n-pose",
+    "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-pose.pt",
+    "license": "AGPL-3.0 (Ultralytics)"
+   },
+   "notes": "Same rule as yolo11n.",
+   "public_sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+   "public_size": 6255593
+  },
+  {
+   "key": "webcam_detector",
+   "local_path": "common/webcam_detector.pt",
+   "s3_path": "models/common/webcam_detector.pt",
+   "used_by": [
+    "virality"
+   ],
+   "loaded_by": "scripts/shared/enhancers/sonya_enhancer.py (WEBCAM_DETECTOR_ENABLED, default on) -> scripts/shared/vision/webcam_detector.py",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "private",
+    "name": "SONYA custom-trained webcam detector (YOLO)",
+    "url": null,
+    "license": "owner"
+   },
+   "notes": "NOT public: only the Mac mini copy exists. Size and hash are unknown until the Mac mini reports them. If this file is missing the enhancer only logs a warning and crop quality silently changes.",
+   "public_sha256": null,
+   "public_size": null
+  },
+  {
+   "key": "whisper_base_config",
+   "local_path": "whisper-base/config.json",
+   "s3_path": "models/whisper-base/config.json",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "loaded_by": "scripts/shared/transcription/transcriber.py::_load_faster_whisper (Transcriber default 'whisper-1' -> faster-whisper 'base')",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Systran/faster-whisper-base @ ebe41f70d5b6",
+    "url": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/config.json",
+    "license": "MIT"
+   },
+   "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
+   "public_sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
+   "public_size": 2309
+  },
+  {
+   "key": "whisper_base_model",
+   "local_path": "whisper-base/model.bin",
+   "s3_path": "models/whisper-base/model.bin",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "loaded_by": "scripts/shared/transcription/transcriber.py::_load_faster_whisper (Transcriber default 'whisper-1' -> faster-whisper 'base')",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Systran/faster-whisper-base @ ebe41f70d5b6",
+    "url": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/model.bin",
+    "license": "MIT"
+   },
+   "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
+   "public_sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+   "public_size": 145217532
+  },
+  {
+   "key": "whisper_base_tokenizer",
+   "local_path": "whisper-base/tokenizer.json",
+   "s3_path": "models/whisper-base/tokenizer.json",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "loaded_by": "scripts/shared/transcription/transcriber.py::_load_faster_whisper (Transcriber default 'whisper-1' -> faster-whisper 'base')",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Systran/faster-whisper-base @ ebe41f70d5b6",
+    "url": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/tokenizer.json",
+    "license": "MIT"
+   },
+   "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
+   "public_sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "public_size": 2203239
+  },
+  {
+   "key": "whisper_base_vocabulary",
+   "local_path": "whisper-base/vocabulary.txt",
+   "s3_path": "models/whisper-base/vocabulary.txt",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "loaded_by": "scripts/shared/transcription/transcriber.py::_load_faster_whisper (Transcriber default 'whisper-1' -> faster-whisper 'base')",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "Systran/faster-whisper-base @ ebe41f70d5b6",
+    "url": "https://huggingface.co/Systran/faster-whisper-base/resolve/ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66/vocabulary.txt",
+    "license": "MIT"
+   },
+   "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
+   "public_sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "public_size": 459861
+  }
+ ],
+ "alternatives_asr": {
+  "small": {
+   "repo": "Systran/faster-whisper-small",
+   "revision": "536b0662742c02347bc0e980a01041f333bce120",
+   "total_mb": 486.2,
+   "files": {
+    "config.json": {
+     "size": 2370,
+     "sha256": "b55496ac7940a7ae47d2c01eab40edfd8701feec1229d9cce3b40014383fb828"
+    },
+    "model.bin": {
+     "size": 483546902,
+     "sha256": "3e305921506d8872816023e4c273e75d2419fb89b24da97b4fe7bce14170d671"
+    },
+    "tokenizer.json": {
+     "size": 2203239,
+     "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+    },
+    "vocabulary.txt": {
+     "size": 459861,
+     "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+    }
+   },
+   "env": {
+    "SONYA_WHISPER_MODEL": "small"
+   },
+   "local_dir": "whisper-small"
+  },
+  "medium": {
+   "repo": "Systran/faster-whisper-medium",
+   "revision": "08e178d48790749d25932bbc082711ddcfdfbc4f",
+   "total_mb": 1530.6,
+   "files": {
+    "config.json": {
+     "size": 2257,
+     "sha256": "3622a2ddc41ec0e0fd4e68c13c6830f03b90c38d89aaad184de02c8c642cf807"
+    },
+    "model.bin": {
+     "size": 1527906378,
+     "sha256": "9b45e1009dcc4ab601eff815b61d80e60ce3fd8c74c1a14f4a282258286b51ae"
+    },
+    "tokenizer.json": {
+     "size": 2203239,
+     "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab"
+    },
+    "vocabulary.txt": {
+     "size": 459861,
+     "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913"
+    }
+   },
+   "env": {
+    "SONYA_WHISPER_MODEL": "medium"
+   },
+   "local_dir": "whisper-medium"
+  },
+  "large-v3": {
+   "repo": "Systran/faster-whisper-large-v3",
+   "revision": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+   "total_mb": 3090.8,
+   "files": {
+    "config.json": {
+     "size": 2394,
+     "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9"
+    },
+    "model.bin": {
+     "size": 3087284237,
+     "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1"
+    },
+    "preprocessor_config.json": {
+     "size": 340,
+     "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711"
+    },
+    "tokenizer.json": {
+     "size": 2480617,
+     "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+    },
+    "vocabulary.json": {
+     "size": 1068114,
+     "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1"
+    }
+   },
+   "env": {
+    "SONYA_WHISPER_MODEL": "large-v3"
+   },
+   "local_dir": "whisper-large-v3"
+  }
+ },
+ "not_s3_models": [
+  {
+   "name": "YuNet face detector (face_detection_yunet_2023mar.onnx)",
+   "where": "in the Git repo: scripts/shared/crop/models/ (232 KB)",
+   "note": "already in the release"
+  },
+  {
+   "name": "OpenCV Haar cascades",
+   "where": "inside the opencv wheel",
+   "note": "OpenCV must stay 4.x"
+  },
+  {
+   "name": "fonts, beep sounds, profanity lists",
+   "where": "in the Git repo (scripts/shared/fonts, beep_sounds.py synthesises sounds)",
+   "note": "no downloads"
+  }
+ ],
+ "excluded": [
+  "trailer_* models (Trailer disabled)",
+  "face_landmarker.task (only lip-sync/streamer; LIP_SYNC_DETECTION_ENABLED default off)",
+  "silero TTS (Trailer only)",
+  "GigaAM (Mac-only ASR path via word_timestamps_path; see notes)"
+ ],
+ "behaviour_flags_to_match_the_mac_mini_reference_run": {
+  "SONYA_ENHANCERS_ENABLED": "true (default)",
+  "YOLO_COMMON_ENABLED": "default true",
+  "YOLO_POSE_ENABLED": "default true",
+  "WEBCAM_DETECTOR_ENABLED": "default true",
+  "WORD_LEVEL_SUBTITLES_ENABLED": "default true (runs the ASR above)",
+  "LIP_SYNC_DETECTION_ENABLED": "default false",
+  "GEMINI_LAYOUT_ENABLED": "default TRUE but needs GEMINI_API_KEY on the GPU host; without a key it is skipped with a warning. Decide: off for the first test (no external secret on a rented host) unless the reference run used it",
+  "GEMINI_DIRECT_VIDEO_ENABLED": "default false",
+  "SONYA_ASR_OFFLINE": "set 1 once the ASR files are in S3 (forbids runtime HuggingFace downloads)"
+ }
+}

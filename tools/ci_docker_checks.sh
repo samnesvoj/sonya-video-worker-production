@@ -19,7 +19,11 @@ for m in ("mediapipe", "ultralytics", "faster_whisper", "ctranslate2", "scenedet
 print("imports ok")
 PY
 ok "dependencies import together (torch/numpy/opencv/mediapipe/ultralytics/faster-whisper)"
-pip check >/dev/null 2>&1 && ok "pip check clean" || { pip check || true; fail "pip check reported conflicts"; }
+if python3 -m pip --version >/dev/null 2>&1; then CHK="python3 -m pip check"; else CHK="uv pip check"; fi   # uv venvs have no pip
+# The nvidia/cuda variant deliberately omits the pip nvidia-* wheels (the base image provides those libraries), so torch's declared
+# "requires nvidia-..." is expected there; any OTHER unmet requirement is a real conflict.
+REAL="$($CHK 2>&1 | grep -iE 'requires|incompatib|conflict' | grep -viE 'requires `?(nvidia-[a-z0-9-]+-cu12|cuda-)|Found [0-9]+ incompatibilit' || true)"
+[ -z "$REAL" ] && ok "dependency check clean ($CHK; nvidia-* requirements ignored only when the CUDA libs come from the base image)" || { echo "$REAL"; fail "dependency check reported conflicts"; }
 command -v ffmpeg >/dev/null && ffmpeg -hide_banner -version | head -1
 
 # 2. image hygiene: non-root, no SONYA source, no secrets in the environment

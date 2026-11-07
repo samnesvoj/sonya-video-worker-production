@@ -6,7 +6,6 @@ Checks: env (names only logged), mode policy, ffmpeg (+NVENC if required), GPU/C
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
@@ -77,50 +76,54 @@ def check_gpu() -> List[str]:
     except (IndexError, ValueError):
         errs.append("cannot parse VRAM from nvidia-smi")
     try:
+        import time as _t
+
+        from scripts.ops import timeline
+
+        timeline.mark("cuda_init_start")
+        t0 = _t.time()
         import torch  # noqa: WPS433
         if not torch.cuda.is_available():
             errs.append("torch.cuda.is_available() is False")
         else:
-            _p(f"torch {torch.__version__} cuda={torch.version.cuda}")
+            x = torch.ones(1024, 1024, device="cuda") @ torch.ones(1024, 1024, device="cuda")   # real context + cuBLAS init
+            torch.cuda.synchronize()
+            assert float(x[0, 0]) == 1024.0
+            ms = int((_t.time() - t0) * 1000)
+            timeline.mark("cuda_init_done", ms=ms, gpu=torch.cuda.get_device_name(0))
+            _p(f"torch {torch.__version__} cuda={torch.version.cuda} context+matmul ok in {ms} ms")
     except ImportError:
         errs.append("torch is not installed")
+    except Exception as exc:  # noqa: BLE001
+        errs.append(f"CUDA smoke test failed ({type(exc).__name__})")
     return errs
 
 
-def _sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
 def check_models() -> List[str]:
-    import yaml  # noqa: WPS433
-    from scripts import model_downloader as md  # noqa: WPS433
+    """Parallel, SHA-256-verified fetch of every model the enabled modes need (scripts/ops/model_fetch.py)."""
+    from scripts.ops import model_fetch, timeline
 
     lp = ROOT / "release" / "models.lock.json"
-    pins = (json.loads(lp.read_text()) if lp.is_file() else {}).get("models", {})
+    lock = json.loads(lp.read_text()) if lp.is_file() else {}
     errs: List[str] = []
-    if os.environ.get("SONYA_REQUIRE_MODEL_LOCK") == "1" and not pins:
-        errs.append("release/models.lock.json has no pinned models (SONYA_REQUIRE_MODEL_LOCK=1)")
-    for mode in enabled_modes():
-        cfg = ROOT / "modes" / mode / "mode.yaml"
-        if not cfg.is_file():
-            continue
-        try:
-            if not md.download_models_for_mode(cfg):
-                errs.append(f"{mode}: required models unavailable")
-        except Exception as exc:  # noqa: BLE001
-            errs.append(f"{mode}: model download failed ({type(exc).__name__})")
-            continue
-        for key, s in ((yaml.safe_load(cfg.read_text()) or {}).get("models") or {}).items():
-            local = md._resolve_local_path(s.get("local_path"), key)  # noqa: SLF001
-            if not s.get("optional", True) and not local.exists():
-                errs.append(f"{mode}: required model missing: {key}")
-            pin = pins.get(key)
-            if pin and local.exists() and _sha256(local) != pin["sha256"]:
-                errs.append(f"{mode}: model {key} sha256 mismatch")
+    if os.environ.get("SONYA_REQUIRE_MODEL_LOCK") == "1" and not lock.get("models"):
+        return ["release/models.lock.json has no pinned models (SONYA_REQUIRE_MODEL_LOCK=1)"]
+    models_dir = Path(os.environ.get("MODELS_LOCAL_DIR", "/opt/sonya/models"))
+    items = model_fetch.plan(ROOT, enabled_modes(), models_dir, lock)
+    timeline.mark("models_start", count=len(items))
+    try:
+        results = model_fetch.fetch_all(items)
+    except Exception as exc:  # noqa: BLE001
+        timeline.mark("models_failed")
+        return [f"model fetch failed ({type(exc).__name__}: {str(exc)[:200]})"]
+    total = sum(r.bytes for r in results)
+    timeline.mark("models_done", bytes_downloaded=total, models=len(results), statuses={s: sum(1 for r in results if r.status == s) for s in {r.status for r in results}})
+    for r in results:
+        _p(f"model {r.key}: {r.status} {r.bytes} B {r.seconds:.1f}s")
+    if os.environ.get("SONYA_REQUIRE_MODEL_LOCK") == "1":
+        errs += [f"model {r.key} is not pinned/verified (status {r.status})" for r in results if r.status == "unverified"]
+    if os.environ.get("SONYA_REQUIRE_ALL_MODELS") == "1":      # GPU test / reference runs: an optional model that is absent would silently change output
+        errs += [f"model {r.key} is missing (SONYA_REQUIRE_ALL_MODELS=1)" for r in results if r.status == "skipped_optional"]
     return errs
 
 
@@ -139,6 +142,11 @@ def main() -> int:
         return 1
     ready.parent.mkdir(parents=True, exist_ok=True)
     ready.write_text("ready\n")
+    try:
+        from scripts.ops import timeline
+        timeline.mark("readiness_ok")
+    except Exception:  # noqa: BLE001
+        pass
     _p("worker READY")
     return 0
 

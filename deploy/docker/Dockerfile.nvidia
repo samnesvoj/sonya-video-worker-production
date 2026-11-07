@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1.7
+# EXPERIMENT (not the default image): same worker environment on top of the official nvidia/cuda runtime image.
+# Hypothesis (Vast docs + vast-ai/base-image README): Vast hosts cache popular base layers such as nvidia/cuda, so a pull only has to fetch
+# the layers ABOVE it. Here the CUDA/cuDNN/cuBLAS libraries come from that (possibly host-cached) base instead of ~3 GB of pip nvidia-*
+# wheels, which are therefore NOT installed (01-cuda-libs is skipped). Unproven until measured on real hosts (see FAST_START_REPORT.md).
+# Differences vs the default image that need a quality check: Ubuntu 22.04 ffmpeg 4.4 (default image: Debian bookworm ffmpeg 5.1),
+# Python 3.11 from astral python-build-standalone installed with uv (Ubuntu 22.04 ships 3.10).
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:2fcc4280646484290cc50dce5e65f388dd04352b07cbe89a635703bd1f9aedb6
+
+ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends ffmpeg git ca-certificates curl libglib2.0-0 libgomp1 libgl1 tini cuda-cupti-12-4 \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin sonya \
+ && mkdir -p /opt/sonya/releases /opt/sonya/models /work/tmp /run/sonya /opt/sonya-bootstrap /opt/py \
+ && chown -R sonya:sonya /opt/sonya /work /run/sonya
+# UV_NO_CACHE: without it the uv wheel cache is baked into the layer (first CI run: a 4.7 GB torch layer)
+ENV UV_PYTHON_INSTALL_DIR=/opt/py UV_LINK_MODE=copy UV_NO_CACHE=1
+RUN uv venv --python 3.11 /opt/venv && chmod -R a+rX /opt/py /opt/venv
+ENV PATH=/opt/venv/bin:$PATH VIRTUAL_ENV=/opt/venv SP=/opt/venv/lib/python3.11/site-packages
+
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+COPY requirements/split/02-torch.lock.txt /tmp/req/02.txt
+RUN uv pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" --index-strategy unsafe-best-match -r /tmp/req/02.txt \
+ && rm -rf "$SP/torch/include" "$SP/torch/share" /tmp/req/02.txt
+COPY requirements/split/03-rest.lock.txt /tmp/req/03.txt
+RUN uv pip install --require-hashes --no-deps -r /tmp/req/03.txt && rm -rf /tmp/req/03.txt
+COPY requirements/worker.lock.txt /opt/sonya-bootstrap/worker.lock.txt
+COPY bootstrap/sonya_bootstrap.py bootstrap/healthd.py bootstrap/entrypoint.sh /opt/sonya-bootstrap/
+RUN chmod 0555 /opt/sonya-bootstrap/*.py /opt/sonya-bootstrap/entrypoint.sh && chmod 0444 /opt/sonya-bootstrap/worker.lock.txt
+
+ARG BASE_LOCK_SHA256
+ARG IMAGE_VERSION=dev
+ENV SONYA_BASE_LOCK_SHA256=${BASE_LOCK_SHA256} SONYA_IMAGE_VERSION=${IMAGE_VERSION} \
+    APP_ENV=production WORKER_BACKEND_MODE=api MODELS_LOCAL_DIR=/opt/sonya/models SONYA_STATE_DIR=/run/sonya
+USER sonya
+WORKDIR /opt/sonya
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=3 CMD curl -fsS http://127.0.0.1:8099/healthz >/dev/null || exit 1
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/opt/sonya-bootstrap/entrypoint.sh"]
