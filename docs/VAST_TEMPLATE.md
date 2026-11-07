@@ -11,3 +11,6 @@
 Template env (not secret): `SONYA_RELEASE_SHA=<40-hex>` · `SONYA_RELEASE_REPO=samnesvoj/sonya-video-worker-production` · `WORKER_BACKEND_MODE=api` · `SONYA_MIN_VRAM_MB=20000` · `SONYA_REQUIRE_MODEL_LOCK=1` · `SONYA_REQUIRE_NVENC=1` (after GPU check) · `ENABLED_MODES` empty (= `virality,beep`).
 Per-instance env added by the dispatcher (secret, never in the Template): `GITHUB_RELEASE_TOKEN` (minted per instance) · `WORKER_SECRET` · `BACKEND_API_URL` · `S3_*` · `MODELS_S3_BUCKET`.
 Update = change `SONYA_RELEASE_SHA` (and the image digest if dependencies changed): only NEW instances pick it up.
+
+## Pool lifecycle (dispatcher-managed)
+The dispatcher (not the Template) creates instances with label `sonya-pool-xxxxxxxx` and passes `WORKER_ID=<label>`, `ENABLED_MODES=virality,beep`, the pinned `SONYA_RELEASE_SHA`, a per-instance GitHub token, and the worker secrets. Image and SHA are validated before every create (digest-pinned image, 40-hex SHA). A stopped instance is only resumed if its release SHA equals the pinned one; resume does not need the (expired) token because the verified release is cached on disk. See `docs/FLEET_IDLE_STOP.md`.

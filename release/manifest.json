@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "sonya-video-worker-production",
-  "version": "0.1.0-rc1",
+  "version": "0.2.0-rc1",
   "source": {
     "archive": "sonya-vast-handoff-6992288",
     "archive_commit": "6992288",

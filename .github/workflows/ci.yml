@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: |
-          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect
+          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography
           pip install --no-deps opencv-python==4.14.0.94 opencv-contrib-python==4.14.0.94 opencv-python-headless==4.14.0.94
       - run: python -m pytest -q
       - run: python tools/update_release_manifest.py --check
@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v2   # picks up .gitleaks.toml (one narrow, documented allowlist)
         env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
   audit-deps:
     runs-on: ubuntu-24.04
@@ -31,6 +31,8 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip
+      - name: OSV for torch/torchvision (pip-audit cannot see +cuXXX wheels); new advisories fail unless accepted in writing
+        run: python tools/osv_check.py requirements/worker.lock.txt
   docker-build:
     runs-on: ubuntu-24.04
     steps:
