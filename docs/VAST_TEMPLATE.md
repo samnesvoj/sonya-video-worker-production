@@ -14,3 +14,6 @@ Update = change `SONYA_RELEASE_SHA` (and the image digest if dependencies change
 
 ## Pool lifecycle (dispatcher-managed)
 The dispatcher (not the Template) creates instances with label `sonya-pool-xxxxxxxx` and passes `WORKER_ID=<label>`, `ENABLED_MODES=virality,beep`, the pinned `SONYA_RELEASE_SHA`, a per-instance GitHub token, and the worker secrets. Image and SHA are validated before every create (digest-pinned image, 40-hex SHA). A stopped instance is only resumed if its release SHA equals the pinned one; resume does not need the (expired) token because the verified release is cached on disk. See `docs/FLEET_IDLE_STOP.md`.
+
+## Rendering the Template (nothing is created automatically)
+`python tools/render_vast_template.py --image ghcr.io/samnesvoj/sonya-video-worker-production-base@sha256:<digest> --sha <40-hex>` prints the Template JSON and the exact `vastai create template …` line (digest-pinned image, pinned SHA, **no secrets**, no ports, `ENABLED_MODES=virality,beep`). It cannot be run until the base image is published (`publish-base-image`, manual) - the digest does not exist yet. The dispatcher creates instances from image + env directly and does not depend on a Template; the Template is the manual/backup path.

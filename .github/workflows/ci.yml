@@ -15,7 +15,9 @@ jobs:
       - run: |
           pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography
           pip install --no-deps opencv-python==4.14.0.94 opencv-contrib-python==4.14.0.94 opencv-python-headless==4.14.0.94
-      - run: python -m pytest -q
+      - name: ffmpeg (with libass) so the video-processing tests run instead of being skipped
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - run: python -m pytest -q -rs
       - run: python tools/update_release_manifest.py --check
   secrets-scan:
     runs-on: ubuntu-24.04

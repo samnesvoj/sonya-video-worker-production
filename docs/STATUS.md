@@ -1,20 +1,17 @@
-# Статус (2026-11-07, ветка `feat/idle-stop-and-cost-accounting`)
+# Статус (2026-11-07, ветка `feat/idle-stop-and-cost-accounting`, PR #1)
 
-## Готово и проверено локально (CPU, Apple Silicon, без Docker/GPU/Vast)
-- Воркер: Trailer запрещён в коде; режимы по умолчанию `virality`,`beep`; SIGTERM-requeue; pinned-SHA bootstrap; readiness; loopback health (см. прежние пункты).
-- **Dispatcher/Fleet:** автоостановка через `IDLE_TIMEOUT_SECONDS=60`, fenced stop, RESUME/CREATE/DESTROY, ограничители расходов, чужие инстансы не трогаются — 29 тестов с поддельным Vast.
-- **Учёт:** Decimal-журнал, курс ЦБ РФ, подтверждённое/рассчитанное/оценка раздельно, сверка с дельта-корректировками, отчёты 00:05 / 1-е 00:10 МСК с догонкой пропусков, outbox + подписанный API — 22 теста.
-- **Бот:** модуль + патч для существующего бота (применяется чисто; 134 теста бота зелёные до/после); интеграция проверена в процессе с поддельным Telegram (повторы, потерянный ack, частичная доставка).
-- **Dispatcher-патч** для production-`gpu_dispatcher.py`/`prod_job_store.py` (применяется чисто к `bd8c968`; тесты production без регрессий).
-- Тесты репозитория: `pytest -q` — всё зелёное (число в итоговом отчёте). Gitleaks локально чисто. `pip-audit` чисто; OSV по torch — см. SECURITY_AUDIT.
+## GitHub Actions (на реальном GitHub, не локально) — зелёные
+| Проверка | Что именно проверено |
+|---|---|
+| `test` | pytest (фактическое число — в итоговом отчёте), включая тесты bootstrap, автоостановки 60 с, бухгалтерии и интеграции с ботом; ffmpeg установлен, видео-тесты не пропускаются |
+| `secrets-scan` | gitleaks 8.30.1 (закреплённый бинарник с проверкой sha256) по **всей истории** и по рабочему дереву |
+| `audit-deps` | `pip-audit` по lock-файлу с хешами + `tools/osv_check.py` (OSV для torch/torchvision; новый advisory ломает сборку) |
+| `docker-build` | сборка образа linux/amd64 (7,5 ГБ) и **внутриобразные проверки**: импорт torch 2.5.1+cu124 / numpy 2.4.6 / OpenCV 4.14 / mediapipe / ultralytics / faster-whisper, `pip check`, не-root, нет EXPOSE, нет исходников SONYA и секретов, bootstrap скачивает строго закреплённый SHA из приватного репозитория, ветка/неизвестный SHA/отсутствие токена отвергаются, Trailer отвергается, readiness не открывается без окружения, health 503→200 |
 
-## Только симуляция
-`tools/simulate.py` (поддельный Vast, синтетические данные) — примеры отчётов в `docs/SAMPLE_REPORTS.md`.
-
-## НЕ проверено / требует внешних действий
-- **GitHub CI после исправлений** (первый запуск был красным; push не делался).
-- Сборка Docker-образа и установка lock (нужен Docker/CI), совместимость torch/numpy 2.x/mediapipe.
-- Реальный Vast: формат ответов `PUT /asks`, `GET /api/v1/instances/`, `/api/v0/charges/` (нет ключа Vast на этом Mac), поведение SIGTERM при stop, время RESUME/CREATE, ставка диска остановленного.
-- GPU: качество и время `virality`/`beep`, размер моделей, NVENC.
-- GitHub App, `release/models.lock.json` (пуст → readiness с `SONYA_REQUIRE_MODEL_LOCK=1` не даст воркеру стартовать), права/секреты на VPS, подключение API-роутера бухгалтерии, включение патчей.
+## Не проверено (честно)
+- GPU: CUDA/NVENC/VRAM/время, качество режимов. Реальный Vast API (форматы ответов), `/api/v0/charges/`.
+- `torch.cuda` в образе без GPU не проверялась; совместимость с драйвером хоста — на GPU-тесте.
+- GitHub App не создан; `release/models.lock.json` **пуст** (на MacBook нет моделей и доступа к S3; фиктивные значения не подставлялись) — с `SONYA_REQUIRE_MODEL_LOCK=1` воркер не стартует, пока файл не заполнен.
+- Защита `main`/тегов недоступна на бесплатном приватном репозитории (нужен Pro) — см. `docs/dev/PROTECTION.md`.
+- Mac mini не подключался (работа велась на MacBook): скрипты и инструкции готовы, токен создаёте вы.
 - Остальные режимы (`stories`,`educational`,`streamer`,`sonya_gen`) выключены до подтверждения.

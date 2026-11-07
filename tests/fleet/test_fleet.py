@@ -297,3 +297,112 @@ def test_offer_choice_ranks_by_full_cost_including_disk():
     assert launcher.pick_offer([cheap_gpu_dear_disk], cfg, {1}) is None
     over = {**cheap_gpu_dear_disk, "dph_total": 0.99}
     assert launcher.pick_offer([over], cfg, set()) is None
+
+
+# ---------------------------------------------------------------- hardening: concurrency, hangs, network faults
+def test_concurrent_jobs_single_instance_no_stop_until_last_done_plus_60s():
+    mgr, vast, queue, store, clock = make()
+    for i in range(3):
+        queue.add(f"j{i}", ts=clock())
+    mgr.tick(); clock.advance(1); mgr.tick()
+    (iid,) = vast.inst
+    label = vast.inst[iid]["label"]
+    done = []
+    for j in ("j0", "j1", "j2"):
+        queue.set(j, "mode_running", label, clock())
+        clock.advance(300); mgr.tick()
+        assert vast.n("stop") == 0                       # others still queued / this one active
+        queue.set(j, "completed", label, clock())
+        done.append(clock())
+        clock.advance(20); mgr.tick()
+        if j != "j2":
+            assert vast.n("stop") == 0
+    clock.advance(45); mgr.tick()                        # 65 s after the last completion
+    assert vast.n("stop") == 1 and vast.n("create") == 1
+
+
+def test_two_dispatcher_processes_on_same_state_stop_once():
+    mgr, vast, queue, store, clock = make()
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61)
+    from dispatcher.fleet import FleetManager
+    other = FleetManager(mgr.cfg, store, vast, queue, lambda: GH_TOKEN, ENV, clock)
+    mgr.tick(); other.tick(); mgr.tick(); other.tick()
+    assert vast.n("stop") == 1
+
+
+def test_hung_worker_idle_while_jobs_wait_is_replaced_but_active_jobs_are_never_killed():
+    mgr, vast, queue, store, clock = make()
+    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.25, "dph_base": 0.25})   # the stalled host gets banned
+    iid, label = boot_one(mgr, vast, queue, clock)         # j1 queued, worker never claims it
+    clock.advance(600 + 400)                               # boot grace + part of stall window
+    mgr.tick()
+    assert vast.n("destroy") == 0
+    clock.advance(600)                                     # > grace + stall_seconds(900)
+    mgr.tick()
+    assert vast.n("destroy") == 1 and any(e["event"] == "worker_stalled" for e in store.events(iid))
+    mgr.tick(); mgr.tick()
+    assert vast.n("create") == 2                           # replacement created (the waiting job is not lost)
+
+    mgr2, vast2, queue2, store2, clock2 = make()
+    iid2, label2 = boot_one(mgr2, vast2, queue2, clock2)
+    queue2.set("j1", "mode_running", label2, clock2())     # actively running, possibly for hours
+    queue2.add("j2", ts=clock2())                          # and another job waits
+    for _ in range(40):
+        clock2.advance(600); mgr2.tick()                   # ~6.7 hours
+    assert vast2.n("destroy") == 0 and vast2.n("stop") == 0
+
+
+def test_vast_outage_aborts_tick_without_any_action_or_state_change():
+    mgr, vast, queue, store, clock = make()
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61)
+    before = (store.get(iid).state, len(vast.calls))
+    from dispatcher.vast_api import VastError
+    def down():
+        raise VastError("network", retryable=True)
+    vast.list_instances = down
+    with pytest.raises(VastError):
+        mgr.tick()
+    assert (store.get(iid).state, len(vast.calls)) == before
+
+
+def test_database_outage_never_causes_a_stop():
+    mgr, vast, queue, store, clock = make()
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61)
+    def db_down(modes, prefix):
+        raise RuntimeError("db unreachable")
+    queue.snapshot = db_down
+    for _ in range(3):
+        with pytest.raises(RuntimeError):
+            mgr.tick()
+    assert vast.n("stop") == 0 and store.get(iid).state == "running"
+
+
+def test_db_failure_during_the_fenced_recheck_leaves_stop_pending_and_never_stops():
+    mgr, vast, queue, store, clock = make()
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61)
+    real, calls = queue.snapshot, {"n": 0}
+    def flaky(modes, prefix):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("db blip")
+        return real(modes, prefix)
+    queue.snapshot = flaky
+    with pytest.raises(RuntimeError):
+        mgr.tick()
+    assert vast.n("stop") == 0 and store.get(iid).state == "stop_pending"
+    mgr.tick()                                               # recovers: re-validates, then stops
+    assert vast.n("stop") == 1
+
+
+def test_config_stall_bounds():
+    assert FleetConfig.from_env({}).stall_seconds == 900
+    with pytest.raises(ValueError):
+        FleetConfig.from_env({"SONYA_STALL_SECONDS": "10"})

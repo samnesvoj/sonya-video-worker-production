@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Local guard (NOT a security boundary): refuse accidental pushes of main and of release tags from a development station.
+# Releases are cut only by the release workflow / the owner. Bypass deliberately: SONYA_ALLOW_PROTECTED_PUSH=1 git push ...
+[[ "${SONYA_ALLOW_PROTECTED_PUSH:-}" == "1" ]] && exit 0
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master) echo "pre-push: direct pushes to main are blocked - push a branch and open a Pull Request." >&2; exit 1 ;;
+    refs/tags/worker-v*)               echo "pre-push: release tags (worker-v*) are created by the release workflow only." >&2; exit 1 ;;
+  esac
+done
+exit 0

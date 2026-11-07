@@ -135,6 +135,17 @@ class FleetManager:
         if busy:
             self.store.touch(inst.id, last_work_at=now)
             return
+        if snap.pending > 0 and snap.active_unassigned == 0:
+            # Jobs are waiting and this worker holds none. Normally it claims one within a poll interval. If it has been up
+            # and idle for stall_seconds it is hung / unreachable / misconfigured: replace it (it has NO active job, so no
+            # work is lost). Active jobs are never interrupted by this rule.
+            since = max(terminal or 0.0, inst.last_work_at or 0.0, (inst.running_since or now) + self.cfg.boot_grace_seconds)
+            if now - since > self.cfg.stall_seconds:
+                self.store.event(now, inst.id, "worker_stalled", pending=snap.pending, idle_s=int(now - since))
+                if inst.machine_id:
+                    self.store.ban_machine(inst.machine_id, now + 3600, "worker_stalled")
+                self._destroy(inst, now, actions, reason="worker_stalled")
+            return
         if snap.pending > 0 or snap.active_unassigned > 0:
             return                                  # work is coming / cannot prove it is safe
         worked = bool(terminal or inst.last_work_at)
