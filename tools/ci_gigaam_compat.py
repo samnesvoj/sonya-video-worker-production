@@ -106,9 +106,11 @@ def encoder():
 def no_download_when_files_exist():
     src = open(os.path.join(SRC, "gigaam", "__init__.py")).read()
     m = re.search(r"def _download_file\(.*?\n(.*?)\n\ndef ", src, re.S)
-    body = m.group(1) if m else src
-    assert "os.path.exists" in body and "hash" in body.lower(), "cannot see the cached-file short-circuit in _download_file"
-    return "_download_file short-circuits on an existing file with a matching hash (read from source)"
+    body = m.group(1) if m else ""
+    first = re.search(r"if os\.path\.exists\(file_path\):\s*return file_path", body)
+    assert first and body.index("urllib.request.urlopen") > first.start(), "cannot see the existing-file short-circuit BEFORE any network call"
+    assert "download_root" in inspect.getsource(__import__("gigaam").load_model)
+    return "existing file => returned before any network call (note: NO integrity check there - our SHA-256 does that)"
 
 
 for n, f in (("matched torch/torchvision/torchaudio build", versions), ("torchaudio compiled ops run", compiled_ops), ("clone upstream at pinned commit", clone_pinned),

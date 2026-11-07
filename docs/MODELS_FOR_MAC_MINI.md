@@ -1,5 +1,7 @@
 # Модели для первого полноценного GPU-теста (virality + beep) — список для Mac mini
 
+> **Обновление 2026-11-08:** по решению владельца основная ASR — **GigaAM v3 `v3_e2e_rnnt`**, faster-whisper base — только запасной путь (`optional`). Добавлены ключи `gigaam_v3_e2e_rnnt_ckpt` (`gigaam/v3_e2e_rnnt.ckpt`, 448 929 252 Б, upstream MD5 `2730de75…`) и `gigaam_v3_e2e_rnnt_tokenizer` (255 336 Б). Их SHA-256 в манифесте нет намеренно: CDN upstream с истёкшим сертификатом, проверить файл по защищённому каналу нельзя — **авторитетный SHA-256 даёт `scan` на Mac mini**. Вопрос про ASR закрыт; остальные вопросы ниже в силе. Интерфейс бэкенда: `docs/ASR_INTERFACE.md`.
+
 Источник правды: `release/models.required.json` (проверяется тестом на совпадение с `modes/*/mode.yaml`). Все пути — относительно `$MODELS_LOCAL_DIR` (на воркере `/opt/sonya/models`); ключи S3 — `models/<путь>` в бакете `MODELS_S3_BUCKET`.
 
 ## Что нужно (7 файлов, из них публично известны 6)
