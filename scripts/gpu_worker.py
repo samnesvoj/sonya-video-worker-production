@@ -131,6 +131,41 @@ def _on_sigterm(signum, _frame) -> None:
     raise SystemExit(143)
 
 
+_FIRST_JOB = {"claimed": False, "processing": False}
+
+
+def _timeline(name: str, **kw) -> None:
+    try:
+        from scripts.ops import timeline
+        timeline.mark(name, **kw)
+        if name == "first_job_processing":
+            timeline.upload_async()
+    except Exception:  # noqa: BLE001 - metrics never affect jobs
+        pass
+
+
+def _prewarm(modes) -> None:
+    """Pay the one-off import / CUDA-context cost BEFORE the first user job (production path only). Never fatal."""
+    t0 = time.monotonic()
+    try:
+        import cv2  # noqa: F401
+        import numpy  # noqa: F401
+        for m in modes:
+            try:
+                get_runner(m)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[worker] prewarm: mode %s not importable (%s)", m, type(exc).__name__)
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.zeros(1, device="cuda")
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[worker] prewarm skipped: %s", type(exc).__name__)
+    _timeline("prewarm_done", seconds=round(time.monotonic() - t0, 2))
+
+
 def _worker_id() -> str:
     return os.environ.get("WORKER_ID") or f"{socket.gethostname()}-{os.getpid()}"
 
@@ -541,6 +576,9 @@ def process_job(job: dict, worker_id: str) -> None:
     t_start = time.monotonic()
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"sonya_{job_id}_"))
     _ACTIVE_JOB["id"] = job_id
+    if not _FIRST_JOB["claimed"]:
+        _FIRST_JOB["claimed"] = True
+        _timeline("first_job_claimed", mode=mode)
 
     try:
         # ── 1. Download input ─────────────────────────────────────────────────
@@ -571,6 +609,9 @@ def process_job(job: dict, worker_id: str) -> None:
 
         # ── 3. Run mode ───────────────────────────────────────────────────────
         _update_status(job_id, JOB_STATUS_MODE_RUNNING)
+        if not _FIRST_JOB["processing"]:
+            _FIRST_JOB["processing"] = True
+            _timeline("first_job_processing")
         output_dir = tmp_dir / "output"
         output_dir.mkdir()
 
@@ -756,6 +797,9 @@ def run_poll(worker_id: str, modes: Optional[List[str]] = None) -> None:
     modes = [m for m in (modes or allowed) if m in allowed]
     if not modes:
         raise SystemExit("[worker] no runnable modes after applying mode policy")
+
+    if os.environ.get("SONYA_REQUIRE_READY", "") == "1" and os.environ.get("SONYA_PREWARM", "1") == "1":
+        _prewarm(modes)
 
     # Readiness gate: never claim a real job before bootstrap+readiness wrote the ready file.
     ready_file = os.environ.get("SONYA_READY_FILE", "")

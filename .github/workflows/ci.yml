@@ -13,12 +13,16 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: |
-          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography
+          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography 'moto[s3]'
           pip install --no-deps opencv-python==4.14.0.94 opencv-contrib-python==4.14.0.94 opencv-python-headless==4.14.0.94
       - name: ffmpeg (with libass) so the video-processing tests run instead of being skipped
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: python -m pytest -q -rs
       - run: python tools/update_release_manifest.py --check
+      - name: Layer split files match the lock
+        run: python tools/split_lock.py --check
+      - name: Model fetcher benchmark (loopback S3, correctness + hashing headroom; NOT an internet measurement)
+        run: pip install -q 'moto[server]' && python tools/model_fetch_bench.py --files 4 --mb 96
   secrets-scan:
     runs-on: ubuntu-24.04
     steps:
@@ -66,6 +70,19 @@ jobs:
           build-args: |
             BASE_LOCK_SHA256=${{ steps.lock.outputs.sha }}
             IMAGE_VERSION=${{ github.sha }}
+      - name: Image report (measured layers, compressed vs uncompressed, package sizes, import times)
+        run: |
+          mkdir -p report
+          docker save sonya-video-worker-base:ci -o img.tar
+          { echo "## default image (layers split, headers stripped)"; python3 tools/image_report.py img.tar; } | tee report/image-report.md
+          rm -f img.tar
+          { echo; echo "### Largest site-packages entries (MB)";
+            docker run --rm --entrypoint bash sonya-video-worker-base:ci -c 'cd /usr/local/lib/python3.11/site-packages && du -sm * 2>/dev/null | sort -rn | head -22 | sed "s/^/- /"; echo; echo "nvidia libs (MB):"; du -sm nvidia/* 2>/dev/null | sort -rn | head -14 | sed "s/^/- /"';
+            echo; echo "### Import times inside the image (CPU, warm cache = lower bound)";
+            docker run --rm -v "$PWD/tools/image_timing.py:/tmp/image_timing.py:ro" --entrypoint python3 sonya-video-worker-base:ci /tmp/image_timing.py; } | tee -a report/image-report.md
+          cat report/image-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with: { name: image-report-default, path: report/ }
       - name: Image metadata (no EXPOSE, non-root, entrypoint, healthcheck)
         run: |
           docker image inspect sonya-video-worker-base:ci --format 'user={{.Config.User}} exposed={{json .Config.ExposedPorts}} entrypoint={{json .Config.Entrypoint}} health={{json .Config.Healthcheck}}' | tee meta.txt
@@ -85,3 +102,50 @@ jobs:
             -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash \
             sonya-video-worker-base:ci /tmp/ci_docker_checks.sh
+
+  image-variant-nvidia:
+    # EXPERIMENT, not a gate: does the worker run on top of nvidia/cuda (host-cacheable base) without the pip nvidia-* wheels?
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: docker/setup-buildx-action@v3
+      - id: lock
+        run: echo "sha=$(sha256sum requirements/worker.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.nvidia
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: sonya-video-worker-nvidia:ci
+          build-args: |
+            BASE_LOCK_SHA256=${{ steps.lock.outputs.sha }}
+            IMAGE_VERSION=${{ github.sha }}
+      - name: Do the CUDA libraries from the base image satisfy torch / ctranslate2 ? (CPU-verifiable linkage checks)
+        run: |
+          mkdir -p report
+          docker run --rm --entrypoint bash sonya-video-worker-nvidia:ci -c '
+            SP=/opt/venv/lib/python3.11/site-packages
+            echo "ldd torch/lib/libtorch_cuda.so -> unresolved:"; ldd $SP/torch/lib/libtorch_cuda.so | grep "not found" || echo "(none)"
+            echo "ldd ctranslate2 -> unresolved:"; for f in $(ls $SP/ctranslate2*/*.so* $SP/ctranslate2/*.so* 2>/dev/null | head -5); do ldd $f | grep "not found"; done || true; echo "(done)"
+            python -c "import torch;print(\"torch\", torch.__version__, \"cuda-build\", torch.version.cuda, \"cudnn\", torch.backends.cudnn.version())"
+            ls $SP | grep -c "^nvidia" | sed "s/^/pip nvidia dirs: /"
+            ffmpeg -version | head -1' 2>&1 | tee report/linkage.txt
+      - name: Same in-image checks as the default image (bootstrap by pinned SHA, Trailer lock, readiness, health, imports)
+        env:
+          PINNED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          docker run --rm -e SONYA_RELEASE_SHA="$PINNED_SHA" -e SONYA_RELEASE_REPO="${{ github.repository }}" -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
+            -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash sonya-video-worker-nvidia:ci /tmp/ci_docker_checks.sh 2>&1 | tee report/checks.txt
+      - name: Image report
+        run: |
+          docker save sonya-video-worker-nvidia:ci -o img.tar
+          { echo "## nvidia/cuda-based variant"; python3 tools/image_report.py img.tar; echo; echo '```'; cat report/linkage.txt; echo '```'; } | tee report/image-report.md
+          cat report/image-report.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: image-report-nvidia, path: report/ }

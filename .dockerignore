@@ -1,5 +1,6 @@
 *
 !requirements/worker.lock.txt
+!requirements/split/*.lock.txt
 !bootstrap/sonya_bootstrap.py
 !bootstrap/healthd.py
 !bootstrap/entrypoint.sh

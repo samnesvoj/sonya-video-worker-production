@@ -22,15 +22,21 @@ wipe() { find "${TMPDIR}" -mindepth 1 -maxdepth 1 -name 'sonya_*' -exec rm -rf {
 wipe   # never keep user video from a crashed previous run
 
 cd "${REL}"
+export SONYA_TIMELINE_FILE="${SONYA_TIMELINE_FILE:-${STATE_DIR}/timeline.jsonl}"
+mark() { python3 -m scripts.ops.timeline mark "$1" || true; }
+mark run_worker_start
 log "preflight (release $(python3 -c 'import json;print(json.load(open("release/manifest.json"))["version"])'))"
 python3 scripts/prod_preflight_check.py --role worker >/dev/null || { log "preflight failed"; exit 3; }
-python3 -m scripts.ops.readiness || { log "readiness failed - worker NOT started"; exit 4; }
+mark preflight_done
+python3 -m scripts.ops.readiness || { log "readiness failed - worker NOT started"; python3 -m scripts.ops.timeline upload || true; exit 4; }
 
 python3 "${BOOT}/healthd.py" &
 HEALTH_PID=$!
 python3 scripts/gpu_worker.py --poll --worker-id "${WORKER_ID}" &
 WORKER_PID=$!
 echo "${WORKER_PID}" > "${SONYA_WORKER_PID_FILE}"
+mark worker_started
+(python3 -m scripts.ops.timeline upload || true) &   # best-effort: lets the central dispatcher see the start-up breakdown
 log "worker pid=${WORKER_PID}; health on 127.0.0.1:${SONYA_HEALTH_PORT:-8099}"
 
 _term() {
