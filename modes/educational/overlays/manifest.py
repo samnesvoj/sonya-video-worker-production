@@ -30,6 +30,8 @@ MIN_CONFIDENCE = 0.6
 MIN_ASR_PROBABILITY = 0.45        # the speech recogniser itself was unsure → a person has to look
 MAX_TEXT = {"title": 60, "label": 44, "body": 120, "term": 40, "definition": 110, "unit": 16, "source": 60, "caption": 64}
 MIN_MS, MAX_MS = 2200, 12000
+MAX_PROGRESSIVE_MS = 18000        # a diagram/chart that grows with the speech may stay longer than a static card
+LAST_REVEAL_HOLD_MS = 3000        # the last step/point of a diagram or chart stays readable, not only in the fade-out
 
 
 def reading_ms(chars: int) -> int:
@@ -79,12 +81,18 @@ def _locate(item: Dict[str, Any], quote: str, ctx: _Ctx) -> Optional[ev.QuoteMat
     return m
 
 
-def _set_times(item: Dict[str, Any], start: float, last_end: float, chars: int, ctx: _Ctx) -> Optional[str]:
+def _set_times(item: Dict[str, Any], start: float, last_end: float, chars: int, ctx: _Ctx,
+               last_reveal: Optional[float] = None) -> Optional[str]:
     start_ms = int(start * 1000)
     end_ms = max(int(last_end * 1000) + 700, start_ms + reading_ms(chars))
-    end_ms = min(end_ms, start_ms + MAX_MS, int(ctx.clip_duration * 1000) - 150)
+    if last_reveal is not None:
+        end_ms = max(end_ms, int(last_reveal * 1000) + LAST_REVEAL_HOLD_MS)
+    cap = MAX_MS if last_reveal is None else MAX_PROGRESSIVE_MS
+    end_ms = min(end_ms, start_ms + cap, int(ctx.clip_duration * 1000) - 150)
     if end_ms - start_ms < MIN_MS:
         return "too_close_to_clip_end"
+    if last_reveal is not None and end_ms - int(last_reveal * 1000) < LAST_REVEAL_HOLD_MS // 2:
+        return "last_reveal_not_readable"
     item["start_ms"], item["end_ms"] = start_ms, end_ms
     return None
 
@@ -224,7 +232,7 @@ def _validate_diagram(item: Dict[str, Any], ctx: _Ctx) -> Dict[str, Any]:
         chars += len(label)
         first = m.start if first is None else min(first, m.start)
         item["source_segment_id"] = item.get("source_segment_id") or m.segment_id
-    if (err := _set_times(item, first or 0.0, last_end + 0.8, chars, ctx)):
+    if (err := _set_times(item, first or 0.0, last_end + 0.8, chars, ctx, last_reveal=last)):
         return _reject(item, err)
     item.update(status="ok", review_required=False, reason=None)
     return item
@@ -244,6 +252,7 @@ def _validate_chart(item: Dict[str, Any], ctx: _Ctx) -> Dict[str, Any]:
     values: List[float] = []
     first = None
     last_end = 0.0
+    last_reveal = 0.0
     for p in pts:
         try:
             v = float(p.get("value"))
@@ -262,14 +271,15 @@ def _validate_chart(item: Dict[str, Any], ctx: _Ctx) -> Dict[str, Any]:
         lab_nums = ev.numbers_in_display(str(p.get("label")))
         if any(not ev.number_supported(n, spoken) for n in lab_nums):
             return _reject(item, "label_number_not_in_speech")
-        p["at_ms"] = int(m.start * 1000)
+        p["at_ms"] = int(ev.value_time(ctx.words, m, v) * 1000)
+        last_reveal = p["at_ms"] / 1000.0
         values.append(v)
         first = m.start if first is None else min(first, m.start)
         last_end = max(last_end, m.end)
         item["source_segment_id"] = item.get("source_segment_id") or m.segment_id
     if kind == "share" and sum(values) > 100.5:
         return _reject(item, "shares_over_100")
-    if (err := _set_times(item, first or 0.0, last_end + 1.2, 40, ctx)):
+    if (err := _set_times(item, first or 0.0, last_end + 1.2, 40, ctx, last_reveal=last_reveal)):
         return _reject(item, err)
     item.update(status="ok", review_required=False, reason=None)
     return item

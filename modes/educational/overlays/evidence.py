@@ -93,7 +93,9 @@ def find_quote(words: List[Dict[str, Any]], quote: str, segments: Optional[List[
     best: Optional[Tuple[float, int, int]] = None
     n = len(flat)
     for size in {len(q), max(2, len(q) - 1), len(q) + 1, len(q) + 2}:
-        for a in range(0, max(1, n - size + 1)):
+        if size > n:            # a window longer than the whole transcript would point past its end
+            continue
+        for a in range(0, n - size + 1):
             window = [t for t, _ in flat[a:a + size]]
             if q[0][:3] != window[0][:3] and q[-1][:3] != window[-1][:3]:
                 continue
@@ -112,6 +114,21 @@ def find_quote(words: List[Dict[str, Any]], quote: str, segments: Optional[List[
             break
     return QuoteMatch(start, end, best[0], sum(probs) / len(probs) if probs else None, seg_id,
                       " ".join(str(w.get("word", "")).strip() for w in ws))
+
+
+def value_time(words: List[Dict[str, Any]], m: QuoteMatch, value: float) -> float:
+    """When `value` is actually said inside the matched quote: a chart point appears with its number,
+    not at the start of the sentence that leads up to it. Falls back to the quote start."""
+    ws = [w for w in words if m.start - 1e-3 <= float(w["start"]) and float(w["end"]) <= m.end + 1e-3]
+    for i in range(len(ws)):
+        # the word that completes the spoken number ("двести" … "сорок"): the number is heard from its first word
+        if number_supported(value, extract_numbers(" ".join(str(w.get("word", "")) for w in ws[:i + 1]))):
+            j = i
+            while j > 0 and extract_numbers(str(ws[j - 1].get("word", ""))) and \
+                    number_supported(value, extract_numbers(" ".join(str(w.get("word", "")) for w in ws[j - 1:i + 1]))):
+                j -= 1
+            return float(ws[j]["start"])
+    return m.start
 
 
 def has_hedge(text: str) -> bool:

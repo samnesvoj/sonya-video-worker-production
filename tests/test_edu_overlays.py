@@ -341,6 +341,37 @@ def test_diagram_and_chart_reveal_with_speech():
     assert len(c.layers) == 3
 
 
+def _word_start(word):
+    return next(w["start"] for w in WORDS if w["word"].startswith(word))
+
+
+def test_chart_point_appears_when_its_number_is_said_and_stays_readable():
+    it = check(CHART)
+    ats = [p["at_ms"] for p in it["content"]["points"]]
+    # "В 2023 году выручка составила | 120 …": the point waits for the number, not the sentence start
+    assert ats == [int(_word_start("120") * 1000), int(_word_start("180") * 1000)]
+    assert it["start_ms"] < ats[0]
+    assert it["end_ms"] - ats[-1] >= mf.LAST_REVEAL_HOLD_MS
+
+
+def test_quote_covering_the_whole_short_transcript_is_found():
+    words = make_words("Мощность это работа.")
+    assert ev.find_quote(words, "Мощность это работа.") is not None
+
+
+def test_spoken_number_in_words_is_timed_from_its_first_word():
+    words = make_words("Выручка составила двести сорок тысяч рублей.")
+    m = ev.find_quote(words, "Выручка составила двести сорок тысяч рублей.")
+    assert ev.value_time(words, m, 240) == words[2]["start"]
+    assert ev.value_time(words, m, 999) == m.start          # not said → never a made-up time, just the quote start
+
+
+def test_last_step_too_close_to_clip_end_is_refused():
+    # the clip ends 1.4 s after step 3 starts: step 3 would only flash, so the diagram is not drawn
+    it = mf.validate([dict(DIAGRAM, confidence=0.95)], WORDS, _word_start("Третий") + 1.4)[0]
+    assert it["status"] == "rejected"
+
+
 def test_every_bar_chart_starts_from_zero_and_value_scales():
     v = check(CHART)
     card = cd.render_card(v, 700, 1080, 700)
