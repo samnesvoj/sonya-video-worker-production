@@ -27,7 +27,7 @@
   ],
   "python": "3.11",
   "cuda": "12.6",
-  "requirements_lock_sha256": "51bfc90a7679653e57bdec1058be16e14bbbe3a5b459ecbaf7c03a2f172c7daf",
+  "requirements_lock_sha256": "5b6275cfa420f0aaf25b7d4e83bade8e883f1639f54a2ee4486539878755f21a",
   "asr": {
     "primary": "gigaam v3_e2e_rnnt",
     "fallback": "faster-whisper base",

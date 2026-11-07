@@ -43,7 +43,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip
+      # setuptools 81.0.0 is forced by torch==2.11.0 (requires setuptools<82). The two advisories concern setuptools build/install-time
+      # features (package_index / easy_install paths), never executed at runtime in the worker image. Revisit together with the torch bump
+      # (docs/TORCH_UPGRADE.md). Everything else must stay clean.
+      - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip --ignore-vuln GHSA-xmj3-9gf7-h52w --ignore-vuln PYSEC-2026-3447
       - name: OSV for torch/torchvision (pip-audit cannot see +cuXXX wheels); new advisories fail unless accepted in writing
         run: python tools/osv_check.py requirements/worker.lock.txt
   docker-build:

@@ -8,3 +8,9 @@ description = "dummy Timeweb key constant in tests/test_llm_timeweb.py"
 condition = "AND"
 paths = ['''^tests/test_llm_timeweb\.py$''']
 regexes = ['''^tw-SEC[A-Za-z0-9_-]*$''']
+
+[[allowlists]]
+description = "model registry: 'key' is a model identifier (e.g. gigaam_v3_e2e_rnnt_ckpt), not a credential"
+condition = "AND"
+paths = ['''^release/models\.required\.json$''']
+regexes = ['''^[a-z0-9]+(_[a-z0-9]+)+$''']

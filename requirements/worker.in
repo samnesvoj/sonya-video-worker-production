@@ -28,7 +28,7 @@ elevenlabs
 # GigaAM v3 (primary ASR) runtime dependencies, as declared by upstream gigaam 0.2.0 (the package itself is vendored, see docs/ASR_INTERFACE.md)
 hydra-core==1.3.*
 omegaconf==2.3.*
-onnx==1.19.*
+onnx>=1.22,<1.23
 onnxruntime==1.23.*
 sentencepiece
 soundfile

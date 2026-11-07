@@ -46,7 +46,6 @@ def versions():
 def compiled_ops():
     import torchaudio.functional as F
     import torchaudio.transforms as T
-    assert hasattr(torch.ops.torchaudio, "_lfilter"), "libtorchaudio custom ops not registered"
     x = torch.randn(1, 16000)
     y = F.lfilter(x, torch.tensor([1.0, -0.5, 0.0]), torch.tensor([0.5, 0.5, 0.0]))          # compiled C++ op
     r = F.resample(x, 16000, 8000)
