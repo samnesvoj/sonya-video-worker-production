@@ -1,0 +1,17 @@
+-r requirements-base.txt
+boto3
+botocore
+# OpenCV: ONE exact version for every variant the deps pull in
+# (ultralytics -> opencv-python, mediapipe -> opencv-contrib-python).
+# 5.x has no Haar cascades -> SmartCropper face crop would silently degrade.
+opencv-python==4.14.0.94
+opencv-contrib-python==4.14.0.94
+numpy
+pillow
+ultralytics
+faster-whisper
+elevenlabs
+openai
+google-genai
+scenedetect[opencv]
+mediapipe

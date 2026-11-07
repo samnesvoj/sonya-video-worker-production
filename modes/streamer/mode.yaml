@@ -1,0 +1,31 @@
+name: streamer
+version: "0.9-beta"
+description: >
+  Streamer mode (beta). Uses yuvelirochka analyzer/clipper/cropper stack.
+  Webcam detection, lip sync, person tracking.
+
+models:
+  yolo11n:
+    s3_path: models/common/yolo11n.pt
+    local_path: common/yolo11n.pt
+    optional: true
+  yolo11n_pose:
+    s3_path: models/common/yolo11n-pose.pt
+    local_path: common/yolo11n-pose.pt
+    optional: true
+  webcam_detector:
+    s3_path: models/common/webcam_detector.pt
+    local_path: common/webcam_detector.pt
+    optional: false
+  face_landmarker:
+    s3_path: models/common/face_landmarker.task
+    local_path: common/face_landmarker.task
+    optional: true
+    note: >
+      Required only when LIP_SYNC_DETECTION_ENABLED=true.
+      Disabled by default. Pipeline continues without it.
+
+output:
+  format: mp4
+  resolution: "1080x1920"
+  max_clips: 5

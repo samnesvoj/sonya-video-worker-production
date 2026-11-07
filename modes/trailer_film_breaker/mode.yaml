@@ -1,0 +1,35 @@
+name: trailer_film_breaker
+version: "1.0"
+description: >
+  Production trailer mode. Cinematic film-breaker style vertical clips.
+  Does NOT use trailer_mode_v3.py (legacy).
+
+models:
+  trailer_yolo_custom:
+    s3_path: models/trailer/best.pt
+    local_path: trailer/best.pt
+    optional: false
+  yolo11n:
+    s3_path: models/common/yolo11n.pt
+    local_path: common/yolo11n.pt
+    optional: true
+  yolo11n_pose:
+    s3_path: models/common/yolo11n-pose.pt
+    local_path: common/yolo11n-pose.pt
+    optional: true
+  webcam_detector:
+    s3_path: models/common/webcam_detector.pt
+    local_path: common/webcam_detector.pt
+    optional: true
+  face_landmarker:
+    s3_path: models/common/face_landmarker.task
+    local_path: common/face_landmarker.task
+    optional: true
+    note: >
+      Required only when LIP_SYNC_DETECTION_ENABLED=true.
+      Disabled by default. Pipeline continues without it.
+
+output:
+  format: mp4
+  resolution: "1080x1920"
+  max_clips: 5

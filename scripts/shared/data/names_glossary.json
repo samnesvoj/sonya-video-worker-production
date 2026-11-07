@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "note": "ASR mishearings of names, confirmed by the owner. Applied only when a context word occurs nearby (±40 words), so ordinary words are never rewritten. Add an entry after every owner correction.",
+  "entries": [
+    {"wrong": "Вавилон", "right": "Эвелон",
+     "context": ["стрим", "стример", "твич", "twitch", "вписк", "блогер", "миллионер", "ютуб", "донат"],
+     "source": "owner 2026-10-14, Джарахов × Ида Галич 14:30"}
+  ]
+}

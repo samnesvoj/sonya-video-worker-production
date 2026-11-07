@@ -1,0 +1,56 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect
+          pip install --no-deps opencv-python==4.14.0.94 opencv-contrib-python==4.14.0.94 opencv-python-headless==4.14.0.94
+      - run: python -m pytest -q
+      - run: python tools/update_release_manifest.py --check
+  secrets-scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+  audit-deps:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip
+  docker-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - id: lock
+        run: echo "sha=$(sha256sum requirements/worker.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Build base image (no push) and smoke-test the entrypoint refuses an unpinned release
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: sonya-video-worker-base:ci
+          build-args: |
+            BASE_LOCK_SHA256=${{ steps.lock.outputs.sha }}
+            IMAGE_VERSION=${{ github.sha }}
+      - run: |
+          set +e
+          docker run --rm -e SONYA_RELEASE_SHA=main sonya-video-worker-base:ci
+          test $? -eq 2

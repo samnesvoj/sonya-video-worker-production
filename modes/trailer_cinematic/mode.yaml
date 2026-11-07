@@ -1,0 +1,16 @@
+name: trailer_cinematic
+version: "2.0"
+description: >
+  v2 (docs/TRAILER_V2_RECAP_SPEC.md): AI Cinematic Story Recap — story analyst → visual analyst (vision LLM on
+  frames) → writer → TTS → visual director → timeline composer → narration-ONLY audio → validator → judge.
+  Run: python -m modes.trailer_cinematic --input <video> --duration 60   (--v1 = legacy trailer below).
+  Legacy v1: SONYA Trailer (docs/TRAILER_V1_SPEC.md): ASR transcript + scene cuts → Story Analyst (map/refine) →
+  Director (beats) → Writer → Judge (+1 rewrite) → Silero (TEST ONLY) → word/scene/pause bounds →
+  9:16 crop → concat + ducking + loudnorm → narration ASS (Dela Gothic One) → one final.mp4.
+  CLI only for now: python -m modes.trailer_cinematic --input <video> --duration 60.
+  Not in scripts/mode_registry yet (no daemon / UI wiring before the first reviewed MP4).
+models: {}
+output:
+  format: mp4
+  resolution: "1080x1920"
+  max_clips: 1

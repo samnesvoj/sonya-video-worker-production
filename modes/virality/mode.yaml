@@ -1,0 +1,24 @@
+name: virality
+version: "1.0"
+description: >
+  Virality scoring mode. Selects highest-hook moments from video.
+  Based on hook_mode_v1 + modes_scoring with visual boosts.
+
+models:
+  yolo11n:
+    s3_path: models/common/yolo11n.pt
+    local_path: common/yolo11n.pt
+    optional: true
+  yolo11n_pose:
+    s3_path: models/common/yolo11n-pose.pt
+    local_path: common/yolo11n-pose.pt
+    optional: true
+  webcam_detector:
+    s3_path: models/common/webcam_detector.pt
+    local_path: common/webcam_detector.pt
+    optional: true
+
+output:
+  format: mp4
+  resolution: "1080x1920"
+  max_clips: 3

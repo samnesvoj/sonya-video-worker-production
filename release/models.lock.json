@@ -1,0 +1,1 @@
+{"schema_version": 1, "note": "Fill with tools/make_models_lock.py (needs S3 read access, trusted machine). Required in production via SONYA_REQUIRE_MODEL_LOCK=1.", "models": {}}

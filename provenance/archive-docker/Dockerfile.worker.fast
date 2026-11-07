@@ -1,0 +1,70 @@
+# Dockerfile.worker.fast — SONYA lightweight production GPU worker
+#
+# Optimised for cold-pull time on vast.ai.
+# No conda, no jupyter, no openssh-server, no dev tools.
+#
+# PyTorch 2.5.1+cu124 wheels bundle their own CUDA runtime — no nvidia/cuda
+# base image required.  NVIDIA drivers are provided by the host via the
+# NVIDIA Container Toolkit (--gpus all).
+#
+# Build:
+#   docker build -f deploy/docker/Dockerfile.worker.fast \
+#                -t ghcr.io/samnesvoj/sonya-worker:fast .
+#
+# Runtime env (injected by vast.ai env dict — never baked in):
+#   JOB_ID, MODE, BACKEND_API_URL, WORKER_SECRET
+#   S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+#   S3_BUCKET_NAME, S3_BUCKET, S3_REGION, MODELS_S3_BUCKET
+#   OPENROUTER_API_KEY, GEMINI_API_KEY, ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+
+FROM python:3.11-slim-bookworm
+
+# ── System packages (runtime-only — no dev/build tools) ───────────────────────
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends \
+      ffmpeg \
+      libglib2.0-0 \
+      libgomp1 \
+      libgl1 \
+      ca-certificates \
+      curl \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/*
+
+# ── Python deps ────────────────────────────────────────────────────────────────
+WORKDIR /opt/sonya
+
+COPY deploy/docker/requirements-worker-fast.txt ./requirements-worker-fast.txt
+
+# Install PyTorch CUDA wheel first so subsequent deps reuse it (no CPU torch pulled).
+# +cu124 wheels bundle libcuda/libcudnn runtime — no nvidia/cuda base needed.
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir \
+      "torch==2.5.1+cu124" \
+      "torchvision==0.20.1+cu124" \
+      --index-url https://download.pytorch.org/whl/cu124 \
+ && pip install --no-cache-dir -r requirements-worker-fast.txt
+
+# ── Application code ───────────────────────────────────────────────────────────
+# .dockerignore excludes: .env*, models/, *.pt, *.onnx, *.safetensors, .git/
+COPY scripts/ ./scripts/
+COPY modes/   ./modes/
+COPY configs/ ./configs/
+COPY README.md ./
+
+# ── Runtime defaults ───────────────────────────────────────────────────────────
+# Commit the image was built from (CI passes --build-arg SONYA_GIT_SHA=$GITHUB_SHA);
+# read by scripts/shared/worker_manifest.py — .git is not in the image.
+ARG SONYA_GIT_SHA=unknown
+ENV SONYA_GIT_SHA=${SONYA_GIT_SHA} \
+    APP_ENV=production \
+    WORKER_BACKEND_MODE=api \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt/sonya
+
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
+COPY deploy/docker/worker_entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]

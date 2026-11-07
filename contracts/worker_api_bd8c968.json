@@ -1,0 +1,16 @@
+{
+  "source": "production commit bd8c9684416b6601590f1524d8be606422afc45a (read-only inspection of scripts/prod_generation_api.py, scripts/streamer_routes.py)",
+  "auth": "Authorization: Bearer WORKER_SECRET (verify_worker_secret)",
+  "claim": {"path": "/api/worker/claim", "body": ["worker_id", "job_id?", "modes?"], "response": {"job": "object|null"}},
+  "endpoints": [
+    "/api/worker/claim",
+    "/api/worker/jobs/{job_id}/status",
+    "/api/worker/jobs/{job_id}/heartbeat",
+    "/api/worker/jobs/{job_id}/complete",
+    "/api/worker/jobs/{job_id}/fail",
+    "/api/worker/jobs/{job_id}/files",
+    "/api/worker/streamer/batches/{batch_id}/analysis-result"
+  ],
+  "valid_statuses": ["queued","claimed","gpu_requested","gpu_booting","worker_started","preflight_running","downloading","model_downloading","mode_running","analyzing","yolo","scripting","tts","subtitles","assembling","uploading_result","completed","failed","cancelled"],
+  "server_allowed_modes": ["trailer_film_breaker","virality","stories","educational","streamer","sonya_gen"]
+}

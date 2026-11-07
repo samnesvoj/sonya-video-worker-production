@@ -1,0 +1,24 @@
+# Direct runtime dependencies of the GPU worker; exact versions + hashes live in worker.lock.txt.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+torchvision==0.20.1+cu124
+python-dotenv
+pyyaml
+requests
+pydantic
+fastapi
+boto3
+numpy
+pillow
+# ONE OpenCV 4.x for every variant (ultralytics->opencv-python, mediapipe->opencv-contrib-python):
+# OpenCV 5 has no Haar cascades and SmartCropper silently degrades (scripts/shared/crop/detector_check.py).
+opencv-python==4.14.0.94
+opencv-python-headless==4.14.0.94
+opencv-contrib-python==4.14.0.94
+scenedetect
+mediapipe
+ultralytics
+faster-whisper
+openai
+google-genai
+elevenlabs

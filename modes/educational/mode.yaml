@@ -1,0 +1,20 @@
+name: educational
+version: "1.0"
+description: >
+  Educational content mode. Layout-aware: screen_share → preserve_screen,
+  single_speaker → person_focus. Based on educational_mode_v5.
+
+models:
+  yolo11n:
+    s3_path: models/common/yolo11n.pt
+    local_path: common/yolo11n.pt
+    optional: true
+  yolo11n_pose:
+    s3_path: models/common/yolo11n-pose.pt
+    local_path: common/yolo11n-pose.pt
+    optional: true
+
+output:
+  format: mp4
+  resolution: "1080x1920"
+  max_clips: 10

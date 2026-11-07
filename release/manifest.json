@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "name": "sonya-video-worker-production",
+  "version": "0.1.0-rc1",
+  "source": {
+    "archive": "sonya-vast-handoff-6992288",
+    "archive_commit": "6992288",
+    "branch": "feat/trailer-cinematic"
+  },
+  "contract": {
+    "checked_against_production_commit": "bd8c9684416b6601590f1524d8be606422afc45a",
+    "worker_api": "WORKER_BACKEND_MODE=api /api/worker/{claim,jobs/{id}/status|heartbeat|complete|fail|files}, /api/worker/streamer/batches/{id}/analysis-result"
+  },
+  "enabled_modes": [
+    "virality",
+    "beep"
+  ],
+  "opt_in_modes": [
+    "stories",
+    "educational",
+    "streamer",
+    "sonya_gen"
+  ],
+  "disabled_modes": [
+    "trailer_film_breaker",
+    "trailer_cinematic"
+  ],
+  "python": "3.11",
+  "cuda": "12.4",
+  "requirements_lock_sha256": "a1e926ed1555a69955eb87bbc2ec3d5ad05e9c5131e0a061259e1efb58166dac"
+}

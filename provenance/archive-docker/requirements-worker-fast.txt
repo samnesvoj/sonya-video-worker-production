@@ -1,0 +1,62 @@
+# requirements-worker-fast.txt
+# ─────────────────────────────────────────────────────────────────────────────
+# Runtime dependencies for the fast worker image (sonya-worker:fast).
+#
+# Excluded intentionally (backend-only / dev tools):
+#   uvicorn, python-multipart          — API server entrypoint only
+#   psycopg2, asyncpg, alembic         — DB layer (worker uses backend API)
+#   pytest, black, mypy, flake8        — dev / CI only
+#   jupyter, notebook, ipykernel       — not needed on GPU worker
+#
+# fastapi IS required here even though the worker never runs an API server:
+# gpu_worker.py imports scripts/security.py (for new_trace_id / trace-id
+# correlation), and scripts/security.py does `from fastapi import Header,
+# HTTPException, Request, status` at module import time. Without fastapi
+# installed, the worker crashes on startup with
+# ModuleNotFoundError: No module named 'fastapi' — even in WORKER_LOOP=true
+# persistent-worker mode. Only the fastapi package itself is needed (no ASGI
+# server); uvicorn/python-multipart remain excluded since nothing in the
+# worker actually serves requests.
+#
+# torch + torchvision are pinned and installed BEFORE this file in the
+# Dockerfile so the CUDA wheel is used; they are omitted here to prevent
+# pip from pulling a CPU wheel.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Config / HTTP ─────────────────────────────────────────────────────────────
+python-dotenv
+pyyaml
+requests
+pydantic
+# required transitively: scripts/security.py imports fastapi at module load
+# time (Header/HTTPException/Request/status), even though the worker doesn't
+# run an API server. See header comment above for the full explanation.
+fastapi
+
+# ── S3 storage ────────────────────────────────────────────────────────────────
+boto3
+botocore
+
+# ── Vision / video ────────────────────────────────────────────────────────────
+numpy
+pillow
+# headless opencv — smaller than opencv-python (no GUI libs)
+opencv-python-headless==4.14.0.94
+# pinned to the same 4.x: ultralytics pulls opencv-python, mediapipe opencv-contrib-python;
+# 5.x has no Haar cascades (SmartCropper). See scripts/shared/crop/detector_check.py
+opencv-python==4.14.0.94
+opencv-contrib-python==4.14.0.94
+# install before scenedetect so scenedetect finds cv2 without pulling full opencv
+scenedetect
+mediapipe
+
+# ── ML inference ─────────────────────────────────────────────────────────────
+# ultralytics uses torch already installed via CUDA wheel — pip will not re-pull
+ultralytics
+# faster-whisper bundles ctranslate2 CUDA support
+faster-whisper
+
+# ── External APIs ─────────────────────────────────────────────────────────────
+openai
+google-genai
+elevenlabs

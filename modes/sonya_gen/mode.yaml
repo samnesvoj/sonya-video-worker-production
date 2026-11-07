@@ -1,0 +1,11 @@
+name: sonya_gen
+version: "0.1-placeholder"
+description: >
+  SONYA generative mode — placeholder, not production.
+  Future: AI-generated content assembly.
+
+models: {}
+
+output:
+  format: mp4
+  resolution: "1080x1920"
