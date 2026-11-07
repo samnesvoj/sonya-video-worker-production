@@ -7,18 +7,28 @@ models:
   whisper_base_config:
     s3_path: models/whisper-base/config.json
     local_path: whisper-base/config.json
-    optional: false
+    optional: true
   whisper_base_model:
     s3_path: models/whisper-base/model.bin
     local_path: whisper-base/model.bin
-    optional: false
+    optional: true
   whisper_base_tokenizer:
     s3_path: models/whisper-base/tokenizer.json
     local_path: whisper-base/tokenizer.json
-    optional: false
+    optional: true
   whisper_base_vocabulary:
     s3_path: models/whisper-base/vocabulary.txt
     local_path: whisper-base/vocabulary.txt
+    optional: true
+
+  # PRIMARY ASR (owner decision 2026-11-07). The whisper_base_* entries above are the FALLBACK only.
+  gigaam_v3_e2e_rnnt_ckpt:
+    s3_path: models/gigaam/v3_e2e_rnnt.ckpt
+    local_path: gigaam/v3_e2e_rnnt.ckpt
+    optional: false
+  gigaam_v3_e2e_rnnt_tokenizer:
+    s3_path: models/gigaam/v3_e2e_rnnt_tokenizer.model
+    local_path: gigaam/v3_e2e_rnnt_tokenizer.model
     optional: false
 
 output:

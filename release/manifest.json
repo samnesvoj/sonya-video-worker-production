@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "sonya-video-worker-production",
-  "version": "0.2.0-rc1",
+  "version": "0.3.0-rc1",
   "source": {
     "archive": "sonya-vast-handoff-6992288",
     "archive_commit": "6992288",
@@ -26,6 +26,11 @@
     "trailer_cinematic"
   ],
   "python": "3.11",
-  "cuda": "12.4",
-  "requirements_lock_sha256": "a1e926ed1555a69955eb87bbc2ec3d5ad05e9c5131e0a061259e1efb58166dac"
+  "cuda": "12.6",
+  "requirements_lock_sha256": "51bfc90a7679653e57bdec1058be16e14bbbe3a5b459ecbaf7c03a2f172c7daf",
+  "asr": {
+    "primary": "gigaam v3_e2e_rnnt",
+    "fallback": "faster-whisper base",
+    "decided_by": "owner 2026-11-07"
+  }
 }

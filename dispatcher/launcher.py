@@ -29,7 +29,7 @@ def search_query(cfg: FleetConfig) -> dict:
     return {"verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False}, "num_gpus": {"eq": 1},
             "gpu_ram": {"gte": cfg.min_vram_gb * 1000}, "disk_space": {"gte": cfg.disk_gb},
             "reliability2": {"gte": cfg.min_reliability}, "inet_down": {"gte": cfg.min_inet_down_mbps},
-            "cuda_max_good": {"gte": 12.4}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
+            "cuda_max_good": {"gte": 12.6}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
             "order": [["dph_total", "asc"]], "limit": 50}
 
 

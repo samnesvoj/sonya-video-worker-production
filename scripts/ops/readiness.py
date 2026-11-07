@@ -99,6 +99,32 @@ def check_gpu() -> List[str]:
     return errs
 
 
+def check_asr() -> List[str]:
+    """Primary ASR must be usable OFFLINE before the worker accepts jobs (owner decision: GigaAM v3, faster-whisper only as fallback).
+    Enforced when SONYA_REQUIRE_ASR=1 (run_worker.sh sets it by default; local smoke tools opt out)."""
+    if os.environ.get("SONYA_REQUIRE_ASR") != "1":
+        return []
+    from scripts.shared import asr_contract as ac
+    errs: List[str] = []
+    try:
+        backend = ac.backend_name()
+    except ValueError as exc:
+        return [str(exc)]
+    _p(f"asr backend: {backend}")
+    if os.environ.get("SONYA_ASR_OFFLINE") != "1":
+        errs.append("SONYA_ASR_OFFLINE must be 1: no model download at start-up or run time")
+    from scripts.shared.model_paths import models_root
+    errs += [f"ASR file missing: {f.relative_to(models_root())}" for f in ac.expected_model_files(models_root(), backend) if not f.is_file()]
+    try:
+        import importlib
+        mod = importlib.import_module("scripts.shared.asr")
+        if not callable(getattr(mod, "transcribe", None)):
+            errs.append("scripts.shared.asr has no transcribe() (docs/ASR_INTERFACE.md)")
+    except ImportError as exc:
+        errs.append(f"ASR backend module scripts.shared.asr is not importable ({type(exc).__name__})")
+    return errs
+
+
 def check_models() -> List[str]:
     """Parallel, SHA-256-verified fetch of every model the enabled modes need (scripts/ops/model_fetch.py)."""
     from scripts.ops import model_fetch, timeline
@@ -132,7 +158,7 @@ def main() -> int:
     if ready.exists():
         ready.unlink()
     errors: List[str] = []
-    for name, fn in (("env", check_env), ("policy", check_policy), ("ffmpeg", check_ffmpeg), ("gpu", check_gpu), ("models", check_models)):
+    for name, fn in (("env", check_env), ("policy", check_policy), ("ffmpeg", check_ffmpeg), ("gpu", check_gpu), ("models", check_models), ("asr", check_asr)):
         errs = fn()
         _p(f"{name}: {'OK' if not errs else 'FAIL'}")
         errors += [f"{name}: {e}" for e in errs]

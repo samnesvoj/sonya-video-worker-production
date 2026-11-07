@@ -14,6 +14,10 @@ export MODELS_LOCAL_DIR="${MODELS_LOCAL_DIR:-/opt/sonya/models}"
 export TMPDIR="${TMPDIR:-/work/tmp}"
 export WORKER_POLL_INTERVAL="${WORKER_POLL_INTERVAL:-${WORKER_IDLE_SLEEP_SEC:-5}}"   # 5 s: a job arriving while the worker is idle waits <= 5 s (was 15 s)
 export SONYA_REQUIRE_READY=1
+# ASR (owner decision 2026-11-07): GigaAM v3 primary, faster-whisper fallback; models come ONLY from our S3 (sha256-verified), never downloaded.
+export SONYA_ASR_BACKEND="${SONYA_ASR_BACKEND:-gigaam}"
+export SONYA_ASR_OFFLINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1      # not overridable from the Template: no runtime downloads
+export SONYA_REQUIRE_ASR="${SONYA_REQUIRE_ASR:-1}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
 mkdir -p "${TMPDIR}" "${MODELS_LOCAL_DIR}"

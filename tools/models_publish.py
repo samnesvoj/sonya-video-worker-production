@@ -34,6 +34,15 @@ def sha256_file(p: pathlib.Path) -> str:
     return h.hexdigest()
 
 
+def sha256_md5_file(p: pathlib.Path) -> tuple[str, str]:
+    """One pass over the file (the GigaAM checkpoint is ~450 MB): SHA-256 for our lock, MD5 only to cross-check upstream's own hash table."""
+    h, m = hashlib.sha256(), hashlib.md5()  # noqa: S324 - MD5 is upstream's checksum, used for comparison only
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(CHUNK), b""):
+            h.update(b); m.update(b)
+    return h.hexdigest(), m.hexdigest()
+
+
 def load_manifest(path: pathlib.Path = MANIFEST) -> dict:
     return json.loads(path.read_text())
 
@@ -67,12 +76,18 @@ def scan(manifest: dict, srcs: List[pathlib.Path], explicit: Dict[str, pathlib.P
         if chosen is None:
             row.update(status="ambiguous" if len(cands) > 1 else "missing", candidates=[str(c) for c in cands])
         else:
-            sha = sha256_file(chosen)
+            sha, md5 = sha256_md5_file(chosen) if m.get("upstream_md5") else (sha256_file(chosen), None)
             row.update(path=str(chosen), size=chosen.stat().st_size, sha256=sha)
             if m.get("public_sha256"):
                 row["status"] = "matches_public" if sha == m["public_sha256"] else "differs_from_public"
+            elif m.get("upstream_md5"):
+                row.update(upstream_md5=m["upstream_md5"], md5=md5)
+                row["status"] = "matches_upstream_md5" if md5 == m["upstream_md5"] else "differs_from_upstream"
             else:
                 row["status"] = "private_ok"
+            if m.get("public_size") and row["size"] != m["public_size"]:
+                row["status"] = "differs_from_public" if row["status"].startswith("matches") else row["status"]
+                row["size_note"] = f"size {row['size']} != expected {m['public_size']}"
         rows.append(row)
     return rows
 
@@ -82,8 +97,8 @@ def make_lock(rows: List[dict], accept_custom: set) -> dict:
     for r in rows:
         if r["status"] in ("missing", "ambiguous"):
             problems.append(f"{r['key']}: {r['status']}")
-        elif r["status"] == "differs_from_public" and r["key"] not in accept_custom:
-            problems.append(f"{r['key']}: differs from the public file - re-run with --accept-custom {r['key']} if this Mac mini file is the tested reference")
+        elif r["status"] in ("differs_from_public", "differs_from_upstream") and r["key"] not in accept_custom:
+            problems.append(f"{r['key']}: differs from the {'public' if r['status'].endswith('public') else 'upstream'} file - re-run with --accept-custom {r['key']} if this Mac mini file is the tested reference")
         else:
             models[r["key"]] = {"s3_path": r["s3_path"], "sha256": r["sha256"], "size": r["size"]}
     if problems:

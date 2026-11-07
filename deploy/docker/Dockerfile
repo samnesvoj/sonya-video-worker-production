@@ -21,9 +21,9 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin sonya \
 
 # Hash-locked deps in THREE layers (big + stable first): Docker/Vast download layers in parallel and reuse an unchanged big layer from the
 # host cache. requirements/split/*.lock.txt are generated from worker.lock.txt by tools/split_lock.py (CI checks they match).
-# The +cu124 wheels live on the PyTorch index, not on PyPI: the lock pins them (with hashes) but cannot carry the index URL.
+# The +cu126 wheels live on the PyTorch index, not on PyPI: the lock pins them (with hashes) but cannot carry the index URL.
 # Each RUN also removes build-time-only files (C/CUDA headers, static libs) IN THE SAME LAYER so the size really shrinks.
-ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
 # SPLIT_DIR / LOCK_FILE let CI build a CANDIDATE dependency set (e.g. a patched PyTorch) from the same Dockerfile; defaults = production.
 ARG SPLIT_DIR=requirements/split
 ARG LOCK_FILE=requirements/worker.lock.txt

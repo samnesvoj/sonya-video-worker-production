@@ -14,7 +14,7 @@ print("python", sys.version.split()[0], "| numpy", np.__version__, "| torch", to
 assert cv2.__version__.startswith("4."), "OpenCV must stay 4.x (Haar cascades)"
 assert hasattr(cv2, "CascadeClassifier") and cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml").empty() is False
 t = torch.from_numpy(np.ones((2, 3), dtype="float32")); assert t.sum().item() == 6 and t.numpy().shape == (2, 3)   # torch<->numpy interop
-for m in ("mediapipe", "ultralytics", "faster_whisper", "ctranslate2", "scenedetect", "boto3", "fastapi", "yaml", "openai", "google.genai", "elevenlabs"):
+for m in ("mediapipe", "ultralytics", "faster_whisper", "ctranslate2", "scenedetect", "boto3", "fastapi", "yaml", "openai", "google.genai", "elevenlabs", "torchaudio", "onnx", "onnxruntime", "hydra", "omegaconf", "sentencepiece", "soundfile"):
     importlib.import_module(m)
 print("imports ok")
 PY
