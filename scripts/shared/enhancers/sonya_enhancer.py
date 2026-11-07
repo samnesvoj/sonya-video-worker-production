@@ -20,6 +20,8 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+
+from scripts.shared.model_paths import model_file
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -107,7 +109,7 @@ def enrich_video_for_mode(
     if _flag("YOLO_COMMON_ENABLED"):
         def _yolo_common():
             from scripts.shared.vision.yolo_common import detect_common
-            model_path = Path(__file__).parent.parent.parent.parent / "models" / "common" / "yolo11n.pt"
+            model_path = model_file("common", "yolo11n.pt")
             if not model_path.exists():
                 result["warnings"].append("yolo11n.pt not found — yolo_detections skipped")
                 return None
@@ -118,7 +120,7 @@ def enrich_video_for_mode(
     if _flag("YOLO_POSE_ENABLED"):
         def _yolo_pose():
             from scripts.shared.vision.yolo_common import detect_pose
-            model_path = Path(__file__).parent.parent.parent.parent / "models" / "common" / "yolo11n-pose.pt"
+            model_path = model_file("common", "yolo11n-pose.pt")
             if not model_path.exists():
                 result["warnings"].append("yolo11n-pose.pt not found — pose_detections skipped")
                 return None
@@ -129,7 +131,7 @@ def enrich_video_for_mode(
     if _flag("WEBCAM_DETECTOR_ENABLED"):
         def _webcam():
             from scripts.shared.vision.webcam_detector import WebcamDetector
-            model_path = Path(__file__).parent.parent.parent.parent / "models" / "common" / "webcam_detector.pt"
+            model_path = model_file("common", "webcam_detector.pt")
             if not model_path.exists():
                 result["warnings"].append("webcam_detector.pt not found — webcam_layout skipped")
                 return None

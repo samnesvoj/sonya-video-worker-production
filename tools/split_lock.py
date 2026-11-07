@@ -9,8 +9,12 @@ Layers download in parallel and an unchanged big layer is reused from the host c
 import hashlib, pathlib, re, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-LOCK = ROOT / "requirements" / "worker.lock.txt"
-OUT = ROOT / "requirements" / "split"
+def _arg(flag, default):
+    return pathlib.Path(sys.argv[sys.argv.index(flag) + 1]) if flag in sys.argv else default
+
+
+LOCK = _arg("--lock", ROOT / "requirements" / "worker.lock.txt")      # e.g. requirements/candidates/torch213-cu126.lock.txt
+OUT = _arg("--out", ROOT / "requirements" / "split")
 # nvidia-ml-py (NVML bindings, tiny, imported by ultralytics) is NOT a CUDA library layer: it stays in 03-rest.
 GROUPS = [("01-cuda-libs", re.compile(r"^(nvidia-(?!ml-py)|cuda-)")), ("02-torch", re.compile(r"^(torch|torchvision|triton)$"))]
 

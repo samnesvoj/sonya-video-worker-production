@@ -316,11 +316,14 @@ class Transcriber:
         2. HuggingFace download with proxy env vars temporarily cleared.
         Returns model or None on failure.
         """
-        local_name = LOCAL_MODEL_MAP.get(model_name, "base")
+        # SONYA_WHISPER_MODEL (e.g. "large-v3", "medium", "small") overrides the OpenAI-name mapping; default behaviour is unchanged.
+        local_name = os.environ.get("SONYA_WHISPER_MODEL", "").strip() or LOCAL_MODEL_MAP.get(model_name, "base")
 
-        # 1. Check bundled local model
+        # 1. Check local model dirs: $MODELS_LOCAL_DIR/whisper-<name> (verified downloads), then the legacy bundled location
+        from scripts.shared.model_paths import models_root
         for candidate_name in (local_name, model_name):
-            local_dir = os.path.join(script_dir, "models", f"whisper-{candidate_name}")
+          for base in (str(models_root()), os.path.join(script_dir, "models")):
+            local_dir = os.path.join(base, f"whisper-{candidate_name}")
             if os.path.isdir(local_dir) and os.listdir(local_dir):
                 try:
                     m = _WhisperModel(local_dir, device=device, compute_type=compute_type)
@@ -328,6 +331,11 @@ class Transcriber:
                     return m
                 except Exception as exc:
                     print(f"[WARN] Local whisper model load failed ({local_dir}): {exc}")
+
+        # SONYA_ASR_OFFLINE=1 (production, once the ASR model is in S3): never fall back to a runtime HuggingFace download.
+        if os.environ.get("SONYA_ASR_OFFLINE", "") == "1":
+            print(f"[ERROR] ASR model 'whisper-{local_name}' not found under {models_root()} and SONYA_ASR_OFFLINE=1 - not downloading")
+            return None
 
         # 2. HuggingFace download — bypass SOCKS proxy (unsupported by httpx)
         #    Approach A: clear env vars

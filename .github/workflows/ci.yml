@@ -19,6 +19,8 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: python -m pytest -q -rs
       - run: python tools/update_release_manifest.py --check
+      - name: Candidate lock is audited too (any new torch advisory fails)
+        run: python tools/osv_check.py requirements/candidates/torch213-cu126.lock.txt
       - name: Layer split files match the lock
         run: python tools/split_lock.py --check
       - name: Model fetcher benchmark (loopback S3, correctness + hashing headroom; NOT an internet measurement)
@@ -70,6 +72,13 @@ jobs:
           build-args: |
             BASE_LOCK_SHA256=${{ steps.lock.outputs.sha }}
             IMAGE_VERSION=${{ github.sha }}
+      - name: Model smoke on the default image (public models, sha256-verified; YOLO + pose + faster-whisper really run on CPU)
+        run: |
+          set -o pipefail
+          mkdir -p report
+          docker run --rm -v "$PWD/tools/ci_model_smoke.py:/tmp/s.py:ro" -v "$PWD/release/models.required.json:/tmp/m.json:ro" --entrypoint python3 \
+            sonya-video-worker-base:ci /tmp/s.py /tmp/m.json | tee report/model-smoke.txt
+          { echo; echo "### Model smoke (default image)"; cat report/model-smoke.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: Image report (measured layers, compressed vs uncompressed, package sizes, import times)
         run: |
           mkdir -p report
@@ -153,3 +162,57 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: image-report-nvidia, path: report/ }
+
+  image-candidate-torch213:
+    # EXPERIMENT (not a gate): the same worker on a PATCHED PyTorch (2.13.0+cu126, 0 OSV advisories vs 23 for 2.5.1).
+    # Proves: dependency resolution, imports, real YOLO / faster-whisper execution on CPU, bootstrap/Trailer/readiness/health code paths.
+    # Cannot prove: GPU behaviour, driver compatibility, numerical parity of mode outputs (needs the GPU experiment, docs/TORCH_UPGRADE.md).
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+      - uses: docker/setup-buildx-action@v3
+      - id: lock
+        run: |
+          echo "cand=$(sha256sum requirements/candidates/torch213-cu126.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "prod=$(sha256sum requirements/worker.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: sonya-video-worker-torch213:ci
+          build-args: |
+            TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+            SPLIT_DIR=requirements/candidates/torch213-cu126-split
+            LOCK_FILE=requirements/candidates/torch213-cu126.lock.txt
+            BASE_LOCK_SHA256=${{ steps.lock.outputs.cand }}
+            IMAGE_VERSION=${{ github.sha }}
+      - name: "In-image checks (experiment only - the candidate image is told the production lock hash because the release lock differs by design)"
+        env:
+          PINNED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -o pipefail
+          mkdir -p report
+          docker run --rm -e SONYA_BASE_LOCK_SHA256="${{ steps.lock.outputs.prod }}" -e SONYA_RELEASE_SHA="$PINNED_SHA" -e SONYA_RELEASE_REPO="${{ github.repository }}" \
+            -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash \
+            sonya-video-worker-torch213:ci /tmp/ci_docker_checks.sh 2>&1 | tee report/checks.txt
+      - name: Model smoke on PyTorch 2.13 (real checkpoints under the new torch.load defaults, NMS op, ctranslate2)
+        run: |
+          set -o pipefail
+          docker run --rm -v "$PWD/tools/ci_model_smoke.py:/tmp/s.py:ro" -v "$PWD/release/models.required.json:/tmp/m.json:ro" --entrypoint python3 \
+            sonya-video-worker-torch213:ci /tmp/s.py /tmp/m.json 2>&1 | tee report/model-smoke.txt
+      - name: Image report + import times
+        if: always()
+        run: |
+          docker save sonya-video-worker-torch213:ci -o img.tar
+          { echo "## torch 2.13.0+cu126 candidate"; python3 tools/image_report.py img.tar; echo; echo "### Import times";
+            docker run --rm -v "$PWD/tools/image_timing.py:/tmp/image_timing.py:ro" --entrypoint python3 sonya-video-worker-torch213:ci /tmp/image_timing.py; } | tee report/image-report.md
+          cat report/image-report.md report/model-smoke.txt >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: image-report-torch213, path: report/ }

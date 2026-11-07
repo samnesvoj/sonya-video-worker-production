@@ -122,6 +122,8 @@ def check_models() -> List[str]:
         _p(f"model {r.key}: {r.status} {r.bytes} B {r.seconds:.1f}s")
     if os.environ.get("SONYA_REQUIRE_MODEL_LOCK") == "1":
         errs += [f"model {r.key} is not pinned/verified (status {r.status})" for r in results if r.status == "unverified"]
+    if os.environ.get("SONYA_REQUIRE_ALL_MODELS") == "1":      # GPU test / reference runs: an optional model that is absent would silently change output
+        errs += [f"model {r.key} is missing (SONYA_REQUIRE_ALL_MODELS=1)" for r in results if r.status == "skipped_optional"]
     return errs
 
 
