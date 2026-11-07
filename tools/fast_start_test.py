@@ -91,6 +91,8 @@ class Env:
     vast: object
     tick_s: float = 5.0
     log: List[str] = field(default_factory=list)
+    collect_logs: Callable[[int], str] = lambda iid: ""      # live: container log of the instance, captured BEFORE it is destroyed
+    logs: List[str] = field(default_factory=list)
 
 
 def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str, usd_rub: Decimal) -> dict:
@@ -132,6 +134,10 @@ def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str,
     finally:                                                   # ALWAYS tear down, whatever happened
         for i in env.store.all():
             if i.state not in ("destroyed", "lost"):
+                try:
+                    env.logs.append(env.collect_logs(i.id) or "")
+                except Exception:  # noqa: BLE001
+                    env.logs.append("")
                 try:
                     env.vast.destroy(i.id)
                 except Exception as exc:  # noqa: BLE001
@@ -283,7 +289,7 @@ def live(args) -> dict:                                       # pragma: no cover
     from dispatcher.vast_api import VastClient
     from tools.stub_worker_api import serve_in_thread
     secret = _secrets.token_urlsafe(32)                       # throwaway worker secret for this run only
-    stub = StubState(); srv, local = serve_in_thread(stub, secret)
+    stub = StubState(); srv, local = serve_in_thread(stub, secret, port=args.stub_port)   # start `cloudflared tunnel --url http://127.0.0.1:<port>` first
     run_id = _secrets.token_hex(4)
     s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"], aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"], region_name=os.environ.get("S3_REGION", "ru-1"))
     bucket = os.environ.get("S3_BUCKET_NAME") or os.environ["MODELS_S3_BUCKET"]
@@ -300,13 +306,28 @@ def live(args) -> dict:                                       # pragma: no cover
         keys = sorted(o["Key"] for o in r.get("Contents", []))
         return [json.loads(s3.get_object(Bucket=bucket, Key=k)["Body"].read()).get("marks", []) for k in keys]
 
-    env = Env(time.time, time.sleep, mgr, store, stub, lambda: None, timelines, vast, tick_s=5.0)
+    import subprocess
+
+    def collect_logs(iid: int) -> str:
+        out = subprocess.run(["vastai", "logs", str(iid), "--tail", "3000"], capture_output=True, text=True, timeout=120)
+        return out.stdout + out.stderr
+
+    env = Env(time.time, time.sleep, mgr, store, stub, lambda: None, timelines, vast, tick_s=5.0, collect_logs=collect_logs)
     try:
         rep = run_scenario(env, args.max_usd, args.max_minutes, key, Decimal(args.usd_rub))
     finally:
         srv.shutdown()
-    rep["quality"] = {"outputs_valid": None, "compare_verdict": None, "note": "run tools/compare_runs.py on the downloaded outputs vs the Mac mini reference and fill this in"}
-    rep["secret_scan"] = {"clean": None, "note": "grep the worker logs (vastai logs) and timelines for the run secret / tokens"}
+    rep["quality"] = {"outputs_valid": None, "compare_verdict": None, "note": "download the outputs listed in job_files, run tools/compare_runs.py vs the Mac mini reference, watch them; then set these two fields"}
+    blob = "\n".join(env.logs) + json.dumps([env.timelines(i.label) for i in env.store.all()])
+    needles = [secret, os.environ.get("S3_SECRET_ACCESS_KEY", ""), os.environ.get("S3_ACCESS_KEY_ID", ""), "ghs_", "BEGIN PRIVATE KEY"]
+    have_logs = any(l.strip() for l in env.logs)
+    rep["secret_scan"] = {"clean": (not any(n and n in blob for n in needles)) if have_logs else None, "note": "scanned container log + timelines for the run secret, S3 keys, GitHub tokens" if have_logs else "could not capture logs: scan them by hand BEFORE trusting this"}
+    (args.out).mkdir(parents=True, exist_ok=True)
+    red = "\n".join(env.logs)
+    for n in needles:
+        if n:
+            red = red.replace(n, "***")
+    (args.out / "worker-log.redacted.txt").write_text(red)
     return rep
 
 
@@ -323,7 +344,7 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["simulate", "live"])
     ap.add_argument("--release-sha"); ap.add_argument("--image"); ap.add_argument("--backend-url"); ap.add_argument("--control-video")
-    ap.add_argument("--max-usd", type=float, default=3.0); ap.add_argument("--confirm-spend", type=float); ap.add_argument("--max-minutes", type=float, default=90)
+    ap.add_argument("--stub-port", type=int, default=8787); ap.add_argument("--max-usd", type=float, default=3.0); ap.add_argument("--confirm-spend", type=float); ap.add_argument("--max-minutes", type=float, default=90)
     ap.add_argument("--usd-rub", default="82.1386"); ap.add_argument("--apply", action="store_true"); ap.add_argument("--out", type=pathlib.Path, default=ROOT / "results" / "fast-start")
     a = ap.parse_args(argv)
     rep = simulate(a) if a.mode == "simulate" else live(a)
