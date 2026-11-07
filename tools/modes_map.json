@@ -1,0 +1,29 @@
+{
+  "_note": "Curated from import-closure + test analysis of the archive code. 'gate' tests must pass for ANY mode change (policy, API contract, bootstrap).",
+  "gate": ["test_mode_policy", "test_api_contract", "test_bootstrap", "test_runtime_health"],
+  "shared_core": ["scripts/shared/transcription", "scripts/shared/subtitles.py", "scripts/shared/subtitle_styles.py", "scripts/shared/crop", "scripts/shared/boundaries.py", "scripts/shared/profanity.py", "scripts/shared/promo.py", "scripts/shared/mode_output.py"],
+  "modes": {
+    "virality":   {"label": "Cut / Virality", "default_enabled": true,  "runner": "modes/virality/runner.py",
+                   "own": ["modes/virality"], "legacy": ["scripts/legacy_gpu/hook_mode_v1.py"],
+                   "shared": ["scripts/shared/cut_selection.py", "scripts/shared/boundaries.py", "scripts/shared/crop", "scripts/shared/audio_features.py", "scripts/shared/glossary.py", "scripts/shared/transcription", "scripts/shared/subtitles.py", "scripts/shared/subtitle_styles.py", "scripts/shared/gemini"],
+                   "models": "modes/virality/mode.yaml",
+                   "tests": ["test_cut_determinism", "test_cut_selection", "test_cut_story_v3", "test_crop_shots_v2", "test_crop_track", "test_detector_check", "test_virality_boundaries", "test_boundaries", "test_mode_fallback_warnings", "test_glossary", "test_promo", "test_subtitles", "test_subtitle_styles"]},
+    "beep":       {"label": "BEEP", "default_enabled": true, "runner": "modes/beep/runner.py", "own": ["modes/beep"], "legacy": [],
+                   "shared": ["scripts/shared/beep.py", "scripts/shared/beep_sounds.py", "scripts/shared/profanity.py", "scripts/shared/subtitles.py", "scripts/shared/boundaries.py"],
+                   "models": null, "tests": ["test_beep", "test_profanity", "test_subtitles"]},
+    "stories":    {"label": "Stories", "default_enabled": false, "runner": "modes/stories/runner.py", "own": ["modes/stories"],
+                   "legacy": ["scripts/legacy_gpu/story_mode_v1.py", "scripts/legacy_gpu/llm_segment_analysis.py"],
+                   "shared": ["scripts/shared/crop", "scripts/shared/transcription", "scripts/shared/subtitles.py", "scripts/shared/gemini"],
+                   "models": "modes/stories/mode.yaml", "tests": ["test_cut_story_v3", "test_mode_fallback_warnings"]},
+    "educational": {"label": "Educational", "default_enabled": false, "runner": "modes/educational/runner.py", "own": ["modes/educational"],
+                   "legacy": ["scripts/legacy_gpu/educational_mode_v5.py"],
+                   "shared": ["scripts/shared/crop", "scripts/shared/transcription", "scripts/shared/subtitles.py", "scripts/shared/gemini"],
+                   "models": "modes/educational/mode.yaml", "tests": ["test_cut_story_v3", "test_mode_fallback_warnings"]},
+    "streamer":   {"label": "Streamer", "default_enabled": false, "runner": "modes/streamer/runner.py", "own": ["modes/streamer"], "legacy": [],
+                   "shared": ["scripts/shared/crop", "scripts/shared/transcription", "scripts/shared/subtitles.py", "scripts/shared/vision", "scripts/shared/speaker"],
+                   "models": "modes/streamer/mode.yaml", "tests": ["test_streamer_runner_split", "test_streamer_worker_phase_dispatch", "test_segments_from_analysis", "test_mode_fallback_warnings"]},
+    "sonya_gen":  {"label": "SONYA Gen", "default_enabled": false, "runner": "modes/sonya_gen/runner.py", "own": ["modes/sonya_gen"], "legacy": [],
+                   "shared": [], "models": "modes/sonya_gen/mode.yaml", "tests": []}
+  },
+  "disabled_forever_here": ["trailer_film_breaker", "trailer_cinematic"]
+}

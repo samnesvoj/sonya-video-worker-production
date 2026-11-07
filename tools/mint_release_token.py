@@ -26,15 +26,15 @@ def app_jwt(app_id: str, key_pem: bytes) -> str:
     return (head + b"." + body + b"." + _b64(sig)).decode()
 
 
-def mint(repo: str) -> str:
-    with open(os.environ["GH_APP_PRIVATE_KEY_FILE"], "rb") as f:
-        jwt = app_jwt(os.environ["GH_APP_ID"], f.read())
+def mint(repo: str, opener=urllib.request.urlopen, environ=os.environ) -> str:
+    with open(environ["GH_APP_PRIVATE_KEY_FILE"], "rb") as f:
+        jwt = app_jwt(environ["GH_APP_ID"], f.read())
     req = urllib.request.Request(
-        f"https://api.github.com/app/installations/{os.environ['GH_APP_INSTALLATION_ID']}/access_tokens",
+        f"https://api.github.com/app/installations/{environ['GH_APP_INSTALLATION_ID']}/access_tokens",
         data=json.dumps({"repositories": [repo], "permissions": {"contents": "read"}}).encode(),
         headers={"Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
                  "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "sonya-release-token"}, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as r:
+    with opener(req, timeout=20) as r:
         return json.load(r)["token"]
 
 

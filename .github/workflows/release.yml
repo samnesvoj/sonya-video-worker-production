@@ -1,0 +1,55 @@
+# Cuts a worker release RECORD: an immutable annotated tag worker-vX.Y.Z on a commit that is on main and has green CI.
+# It deploys NOTHING and publishes NO image. Production only changes when the owner sets SONYA_RELEASE_SHA (Vast Template /
+# dispatcher config) to the SHA printed here. Manual trigger only.
+name: release
+on:
+  workflow_dispatch:
+    inputs:
+      sha:     { description: "full 40-hex commit SHA (must be on main)", required: true }
+      version: { description: "X.Y.Z (must equal release/manifest.json version, without -rc)", required: true }
+      confirm: { description: "type RELEASE", required: true }
+permissions:
+  contents: write
+  checks: read
+jobs:
+  record:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate inputs
+        run: |
+          [[ "${{ inputs.confirm }}" == "RELEASE" ]] || { echo "confirm must be RELEASE"; exit 1; }
+          [[ "${{ inputs.sha }}" =~ ^[0-9a-f]{40}$ ]] || { echo "sha must be 40-hex"; exit 1; }
+          [[ "${{ inputs.version }}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "version must be X.Y.Z"; exit 1; }
+      - uses: actions/checkout@v4
+        with: { ref: "${{ inputs.sha }}", fetch-depth: 0 }
+      - name: SHA is on main, tag does not exist, manifest matches
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "${{ inputs.sha }}" origin/main || { echo "SHA is not on main"; exit 1; }
+          ! git ls-remote --tags origin "refs/tags/worker-v${{ inputs.version }}" | grep -q . || { echo "tag already exists"; exit 1; }
+          python3 - <<'PY'
+          import json,sys
+          m=json.load(open("release/manifest.json")); v="${{ inputs.version }}"
+          assert m["version"] in (v, v+"-rc1", v+"-rc2", v+"-rc3"), (m["version"], v)
+          assert set(m["disabled_modes"])>={"trailer_film_breaker","trailer_cinematic"} and not any(x.startswith("trailer") for x in m["enabled_modes"])
+          PY
+      - name: All required checks are green on exactly this SHA
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh api "repos/${{ github.repository }}/commits/${{ inputs.sha }}/check-runs" --paginate --jq '.check_runs[] | "\(.name) \(.conclusion)"' | sort -u | tee checks.txt
+          for c in test secrets-scan audit-deps docker-build; do grep -qx "$c success" checks.txt || { echo "required check not green: $c"; exit 1; }; done
+      - name: Create immutable tag and release record
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          python3 - <<'PY' > release-record.json
+          import json,hashlib,subprocess
+          m=json.load(open("release/manifest.json"))
+          print(json.dumps({"tag":"worker-v${{ inputs.version }}","sha":"${{ inputs.sha }}","manifest_version":m["version"],"enabled_modes":m["enabled_modes"],
+            "requirements_lock_sha256":hashlib.sha256(open("requirements/worker.lock.txt","rb").read()).hexdigest(),"checks":open("checks.txt").read().split("\n")},indent=1))
+          PY
+          cat release-record.json
+          git config user.name "release-bot"; git config user.email "release-bot@users.noreply.github.com"
+          git tag -a "worker-v${{ inputs.version }}" "${{ inputs.sha }}" -m "SONYA video worker ${{ inputs.version }} (record only; deploy = set SONYA_RELEASE_SHA)"
+          git push origin "worker-v${{ inputs.version }}"
+          gh release create "worker-v${{ inputs.version }}" release-record.json --draft --title "worker-v${{ inputs.version }}" \
+            --notes "Release RECORD for ${{ inputs.sha }}. Not deployed. To deploy: set SONYA_RELEASE_SHA to this SHA in the Vast Template / dispatcher config after the GPU test."

@@ -1,5 +1,17 @@
-# Status (2026-11-07)
-**Done, tested locally (CPU, Apple Silicon):** Trailer hard-disabled; explicit claim allow-list; SIGTERM requeue; pinned-SHA bootstrap (identity, manifest, lock, redaction, symlink checks); readiness gate; loopback health; hashed lock; API-contract tests vs bd8c968; archive's own 581 tests green. Total: see CI / `pytest -q`.
-**Simulated only:** `tools/local_chain_smoke.py` (stub API, dummy model files, GPU check skipped).
-**Needs real Vast GPU:** image build/install of the lock (torch/mediapipe/numpy 2.x), CUDA/NVENC, VRAM/time/cost, GPU quality of virality/beep vs Mac mini, every opt-in mode.
-**Needs you / outside this repo:** GitHub App; first image publish; fill `models.lock.json`; dispatcher change on the VPS (token + Template); staging backend for the test; decision on opt-in modes.
+# Статус (2026-11-07, ветка `feat/idle-stop-and-cost-accounting`, PR #1)
+
+## GitHub Actions (на реальном GitHub, не локально) — зелёные
+| Проверка | Что именно проверено |
+|---|---|
+| `test` | pytest (фактическое число — в итоговом отчёте), включая тесты bootstrap, автоостановки 60 с, бухгалтерии и интеграции с ботом; ffmpeg установлен, видео-тесты не пропускаются |
+| `secrets-scan` | gitleaks 8.30.1 (закреплённый бинарник с проверкой sha256) по **всей истории** и по рабочему дереву |
+| `audit-deps` | `pip-audit` по lock-файлу с хешами + `tools/osv_check.py` (OSV для torch/torchvision; новый advisory ломает сборку) |
+| `docker-build` | сборка образа linux/amd64 (7,5 ГБ) и **внутриобразные проверки**: импорт torch 2.5.1+cu124 / numpy 2.4.6 / OpenCV 4.14 / mediapipe / ultralytics / faster-whisper, `pip check`, не-root, нет EXPOSE, нет исходников SONYA и секретов, bootstrap скачивает строго закреплённый SHA из приватного репозитория, ветка/неизвестный SHA/отсутствие токена отвергаются, Trailer отвергается, readiness не открывается без окружения, health 503→200 |
+
+## Не проверено (честно)
+- GPU: CUDA/NVENC/VRAM/время, качество режимов. Реальный Vast API (форматы ответов), `/api/v0/charges/`.
+- `torch.cuda` в образе без GPU не проверялась; совместимость с драйвером хоста — на GPU-тесте.
+- GitHub App не создан; `release/models.lock.json` **пуст** (на MacBook нет моделей и доступа к S3; фиктивные значения не подставлялись) — с `SONYA_REQUIRE_MODEL_LOCK=1` воркер не стартует, пока файл не заполнен.
+- Защита `main`/тегов недоступна на бесплатном приватном репозитории (нужен Pro) — см. `docs/dev/PROTECTION.md`.
+- Mac mini не подключался (работа велась на MacBook): скрипты и инструкции готовы, токен создаёте вы.
+- Остальные режимы (`stories`,`educational`,`streamer`,`sonya_gen`) выключены до подтверждения.

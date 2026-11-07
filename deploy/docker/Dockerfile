@@ -20,8 +20,10 @@ RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin sonya \
  && chown -R sonya:sonya /opt/sonya /work /run/sonya
 
 # Hash-locked deps. torch 2.5.1+cu124 wheels bundle the CUDA runtime; the driver comes from the host (NVIDIA runtime).
+# The +cu124 wheels live on the PyTorch index, not on PyPI: the lock pins them (with hashes) but cannot carry the index URL.
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu124
 COPY requirements/worker.lock.txt /opt/sonya-bootstrap/worker.lock.txt
-RUN pip install --require-hashes --no-deps -r /opt/sonya-bootstrap/worker.lock.txt
+RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" -r /opt/sonya-bootstrap/worker.lock.txt
 
 COPY bootstrap/sonya_bootstrap.py bootstrap/healthd.py bootstrap/entrypoint.sh /opt/sonya-bootstrap/
 RUN chmod 0555 /opt/sonya-bootstrap/*.py /opt/sonya-bootstrap/entrypoint.sh && chmod 0444 /opt/sonya-bootstrap/worker.lock.txt

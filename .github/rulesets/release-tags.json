@@ -1,0 +1,8 @@
+{
+  "name": "release tags worker-v*: immutable",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["refs/tags/worker-v*"], "exclude": []}},
+  "bypass_actors": [],
+  "rules": [{"type": "update"}, {"type": "deletion"}, {"type": "non_fast_forward"}]
+}

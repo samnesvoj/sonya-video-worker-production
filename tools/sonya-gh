@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# gh wrapper for this repo only: takes the fine-grained token from the Keychain for THIS process, never stores it in gh's config
+# (so any other GitHub login on the machine stays untouched), never prints it.   usage: tools/sonya-gh pr create --base main ...
+set -Eeuo pipefail
+TOKEN="$(security find-generic-password -s sonya-video-worker-github -a "${GITHUB_USER:-samnesvoj}" -w)"
+GH_TOKEN="$TOKEN" GH_REPO="samnesvoj/sonya-video-worker-production" exec gh "$@"

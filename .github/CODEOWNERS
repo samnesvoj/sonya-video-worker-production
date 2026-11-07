@@ -1,0 +1,10 @@
+# Enforced only when the "require review from Code Owners" ruleset is active (needs GitHub Pro for private repos, see docs/dev/PROTECTION.md).
+*                              @samnesvoj
+/release/                      @samnesvoj
+/bootstrap/                    @samnesvoj
+/deploy/                       @samnesvoj
+/dispatcher/                   @samnesvoj
+/accounting/                   @samnesvoj
+/scripts/mode_policy.py        @samnesvoj
+/.github/                      @samnesvoj
+/requirements/                 @samnesvoj

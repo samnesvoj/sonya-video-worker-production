@@ -1,0 +1,125 @@
+diff --git a/scripts/gpu_dispatcher.py b/scripts/gpu_dispatcher.py
+index bea9186..57febbc 100644
+--- a/scripts/gpu_dispatcher.py
++++ b/scripts/gpu_dispatcher.py
+@@ -84,6 +84,26 @@ AUTO_GPU_TRIGGER_ENABLED: bool = (
+ DISPATCH_INTERVAL: int = int(os.environ.get("GPU_DISPATCH_INTERVAL_SECONDS", "20"))
+ MAX_ACTIVE_GPU_JOBS: int = int(os.environ.get("MAX_ACTIVE_GPU_JOBS", "1"))
+ 
++# Persistent GPU pool (dispatcher/ package; instances stop after IDLE_TIMEOUT_SECONDS). OFF unless SONYA_FLEET_ENABLED=true.
++# The modes it serves are invisible to this per-job dispatcher, so the two pools never fight over a job.
++FLEET_ENABLED: bool = os.environ.get("SONYA_FLEET_ENABLED", "false").lower() == "true"
++POOL_MODES = tuple(m.strip() for m in os.environ.get("SONYA_POOL_MODES", "virality,beep").split(",") if m.strip()) if FLEET_ENABLED else ()
++_FLEET = None
++
++
++def _fleet_tick() -> None:
++    """Never raises: a fleet problem must not stop the legacy per-job dispatch."""
++    global _FLEET
++    if not FLEET_ENABLED:
++        return
++    try:
++        if _FLEET is None:
++            from dispatcher.main import build_fleet
++            _FLEET = build_fleet()
++        _FLEET.tick()
++    except Exception as exc:  # noqa: BLE001
++        logger.error("fleet_tick_error exc=%s", type(exc).__name__)
++
+ # Production startup SLA — shared config lives in gpu_orchestrator.py so the
+ # dispatcher, orchestrator, and offer-blacklist filter all agree on one value.
+ VAST_STARTUP_TIMEOUT_SEC: int = orchestrator.VAST_STARTUP_TIMEOUT_SEC
+@@ -263,14 +283,14 @@ def _dispatch_one() -> bool:
+     Returns True if a job was found and dispatched (or attempted).
+     Returns False if nothing available or concurrency cap reached.
+     """
+-    active = count_active_gpu_jobs()
++    active = count_active_gpu_jobs(exclude_modes=list(POOL_MODES) or None)
+     if active >= MAX_ACTIVE_GPU_JOBS:
+         logger.debug(
+             "dispatch_skip active=%d max=%d", active, MAX_ACTIVE_GPU_JOBS
+         )
+         return False
+ 
+-    candidate = get_next_queued_job_for_dispatch()
++    candidate = get_next_queued_job_for_dispatch(exclude_modes=list(POOL_MODES) or None)
+     if not candidate:
+         logger.debug("dispatch_skip no_queued_jobs")
+         return False
+@@ -344,10 +364,12 @@ def run_loop() -> None:
+             if reconciled:
+                 logger.info("dispatcher_reconcile_cleanup jobs_processed=%d", reconciled)
+ 
++            _fleet_tick()
++
+             if AUTO_GPU_TRIGGER_ENABLED:
+                 _dispatch_one()
+             else:
+-                candidate = get_next_queued_job_for_dispatch()
++                candidate = get_next_queued_job_for_dispatch(exclude_modes=list(POOL_MODES) or None)
+                 if candidate:
+                     logger.info(
+                         "dry_run would_dispatch job_id=%s mode=%s priority=%d",
+diff --git a/scripts/prod_job_store.py b/scripts/prod_job_store.py
+index 90a310f..17ad1e3 100644
+--- a/scripts/prod_job_store.py
++++ b/scripts/prod_job_store.py
+@@ -776,7 +776,7 @@ def list_job_files(job_id: str) -> List[Dict[str, Any]]:
+ 
+ # ── GPU dispatcher queue API (migration 006) ————————————————————————————————————
+ 
+-def get_next_queued_job_for_dispatch() -> Optional[Dict[str, Any]]:
++def get_next_queued_job_for_dispatch(exclude_modes: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+     """
+     Peek at the next dispatchable job without locking it.
+ 
+@@ -786,9 +786,27 @@ def get_next_queued_job_for_dispatch() -> Optional[Dict[str, Any]]:
+ 
+     Returns the row dict or None.  Use lock_job_for_dispatch to atomically
+     acquire the job before calling the orchestrator.
++
++    exclude_modes: modes served by the persistent GPU pool (SONYA_POOL_MODES) are
++    invisible to this per-job dispatcher. None/empty = the original query, unchanged.
+     """
+     conn = _get_conn()
+     try:
++        if exclude_modes:
++            return _row(
++                conn,
++                """
++                SELECT *
++                FROM generation_jobs
++                WHERE status = 'queued'
++                  AND attempts < max_attempts
++                  AND (locked_until IS NULL OR locked_until < NOW())
++                  AND NOT (mode = ANY(%s))
++                ORDER BY priority DESC, queued_at ASC
++                LIMIT 1
++                """,
++                (list(exclude_modes),),
++            )
+         return _row(
+             conn,
+             """
+@@ -1251,13 +1269,20 @@ def mark_job_failed(job_id: str, error_code: str, error_message: str) -> None:
+     logger.warning("[job_store] job_failed_dispatcher job_id=%s", job_id)
+ 
+ 
+-def count_active_gpu_jobs() -> int:
++def count_active_gpu_jobs(exclude_modes: Optional[List[str]] = None) -> int:
+     """
+     Count jobs currently in GPU-active states.
+     Used by the dispatcher to enforce MAX_ACTIVE_GPU_JOBS concurrency cap.
+     """
+     conn = _get_conn()
+     try:
++        if exclude_modes:  # persistent-pool modes do not consume the per-job dispatcher's concurrency cap
++            row = _row(
++                conn,
++                "SELECT COUNT(*) AS n FROM generation_jobs WHERE status = ANY(%s) AND NOT (mode = ANY(%s))",
++                (list(_ACTIVE_STATUSES), list(exclude_modes)),
++            )
++            return int(row["n"]) if row else 0
+         row = _row(
+             conn,
+             "SELECT COUNT(*) AS n FROM generation_jobs WHERE status = ANY(%s)",
