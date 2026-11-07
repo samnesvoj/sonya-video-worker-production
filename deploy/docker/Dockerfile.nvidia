@@ -9,14 +9,14 @@ FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:2fcc4280646484290cc50dc
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update -qq \
- && apt-get install -y -qq --no-install-recommends ffmpeg git ca-certificates curl libglib2.0-0 libgomp1 libgl1 tini \
+ && apt-get install -y -qq --no-install-recommends ffmpeg git ca-certificates curl libglib2.0-0 libgomp1 libgl1 tini cuda-cupti-12-4 \
  && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.9.18 /uv /usr/local/bin/uv
 RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin sonya \
  && mkdir -p /opt/sonya/releases /opt/sonya/models /work/tmp /run/sonya /opt/sonya-bootstrap /opt/py \
  && chown -R sonya:sonya /opt/sonya /work /run/sonya
-ENV UV_PYTHON_INSTALL_DIR=/opt/py UV_LINK_MODE=copy
+ENV UV_PYTHON_INSTALL_DIR=/opt/py UV_LINK_MODE=copy UV_NO_CACHE=1   # without UV_NO_CACHE the uv wheel cache is baked into the layer (first CI run: 4.7 GB torch layer)
 RUN uv venv --python 3.11 /opt/venv && chmod -R a+rX /opt/py /opt/venv
 ENV PATH=/opt/venv/bin:$PATH VIRTUAL_ENV=/opt/venv SP=/opt/venv/lib/python3.11/site-packages
 

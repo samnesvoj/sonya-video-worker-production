@@ -12,7 +12,7 @@ export SONYA_WORKER_PID_FILE="${STATE_DIR}/worker.pid"
 export WORKER_BACKEND_MODE="${WORKER_BACKEND_MODE:-api}"
 export MODELS_LOCAL_DIR="${MODELS_LOCAL_DIR:-/opt/sonya/models}"
 export TMPDIR="${TMPDIR:-/work/tmp}"
-export WORKER_POLL_INTERVAL="${WORKER_POLL_INTERVAL:-${WORKER_IDLE_SLEEP_SEC:-15}}"
+export WORKER_POLL_INTERVAL="${WORKER_POLL_INTERVAL:-${WORKER_IDLE_SLEEP_SEC:-5}}"   # 5 s: a job arriving while the worker is idle waits <= 5 s (was 15 s)
 export SONYA_REQUIRE_READY=1
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 

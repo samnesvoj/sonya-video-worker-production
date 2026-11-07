@@ -127,6 +127,7 @@ jobs:
             IMAGE_VERSION=${{ github.sha }}
       - name: Do the CUDA libraries from the base image satisfy torch / ctranslate2 ? (CPU-verifiable linkage checks)
         run: |
+          set -o pipefail
           mkdir -p report
           docker run --rm --entrypoint bash sonya-video-worker-nvidia:ci -c '
             SP=/opt/venv/lib/python3.11/site-packages
@@ -139,6 +140,8 @@ jobs:
         env:
           PINNED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
+          set -o pipefail
+          mkdir -p report
           docker run --rm -e SONYA_RELEASE_SHA="$PINNED_SHA" -e SONYA_RELEASE_REPO="${{ github.repository }}" -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash sonya-video-worker-nvidia:ci /tmp/ci_docker_checks.sh 2>&1 | tee report/checks.txt
       - name: Image report
