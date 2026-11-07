@@ -46,3 +46,12 @@ git clone https://github.com/salute-developers/GigaAM.git /tmp/GigaAM && git -C 
 python tools/ci_gigaam_real.py --models-dir ~/SONYA-models --audio <речь.wav> --gigaam-src /tmp/GigaAM
 ```
 Ожидается `ALL CHECKS PASSED`; пришлите вывод (там SHA-256 весов для `models.lock.json`).
+
+## Measured image impact (CI run 42421290906, commit 630b907)
+| | before (main) | with GigaAM stack | delta |
+|---|---|---|---|
+| uncompressed | 7.48 GB | 8.50 GB | +1.02 GB (+14 %) |
+| gzip (wire) | 3.75 GB | 4.31 GB | +0.56 GB (+15 %) |
+
+Main contributors: torch/cuDNN moving to the cu126 matched set, onnx (85 MB), onnxruntime (53 MB). The layer split is kept (cuda-libs / torch / rest), so a code-only change still pulls only the small top layers.
+Real-weights recognition was SKIPPED in CI (GIGAAM_S3_* secrets not configured) - still to be verified together with the Mac mini.
