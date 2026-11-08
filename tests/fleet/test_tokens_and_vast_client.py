@@ -71,7 +71,7 @@ def test_stop_resume_destroy_use_official_endpoints():
     c = VastClient("k", dry_run=False, transport=t)
     c.stop(7); c.resume(7); c.destroy(7)
     assert [(m, u.split("vast.ai")[1], b) for m, u, h, b in t.calls] == [
-        ("PUT", "/instances/7/", {"state": "stopped"}), ("PUT", "/instances/7/", {"state": "running"}), ("DELETE", "/instances/7/", {})]
+        ("PUT", "/api/v0/instances/7/", {"state": "stopped"}), ("PUT", "/api/v0/instances/7/", {"state": "running"}), ("DELETE", "/api/v0/instances/7/", {})]
 
 
 def test_create_requires_new_contract():

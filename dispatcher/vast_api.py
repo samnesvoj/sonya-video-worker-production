@@ -1,10 +1,10 @@
 """
 Vast.ai REST client (central dispatcher only). Endpoints mirror the official `vastai` CLI:
   GET    /api/v1/instances/            list (paginated)
-  PUT    /instances/{id}/ {"state": "running"|"stopped"}   resume / stop
-  DELETE /instances/{id}/              destroy
-  POST   /bundles/                     search offers
-  PUT    /asks/{offer_id}/             create instance from an offer
+  PUT    /api/v0/instances/{id}/ {"state": "running"|"stopped"}   resume / stop
+  DELETE /api/v0/instances/{id}/              destroy
+  POST   /api/v0/bundles/                     search offers
+  PUT    /api/v0/asks/{offer_id}/             create instance from an offer
   GET    /api/v0/charges/              confirmed charges
 The HTTP transport is injectable (tests use a fake Vast). The API key never appears in logs, errors or reprs.
 In dry-run mode every state-changing call is only logged.
@@ -118,7 +118,7 @@ class VastClient:
         return [VastInstance.parse(r) for r in (rows or [])]
 
     def search_offers(self, query: dict) -> List[dict]:
-        data = self._call("POST", "/bundles/", query)
+        data = self._call("POST", "/api/v0/bundles/", query)
         return list(data.get("offers", [])) if isinstance(data, dict) else []
 
     def charges(self, start_ts: int, end_ts: int, charge_types: Tuple[str, ...] = ("instance", "volume")) -> List[dict]:
@@ -137,16 +137,16 @@ class VastClient:
 
     # writes (idempotent per Vast semantics: same state twice is a no-op)
     def stop(self, instance_id: int) -> None:
-        self._call("PUT", f"/instances/{int(instance_id)}/", {"state": "stopped"}, write=True)
+        self._call("PUT", f"/api/v0/instances/{int(instance_id)}/", {"state": "stopped"}, write=True)
 
     def resume(self, instance_id: int) -> None:
-        self._call("PUT", f"/instances/{int(instance_id)}/", {"state": "running"}, write=True)
+        self._call("PUT", f"/api/v0/instances/{int(instance_id)}/", {"state": "running"}, write=True)
 
     def destroy(self, instance_id: int) -> None:
-        self._call("DELETE", f"/instances/{int(instance_id)}/", {}, write=True)
+        self._call("DELETE", f"/api/v0/instances/{int(instance_id)}/", {}, write=True)
 
     def create(self, offer_id: int, payload: dict) -> Optional[int]:
-        data = self._call("PUT", f"/asks/{int(offer_id)}/", payload, write=True)
+        data = self._call("PUT", f"/api/v0/asks/{int(offer_id)}/", payload, write=True)
         if isinstance(data, dict) and data.get("dry_run"):
             return None
         if not isinstance(data, dict) or not data.get("success") or "new_contract" not in data:
