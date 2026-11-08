@@ -12,3 +12,11 @@ def github_app_token_provider(repo_name: str, environ: Mapping[str, str] = os.en
         from tools.mint_release_token import mint
         return mint(repo_name, environ=environ, **kw)
     return _get
+
+
+def static_token_provider(token: str) -> Callable[[], str]:
+    """First Vast test only: a pre-issued read-only token (GITHUB_RELEASE_TOKEN in the operator's shell) instead of the GitHub App.
+    Bootstrap uses it exactly like an installation token (git basic auth, unset after the download)."""
+    if not token:
+        raise ValueError("empty GITHUB_RELEASE_TOKEN")
+    return lambda: token

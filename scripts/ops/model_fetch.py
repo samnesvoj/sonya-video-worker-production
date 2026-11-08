@@ -65,6 +65,9 @@ def plan(root: Path, modes: List[str], models_dir: Path, lock: Optional[dict] = 
         if not cfg.is_file():
             continue
         for key, spec in ((yaml.safe_load(cfg.read_text()) or {}).get("models") or {}).items():
+            gate = spec.get("enabled_by_env")                                  # e.g. WEBCAM_DETECTOR_ENABLED=false -> the model is not used, do not fetch it
+            if gate and os.environ.get(gate, "true").strip().lower() not in ("1", "true", "yes", "on"):
+                continue
             lp = Path(spec.get("local_path") or key)
             if lp.parts and lp.parts[0] == "models":
                 lp = Path(*lp.parts[1:]) if len(lp.parts) > 1 else Path(key)

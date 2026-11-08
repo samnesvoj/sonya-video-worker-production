@@ -17,6 +17,7 @@ models:
     s3_path: models/common/webcam_detector.pt
     local_path: common/webcam_detector.pt
     optional: true
+    enabled_by_env: WEBCAM_DETECTOR_ENABLED   # owner 2026-11-08: off by default (run_worker.sh); not fetched while off
 
   whisper_base_config:
     s3_path: models/whisper-base/config.json

@@ -117,6 +117,9 @@ def make_server(state: StubState, secret: str, host: str = "127.0.0.1", port: in
             b = json.dumps(obj).encode()
             self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
 
+        def do_GET(self):  # noqa: N802 - liveness only (tunnel check); no job data, no auth needed
+            return self._send(200, {"ok": True}) if self.path == "/healthz" else self._send(404, {"error": "not_found"})
+
         def do_POST(self):  # noqa: N802
             tok = self.headers.get("Authorization", "")
             if not hmac.compare_digest(tok.encode(), f"Bearer {secret}".encode()):

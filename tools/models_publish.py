@@ -149,9 +149,12 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=pathlib.Path)
     ap.add_argument("--accept-custom", action="append", default=[], metavar="KEY", help="accept a file whose hash differs from the public one")
     ap.add_argument("--bucket"); ap.add_argument("--confirm-bucket"); ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--skip", action="append", default=[], metavar="KEY", help="leave a model out of lock/upload on purpose (e.g. webcam_detector: off by owner decision)")
     a = ap.parse_args(argv)
     explicit = {k: pathlib.Path(v).expanduser() for k, v in (m.split("=", 1) for m in a.map)}
-    rows = scan(load_manifest(a.manifest), [s.expanduser() for s in a.src], explicit)
+    man = load_manifest(a.manifest)
+    man = {**man, "models": [m for m in man["models"] if m["key"] not in set(a.skip)]}
+    rows = scan(man, [s.expanduser() for s in a.src], explicit)
     if a.cmd == "scan":
         print(json.dumps(rows, indent=1) if a.out is None else f"report -> {a.out}")
         if a.out:

@@ -18,6 +18,9 @@ export SONYA_REQUIRE_READY=1
 export SONYA_ASR_BACKEND="${SONYA_ASR_BACKEND:-gigaam}"
 export SONYA_ASR_OFFLINE=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1      # not overridable from the Template: no runtime downloads
 export SONYA_REQUIRE_ASR="${SONYA_REQUIRE_ASR:-1}"
+# Owner decisions 2026-11-08 for the first Vast test (match the Mac mini reference): no Gemini layout, no webcam detector unless set explicitly.
+export GEMINI_LAYOUT_ENABLED="${GEMINI_LAYOUT_ENABLED:-false}"
+export WEBCAM_DETECTOR_ENABLED="${WEBCAM_DETECTOR_ENABLED:-false}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
 mkdir -p "${TMPDIR}" "${MODELS_LOCAL_DIR}"

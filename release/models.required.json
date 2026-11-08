@@ -96,14 +96,14 @@
     "virality"
    ],
    "loaded_by": "scripts/shared/enhancers/sonya_enhancer.py (WEBCAM_DETECTOR_ENABLED, default on) -> scripts/shared/vision/webcam_detector.py",
-   "required_for_gpu_test": true,
+   "required_for_gpu_test": false,
    "source": {
     "type": "private",
     "name": "SONYA custom-trained webcam detector (YOLO)",
     "url": null,
     "license": "owner"
    },
-   "notes": "NOT public: only the Mac mini copy exists. Size and hash are unknown until the Mac mini reports them. If this file is missing the enhancer only logs a warning and crop quality silently changes.",
+   "notes": "OWNER DECISION 2026-11-08: OFF by default (WEBCAM_DETECTOR_ENABLED=false in deploy/vast/run_worker.sh) and NOT in models.lock.json; the Mac mini reference runs did not use it. The one known copy: size 5441498, sha256 b011911e6129fddebbc32a75cc3f7b3c22b5216dd9d6a6f446757cb67aa8481b (trained 2025-12-20). A later test will compare both variants. NOT public: only the Mac mini copy exists. If this file is missing the enhancer only logs a warning and crop quality silently changes.",
    "public_sha256": null,
    "public_size": null,
    "role": "primary"
@@ -306,10 +306,10 @@
   "SONYA_ENHANCERS_ENABLED": "true (default)",
   "YOLO_COMMON_ENABLED": "default true",
   "YOLO_POSE_ENABLED": "default true",
-  "WEBCAM_DETECTOR_ENABLED": "default true",
+  "WEBCAM_DETECTOR_ENABLED": "false (owner 2026-11-08; run_worker.sh default) - the model is not fetched while off",
   "WORD_LEVEL_SUBTITLES_ENABLED": "default true (runs the ASR above)",
   "LIP_SYNC_DETECTION_ENABLED": "default false",
-  "GEMINI_LAYOUT_ENABLED": "default TRUE but needs GEMINI_API_KEY on the GPU host; without a key it is skipped with a warning. Decide: off for the first test (no external secret on a rented host) unless the reference run used it",
+  "GEMINI_LAYOUT_ENABLED": "false (owner 2026-11-08; run_worker.sh default) - no Gemini key on the rented host",
   "GEMINI_DIRECT_VIDEO_ENABLED": "default false",
   "SONYA_ASR_OFFLINE": "1 (default in run_worker.sh): no model is ever downloaded at start-up or at run time",
   "SONYA_ASR_BACKEND": "gigaam (default; faster_whisper only as fallback)"
