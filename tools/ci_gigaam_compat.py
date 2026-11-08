@@ -94,10 +94,20 @@ def encoder():
     out = []
     for attn in ("rotary", "rel_pos"):
         enc = ConformerEncoder(feat_in=64, n_layers=2, d_model=128, n_heads=4, self_attention_model=attn, flash_attn=False).eval()
+        # upstream creates pos_bias_u/v as nn.Parameter(torch.FloatTensor(h, d_k)) = UNINITIALISED memory; the real
+        # checkpoint overwrites them, this random-weight probe does not. On Linux runners the memory can be NaN/huge
+        # -> non-finite output (reproduced on Mac mini by filling them with NaN or 3e38). Zero them so the check tests
+        # torch compatibility, not leftover memory.
+        with torch.no_grad():
+            for name, p in enc.named_parameters():
+                if "pos_bias" in name:
+                    torch.nn.init.zeros_(p)
         x = torch.randn(2, 64, 400)
         with torch.inference_mode():
             y, ln = enc(x, torch.tensor([400, 320]))
-        assert torch.isfinite(y).all() and y.shape[0] == 2 and int(ln[0]) == y.shape[-1]
+        assert torch.isfinite(y).all(), f"{attn}: non-finite encoder output, shape={tuple(y.shape)}"
+        assert y.shape[0] == 2, f"{attn}: batch {y.shape[0]} != 2"
+        assert int(ln[0]) == y.shape[-1], f"{attn}: length {ln.tolist()} vs output time dim {y.shape[-1]}"
         out.append(f"{attn}->{tuple(y.shape)}")
     return " ".join(out)
 
