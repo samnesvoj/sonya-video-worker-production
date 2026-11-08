@@ -1,0 +1,456 @@
+{
+ "generated": "2026-11-07",
+ "machine": "Mac mini M4 16 GB, macOS (CPU/MPS only, no CUDA)",
+ "model_load_check": {
+  "t251": [
+   "torch 2.5.1 | numpy 2.4.6",
+   "OK    yolo11n                5.6 MB  predict ok (0.9s)",
+   "OK    yolo11n_pose           6.3 MB  predict ok (0.1s)",
+   "OK    webcam_detector        5.4 MB  predict ok (0.1s)",
+   "FAIL  whisper-base       RuntimeError: [json.exception.type_error.305] cannot use operator[] with a string argument with null"
+  ],
+  "t211": [
+   "torch 2.11.0 | numpy 2.4.6",
+   "OK    yolo11n                5.6 MB  predict ok (20.1s)",
+   "OK    yolo11n_pose           6.3 MB  predict ok (0.1s)",
+   "OK    webcam_detector        5.4 MB  predict ok (0.1s)",
+   "FAIL  whisper-base       RuntimeError: [json.exception.type_error.305] cannot use operator[] with a string argument with null"
+  ],
+  "t213": [
+   "torch 2.13.0 | numpy 2.4.6",
+   "OK    yolo11n                5.6 MB  predict ok (0.7s)",
+   "OK    yolo11n_pose           6.3 MB  predict ok (0.1s)",
+   "OK    webcam_detector        5.4 MB  predict ok (0.1s)",
+   "FAIL  whisper-base       RuntimeError: [json.exception.type_error.305] cannot use operator[] with a string argument with null"
+  ]
+ },
+ "gigaam_vs_mac_mini_reference": {
+  "k15_desktopvenv_mps": {
+   "media": "kishlak_15m.mp4",
+   "device": "mps:0",
+   "torch": "2.14.1",
+   "load_sec": 1.81,
+   "transcribe_sec": 15.91,
+   "audio_sec": 900.005,
+   "x_realtime": 56.6,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": true,
+   "word_text_diffs": 0,
+   "start_abs_diff_ms": {
+    "max": 0.0,
+    "p99": 0.0,
+    "mean": 0.0
+   },
+   "end_abs_diff_ms": {
+    "max": 0.0,
+    "mean": 0.0
+   },
+   "exact_time_matches": 2479,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "kfull_desktopvenv_mps": {
+   "media": "kishlak.mp4",
+   "device": "mps:0",
+   "torch": "2.14.1",
+   "load_sec": 1.9,
+   "transcribe_sec": 113.64,
+   "audio_sec": 6688.578,
+   "x_realtime": 58.9,
+   "ref_elapsed_sec": 114.61,
+   "words_ref": 18959,
+   "words_worker": 18959,
+   "word_sequence_identical": true,
+   "word_text_diffs": 0,
+   "start_abs_diff_ms": {
+    "max": 360.0,
+    "p99": 0.0,
+    "mean": 0.02
+   },
+   "end_abs_diff_ms": {
+    "max": 360.0,
+    "mean": 0.02
+   },
+   "exact_time_matches": 18955,
+   "cut_compat_worker": {
+    "input": 18959,
+    "kept": 18959,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 1926,
+    "candidates": 5756,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 18959,
+    "kept": 18957,
+    "dropped": 2,
+    "dropped_ratio": 0.0001,
+    "trimmed_overlap": 0,
+    "sentences": 1926,
+    "candidates": 5756,
+    "ok": true
+   }
+  },
+  "k15_desktopvenv_cpu": {
+   "media": "kishlak_15m.mp4",
+   "device": "cpu",
+   "torch": "2.14.1",
+   "load_sec": 1.25,
+   "transcribe_sec": 15.56,
+   "audio_sec": 900.005,
+   "x_realtime": 57.9,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": false,
+   "word_text_diffs": 1,
+   "start_abs_diff_ms": {
+    "max": 70.0,
+    "p99": 0.0,
+    "mean": 0.03
+   },
+   "end_abs_diff_ms": {
+    "max": 280.0,
+    "mean": 0.11
+   },
+   "exact_time_matches": 2477,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t213_mps": {
+   "media": "kishlak_15m.mp4",
+   "device": "mps:0",
+   "torch": "2.13.0",
+   "load_sec": 3.4,
+   "transcribe_sec": 16.98,
+   "audio_sec": 900.005,
+   "x_realtime": 53.0,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": true,
+   "word_text_diffs": 0,
+   "start_abs_diff_ms": {
+    "max": 0.0,
+    "p99": 0.0,
+    "mean": 0.0
+   },
+   "end_abs_diff_ms": {
+    "max": 0.0,
+    "mean": 0.0
+   },
+   "exact_time_matches": 2479,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t213_cpu": {
+   "media": "kishlak_15m.mp4",
+   "device": "cpu",
+   "torch": "2.13.0",
+   "load_sec": 1.32,
+   "transcribe_sec": 15.45,
+   "audio_sec": 900.005,
+   "x_realtime": 58.2,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": false,
+   "word_text_diffs": 1,
+   "start_abs_diff_ms": {
+    "max": 70.0,
+    "p99": 0.0,
+    "mean": 0.03
+   },
+   "end_abs_diff_ms": {
+    "max": 280.0,
+    "mean": 0.11
+   },
+   "exact_time_matches": 2477,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t211_mps": {
+   "media": "kishlak_15m.mp4",
+   "device": "mps:0",
+   "torch": "2.11.0",
+   "load_sec": 3.6,
+   "transcribe_sec": 17.88,
+   "audio_sec": 900.005,
+   "x_realtime": 50.3,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": true,
+   "word_text_diffs": 0,
+   "start_abs_diff_ms": {
+    "max": 0.0,
+    "p99": 0.0,
+    "mean": 0.0
+   },
+   "end_abs_diff_ms": {
+    "max": 40.0,
+    "mean": 0.02
+   },
+   "exact_time_matches": 2478,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t211_cpu": {
+   "media": "kishlak_15m.mp4",
+   "device": "cpu",
+   "torch": "2.11.0",
+   "load_sec": 1.45,
+   "transcribe_sec": 15.06,
+   "audio_sec": 900.005,
+   "x_realtime": 59.8,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": false,
+   "word_text_diffs": 1,
+   "start_abs_diff_ms": {
+    "max": 70.0,
+    "p99": 0.0,
+    "mean": 0.03
+   },
+   "end_abs_diff_ms": {
+    "max": 280.0,
+    "mean": 0.11
+   },
+   "exact_time_matches": 2477,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t251_mps": {
+   "media": "kishlak_15m.mp4",
+   "device": "mps:0",
+   "torch": "2.5.1",
+   "load_sec": 1.9,
+   "transcribe_sec": 24.06,
+   "audio_sec": 900.005,
+   "x_realtime": 37.4,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": true,
+   "word_text_diffs": 0,
+   "start_abs_diff_ms": {
+    "max": 0.0,
+    "p99": 0.0,
+    "mean": 0.0
+   },
+   "end_abs_diff_ms": {
+    "max": 40.0,
+    "mean": 0.02
+   },
+   "exact_time_matches": 2478,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  },
+  "k15_t251_cpu": {
+   "media": "kishlak_15m.mp4",
+   "device": "cpu",
+   "torch": "2.5.1",
+   "load_sec": 1.78,
+   "transcribe_sec": 15.09,
+   "audio_sec": 900.005,
+   "x_realtime": 59.6,
+   "ref_elapsed_sec": 18.34,
+   "words_ref": 2479,
+   "words_worker": 2479,
+   "word_sequence_identical": false,
+   "word_text_diffs": 1,
+   "start_abs_diff_ms": {
+    "max": 70.0,
+    "p99": 0.0,
+    "mean": 0.03
+   },
+   "end_abs_diff_ms": {
+    "max": 280.0,
+    "mean": 0.11
+   },
+   "exact_time_matches": 2477,
+   "cut_compat_worker": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   },
+   "cut_compat_ref": {
+    "input": 2479,
+    "kept": 2479,
+    "dropped": 0,
+    "dropped_ratio": 0.0,
+    "trimmed_overlap": 0,
+    "sentences": 248,
+    "candidates": 720,
+    "ok": true
+   }
+  }
+ },
+ "yolo_detections_identical_across_torch": {
+  "versions": {
+   "t251": "2.5.1",
+   "t211": "2.11.0",
+   "t213": "2.13.0"
+  },
+  "identical": true,
+  "webcam_detector_on_synthetic_webcam_frame": [
+   [
+    1393.9,
+    28.8,
+    1890.4,
+    236.6,
+    0.939,
+    0
+   ],
+   [
+    0.3,
+    557.7,
+    164.1,
+    676.7,
+    0.247,
+    0
+   ]
+  ]
+ },
+ "notes": [
+  "kfull: 4 timing differences = the 2 same-frame word pairs changed by ts4 (first ts4 variant: half split; final variant: last 40 ms, max diff 40 ms)",
+  "whisper-base FAIL = config.json missing on the Mac mini, not a torch problem",
+  "t213 uses torchaudio 2.11.0 (no torchaudio build for torch>=2.12)"
+ ]
+}
