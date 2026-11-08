@@ -153,10 +153,10 @@ def enrich_video_for_mode(
         _step("word_timestamps", 0.72, _load_words)
     elif _flag("WORD_LEVEL_SUBTITLES_ENABLED"):
         def _transcribe():
-            from scripts.shared.transcription.transcriber import Transcriber
-            t = Transcriber()
-            # Returns: {"text", "language", "segments", "words": [{word, start, end}]}
-            transcript = t.transcribe(audio_file=input_video_path)
+            # SONYA ASR (scripts/shared/asr): GigaAM v3 by default (owner decision), faster-whisper fallback.
+            # Returns: {"text", "language", "backend", "model", "segments", "words": [{word, start, end}]}
+            from scripts.shared import asr
+            transcript = asr.transcribe(input_video_path, language=params.get("language"))
             # Return word-level list directly
             return transcript.get("words", [])
         _step("word_timestamps", 0.72, _transcribe)

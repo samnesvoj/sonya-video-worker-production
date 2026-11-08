@@ -1,0 +1,45 @@
+{
+ "schema_version": 1,
+ "note": "CANDIDATE from the Mac mini (tools/models_publish.py scan rows, generated 2026-11-07). INCOMPLETE on purpose: see not_locked. Hashes are of the exact local files; gigaam = the files that produced the Mac mini reference transcripts.",
+ "models": {
+  "gigaam_v3_e2e_rnnt_ckpt": {
+   "s3_path": "models/gigaam/v3_e2e_rnnt.ckpt",
+   "sha256": "f60c62fe45902d967000770a12f260de7c5ac4d4b8e5e852f1df8c548e3958b5",
+   "size": 448929252
+  },
+  "gigaam_v3_e2e_rnnt_tokenizer": {
+   "s3_path": "models/gigaam/v3_e2e_rnnt_tokenizer.model",
+   "sha256": "828c12c991019eef952a960661f25a92d6ad279591e2ea466b4aeddf1d20a18a",
+   "size": 255336
+  },
+  "yolo11n": {
+   "s3_path": "models/common/yolo11n.pt",
+   "sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+   "size": 5613764
+  },
+  "yolo11n_pose": {
+   "s3_path": "models/common/yolo11n-pose.pt",
+   "sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+   "size": 6255593
+  },
+  "whisper_base_model": {
+   "s3_path": "models/whisper-base/model.bin",
+   "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+   "size": 145217532
+  },
+  "whisper_base_tokenizer": {
+   "s3_path": "models/whisper-base/tokenizer.json",
+   "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "size": 2203239
+  },
+  "whisper_base_vocabulary": {
+   "s3_path": "models/whisper-base/vocabulary.txt",
+   "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "size": 459861
+  }
+ },
+ "not_locked": {
+  "webcam_detector": "found ONE copy (size 5441498, sha256 b011911e6129fddebbc32a75cc3f7b3c22b5216dd9d6a6f446757cb67aa8481b) but NOT proven to be the reference: the Mac mini reference Cut runs logged 'webcam_detector.pt not found'. Owner decision needed (see docs/MAC_MINI_MODELS_ANSWERS.md)",
+  "whisper_base_config": "missing on the Mac mini (HF cache has only model.bin of faster-whisper-base); public sha256 is in models.required.json and was verified in CI - lock it from the pinned public URL"
+ }
+}

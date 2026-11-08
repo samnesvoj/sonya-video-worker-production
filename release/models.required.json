@@ -5,6 +5,50 @@
  "models_root_on_worker": "$MODELS_LOCAL_DIR (=/opt/sonya/models); S3 keys live in the MODELS_S3_BUCKET bucket",
  "models": [
   {
+   "key": "gigaam_v3_e2e_rnnt_ckpt",
+   "local_path": "gigaam/v3_e2e_rnnt.ckpt",
+   "s3_path": "models/gigaam/v3_e2e_rnnt.ckpt",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "role": "primary",
+   "loaded_by": "ASR backend (Mac mini branch): gigaam.load_model('v3_e2e_rnnt', download_root=<models root>/gigaam) - see docs/ASR_INTERFACE.md",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "GigaAM v3 e2e RNNT (upstream gigaam 0.2.0, commit 7447938d)",
+    "url": "https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/v3_e2e_rnnt.ckpt",
+    "license": "MIT (salute-developers/GigaAM)"
+   },
+   "notes": "OWNER DECISION: primary ASR. public_sha256 is intentionally null: the upstream CDN certificate expired on 2026-11-04, so the file cannot be fetched over verified TLS here. Authoritative values come from the Mac mini copy (scan) - its SHA-256 goes into models.lock.json. For the checkpoint the upstream MD5 (from the gigaam source at the pinned commit) is cross-checked by tools/models_publish.py. Size taken from the CDN response header.",
+   "public_sha256": null,
+   "public_size": 448929252,
+   "upstream_md5": "2730de7545ac43ad256485a462b0a27a"
+  },
+  {
+   "key": "gigaam_v3_e2e_rnnt_tokenizer",
+   "local_path": "gigaam/v3_e2e_rnnt_tokenizer.model",
+   "s3_path": "models/gigaam/v3_e2e_rnnt_tokenizer.model",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "role": "primary",
+   "loaded_by": "ASR backend (Mac mini branch): gigaam.load_model('v3_e2e_rnnt', download_root=<models root>/gigaam) - see docs/ASR_INTERFACE.md",
+   "required_for_gpu_test": true,
+   "source": {
+    "type": "public",
+    "name": "GigaAM v3 e2e RNNT (upstream gigaam 0.2.0, commit 7447938d)",
+    "url": "https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM/v3_e2e_rnnt_tokenizer.model",
+    "license": "MIT (salute-developers/GigaAM)"
+   },
+   "notes": "OWNER DECISION: primary ASR. public_sha256 is intentionally null: the upstream CDN certificate expired on 2026-11-04, so the file cannot be fetched over verified TLS here. Authoritative values come from the Mac mini copy (scan) - its SHA-256 goes into models.lock.json. For the checkpoint the upstream MD5 (from the gigaam source at the pinned commit) is cross-checked by tools/models_publish.py. Size taken from the CDN response header.",
+   "public_sha256": null,
+   "public_size": 255336,
+   "upstream_md5": null
+  },
+  {
    "key": "yolo11n",
    "local_path": "common/yolo11n.pt",
    "s3_path": "models/common/yolo11n.pt",
@@ -21,7 +65,8 @@
    },
    "notes": "Stock weights if the Mac mini file hash equals public_sha256; if it differs, the Mac mini file is the reference (it produced the tested results).",
    "public_sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
-   "public_size": 5613764
+   "public_size": 5613764,
+   "role": "primary"
   },
   {
    "key": "yolo11n_pose",
@@ -40,7 +85,8 @@
    },
    "notes": "Same rule as yolo11n.",
    "public_sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
-   "public_size": 6255593
+   "public_size": 6255593,
+   "role": "primary"
   },
   {
    "key": "webcam_detector",
@@ -59,7 +105,8 @@
    },
    "notes": "NOT public: only the Mac mini copy exists. Size and hash are unknown until the Mac mini reports them. If this file is missing the enhancer only logs a warning and crop quality silently changes.",
    "public_sha256": null,
-   "public_size": null
+   "public_size": null,
+   "role": "primary"
   },
   {
    "key": "whisper_base_config",
@@ -79,7 +126,8 @@
    },
    "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
    "public_sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
-   "public_size": 2309
+   "public_size": 2309,
+   "role": "fallback"
   },
   {
    "key": "whisper_base_model",
@@ -99,7 +147,8 @@
    },
    "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
    "public_sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
-   "public_size": 145217532
+   "public_size": 145217532,
+   "role": "fallback"
   },
   {
    "key": "whisper_base_tokenizer",
@@ -119,7 +168,8 @@
    },
    "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
    "public_sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
-   "public_size": 2203239
+   "public_size": 2203239,
+   "role": "fallback"
   },
   {
    "key": "whisper_base_vocabulary",
@@ -139,7 +189,8 @@
    },
    "notes": "ASR used by virality (word timestamps) and beep. DECISION NEEDED: 'base' is the code's current default; Russian quality may need small/medium/large-v3 (see alternatives_asr). If another size is chosen set SONYA_WHISPER_MODEL and replace these 4 entries.",
    "public_sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
-   "public_size": 459861
+   "public_size": 459861,
+   "role": "fallback"
   }
  ],
  "alternatives_asr": {
@@ -249,8 +300,7 @@
  "excluded": [
   "trailer_* models (Trailer disabled)",
   "face_landmarker.task (only lip-sync/streamer; LIP_SYNC_DETECTION_ENABLED default off)",
-  "silero TTS (Trailer only)",
-  "GigaAM (Mac-only ASR path via word_timestamps_path; see notes)"
+  "silero TTS (Trailer only)"
  ],
  "behaviour_flags_to_match_the_mac_mini_reference_run": {
   "SONYA_ENHANCERS_ENABLED": "true (default)",
@@ -261,6 +311,15 @@
   "LIP_SYNC_DETECTION_ENABLED": "default false",
   "GEMINI_LAYOUT_ENABLED": "default TRUE but needs GEMINI_API_KEY on the GPU host; without a key it is skipped with a warning. Decide: off for the first test (no external secret on a rented host) unless the reference run used it",
   "GEMINI_DIRECT_VIDEO_ENABLED": "default false",
-  "SONYA_ASR_OFFLINE": "set 1 once the ASR files are in S3 (forbids runtime HuggingFace downloads)"
+  "SONYA_ASR_OFFLINE": "1 (default in run_worker.sh): no model is ever downloaded at start-up or at run time",
+  "SONYA_ASR_BACKEND": "gigaam (default; faster_whisper only as fallback)"
+ },
+ "asr_decision": {
+  "decided_by": "owner",
+  "date": "2026-11-07",
+  "primary": "GigaAM v3 v3_e2e_rnnt",
+  "fallback": "faster-whisper base",
+  "start_shift_sec": 0.15,
+  "source": "docs/OWNER_DECISIONS.md"
  }
 }

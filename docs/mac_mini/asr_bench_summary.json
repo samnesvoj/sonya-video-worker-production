@@ -1,0 +1,849 @@
+{
+ "kish_a": {
+  "audio_sec": 180.0,
+  "speed": {
+   "gigaam_mps": {
+    "transcribe_sec": 3.33,
+    "x_realtime": 54.1,
+    "load_sec": 1.85,
+    "words": 475
+   },
+   "gigaam_cpu": {
+    "transcribe_sec": 3.2,
+    "x_realtime": 56.3,
+    "load_sec": 1.31,
+    "words": 475
+   },
+   "gigaam_raw": {
+    "transcribe_sec": 3.31,
+    "x_realtime": 54.3,
+    "load_sec": 1.48,
+    "words": 477
+   },
+   "fw_small": {
+    "transcribe_sec": 23.67,
+    "x_realtime": 7.6,
+    "load_sec": 0.54,
+    "words": 451
+   },
+   "fw_medium": {
+    "transcribe_sec": 80.64,
+    "x_realtime": 2.2,
+    "load_sec": 1.17,
+    "words": 478
+   },
+   "mlx_large_v3": {
+    "transcribe_sec": 40.47,
+    "x_realtime": 4.4,
+    "load_sec": 6.13,
+    "words": 472
+   }
+  },
+  "cross_wer": {
+   "gigaam_mps|fw_small": {
+    "wer_b_vs_a": 0.2653,
+    "wer_a_vs_b": 0.2857
+   },
+   "gigaam_mps|fw_medium": {
+    "wer_b_vs_a": 0.1811,
+    "wer_a_vs_b": 0.187
+   },
+   "gigaam_mps|mlx_large_v3": {
+    "wer_b_vs_a": 0.1621,
+    "wer_a_vs_b": 0.1696
+   },
+   "fw_small|fw_medium": {
+    "wer_b_vs_a": 0.2472,
+    "wer_a_vs_b": 0.237
+   },
+   "fw_small|mlx_large_v3": {
+    "wer_b_vs_a": 0.263,
+    "wer_a_vs_b": 0.2555
+   },
+   "fw_medium|mlx_large_v3": {
+    "wer_b_vs_a": 0.1065,
+    "wer_a_vs_b": 0.1079
+   },
+   "gigaam_mps|gigaam_cpu": {
+    "wer_b_vs_a": 0.0
+   }
+  },
+  "timing_vs_mlx_large_v3": {
+   "gigaam_raw": {
+    "matched": 410,
+    "start_median_ms": 165,
+    "start_p10_ms": 67,
+    "start_p90_ms": 364,
+    "end_median_ms": 50,
+    "start_abs_within_100ms": 0.193
+   },
+   "gigaam_mps": {
+    "matched": 410,
+    "start_median_ms": 65,
+    "start_p10_ms": -26,
+    "start_p90_ms": 237,
+    "end_median_ms": 50,
+    "start_abs_within_100ms": 0.624
+   },
+   "fw_small": {
+    "matched": 365,
+    "start_median_ms": 60,
+    "start_p10_ms": -140,
+    "start_p90_ms": 120,
+    "end_median_ms": 80,
+    "start_abs_within_100ms": 0.693
+   },
+   "fw_medium": {
+    "matched": 420,
+    "start_median_ms": 180,
+    "start_p10_ms": 100,
+    "start_p90_ms": 440,
+    "end_median_ms": 180,
+    "start_abs_within_100ms": 0.11
+   }
+  },
+  "timing_vs_fw_medium": {
+   "gigaam_raw": {
+    "matched": 402,
+    "start_median_ms": -23,
+    "start_p10_ms": -150,
+    "start_p90_ms": 82,
+    "end_median_ms": -125,
+    "start_abs_within_100ms": 0.719
+   },
+   "gigaam_mps": {
+    "matched": 402,
+    "start_median_ms": -131,
+    "start_p10_ms": -271,
+    "start_p90_ms": -3,
+    "end_median_ms": -125,
+    "start_abs_within_100ms": 0.331
+   },
+   "fw_small": {
+    "matched": 370,
+    "start_median_ms": -140,
+    "start_p10_ms": -600,
+    "start_p90_ms": -60,
+    "end_median_ms": -100,
+    "start_abs_within_100ms": 0.351
+   }
+  },
+  "timing_vs_fw_small": {
+   "gigaam_raw": {
+    "matched": 364,
+    "start_median_ms": 122,
+    "start_p10_ms": 16,
+    "start_p90_ms": 437,
+    "end_median_ms": -28,
+    "start_abs_within_100ms": 0.401
+   },
+   "gigaam_mps": {
+    "matched": 364,
+    "start_median_ms": 26,
+    "start_p10_ms": -80,
+    "start_p90_ms": 330,
+    "end_median_ms": -27,
+    "start_abs_within_100ms": 0.662
+   },
+   "fw_medium": {
+    "matched": 370,
+    "start_median_ms": 140,
+    "start_p10_ms": 60,
+    "start_p90_ms": 600,
+    "end_median_ms": 100,
+    "start_abs_within_100ms": 0.351
+   }
+  }
+ },
+ "satir": {
+  "audio_sec": 180.0,
+  "speed": {
+   "gigaam_mps": {
+    "transcribe_sec": 3.42,
+    "x_realtime": 52.6,
+    "load_sec": 1.54,
+    "words": 392
+   },
+   "gigaam_cpu": {
+    "transcribe_sec": 3.25,
+    "x_realtime": 55.5,
+    "load_sec": 1.35,
+    "words": 392
+   },
+   "gigaam_raw": {
+    "transcribe_sec": 3.4,
+    "x_realtime": 53.0,
+    "load_sec": 1.53,
+    "words": 392
+   },
+   "fw_small": {
+    "transcribe_sec": 24.22,
+    "x_realtime": 7.4,
+    "load_sec": 0.35,
+    "words": 389
+   },
+   "fw_medium": {
+    "transcribe_sec": 76.07,
+    "x_realtime": 2.4,
+    "load_sec": 0.8,
+    "words": 393
+   },
+   "mlx_large_v3": {
+    "transcribe_sec": 36.42,
+    "x_realtime": 4.9,
+    "load_sec": 5.33,
+    "words": 400
+   }
+  },
+  "cross_wer": {
+   "gigaam_mps|fw_small": {
+    "wer_b_vs_a": 0.1122,
+    "wer_a_vs_b": 0.1158
+   },
+   "gigaam_mps|fw_medium": {
+    "wer_b_vs_a": 0.074,
+    "wer_a_vs_b": 0.0749
+   },
+   "gigaam_mps|mlx_large_v3": {
+    "wer_b_vs_a": 0.0663,
+    "wer_a_vs_b": 0.0662
+   },
+   "fw_small|fw_medium": {
+    "wer_b_vs_a": 0.0921,
+    "wer_a_vs_b": 0.0904
+   },
+   "fw_small|mlx_large_v3": {
+    "wer_b_vs_a": 0.1184,
+    "wer_a_vs_b": 0.1145
+   },
+   "fw_medium|mlx_large_v3": {
+    "wer_b_vs_a": 0.0672,
+    "wer_a_vs_b": 0.0662
+   },
+   "gigaam_mps|gigaam_cpu": {
+    "wer_b_vs_a": 0.0
+   }
+  },
+  "timing_vs_mlx_large_v3": {
+   "gigaam_raw": {
+    "matched": 372,
+    "start_median_ms": 162,
+    "start_p10_ms": 78,
+    "start_p90_ms": 490,
+    "end_median_ms": 49,
+    "start_abs_within_100ms": 0.177
+   },
+   "gigaam_mps": {
+    "matched": 372,
+    "start_median_ms": 59,
+    "start_p10_ms": -25,
+    "start_p90_ms": 341,
+    "end_median_ms": 49,
+    "start_abs_within_100ms": 0.661
+   },
+   "fw_small": {
+    "matched": 351,
+    "start_median_ms": 80,
+    "start_p10_ms": 0,
+    "start_p90_ms": 220,
+    "end_median_ms": 60,
+    "start_abs_within_100ms": 0.641
+   },
+   "fw_medium": {
+    "matched": 372,
+    "start_median_ms": 190,
+    "start_p10_ms": 80,
+    "start_p90_ms": 540,
+    "end_median_ms": 180,
+    "start_abs_within_100ms": 0.108
+   }
+  },
+  "timing_vs_fw_medium": {
+   "gigaam_raw": {
+    "matched": 367,
+    "start_median_ms": -31,
+    "start_p10_ms": -145,
+    "start_p90_ms": 69,
+    "end_median_ms": -137,
+    "start_abs_within_100ms": 0.774
+   },
+   "gigaam_mps": {
+    "matched": 367,
+    "start_median_ms": -140,
+    "start_p10_ms": -263,
+    "start_p90_ms": -21,
+    "end_median_ms": -137,
+    "start_abs_within_100ms": 0.283
+   },
+   "fw_small": {
+    "matched": 356,
+    "start_median_ms": -120,
+    "start_p10_ms": -320,
+    "start_p90_ms": -40,
+    "end_median_ms": -120,
+    "start_abs_within_100ms": 0.404
+   }
+  },
+  "timing_vs_fw_small": {
+   "gigaam_raw": {
+    "matched": 350,
+    "start_median_ms": 85,
+    "start_p10_ms": 1,
+    "start_p90_ms": 275,
+    "end_median_ms": -20,
+    "start_abs_within_100ms": 0.554
+   },
+   "gigaam_mps": {
+    "matched": 350,
+    "start_median_ms": -19,
+    "start_p10_ms": -105,
+    "start_p90_ms": 130,
+    "end_median_ms": -20,
+    "start_abs_within_100ms": 0.751
+   },
+   "fw_medium": {
+    "matched": 356,
+    "start_median_ms": 120,
+    "start_p10_ms": 20,
+    "start_p90_ms": 320,
+    "end_median_ms": 120,
+    "start_abs_within_100ms": 0.404
+   }
+  }
+ },
+ "exile": {
+  "audio_sec": 180.0,
+  "speed": {
+   "gigaam_mps": {
+    "transcribe_sec": 3.23,
+    "x_realtime": 55.7,
+    "load_sec": 1.51,
+    "words": 372
+   },
+   "gigaam_cpu": {
+    "transcribe_sec": 3.29,
+    "x_realtime": 54.7,
+    "load_sec": 1.33,
+    "words": 372
+   },
+   "gigaam_raw": {
+    "transcribe_sec": 3.37,
+    "x_realtime": 53.5,
+    "load_sec": 1.59,
+    "words": 383
+   },
+   "fw_small": {
+    "transcribe_sec": 33.32,
+    "x_realtime": 5.4,
+    "load_sec": 0.47,
+    "words": 336
+   },
+   "fw_medium": {
+    "transcribe_sec": 105.45,
+    "x_realtime": 1.7,
+    "load_sec": 0.8,
+    "words": 348
+   },
+   "mlx_large_v3": {
+    "transcribe_sec": 71.53,
+    "x_realtime": 2.5,
+    "load_sec": 4.93,
+    "words": 328
+   }
+  },
+  "cross_wer": {
+   "gigaam_mps|fw_small": {
+    "wer_b_vs_a": 0.3737,
+    "wer_a_vs_b": 0.4251
+   },
+   "gigaam_mps|fw_medium": {
+    "wer_b_vs_a": 0.3038,
+    "wer_a_vs_b": 0.3247
+   },
+   "gigaam_mps|mlx_large_v3": {
+    "wer_b_vs_a": 0.4946,
+    "wer_a_vs_b": 0.561
+   },
+   "fw_small|fw_medium": {
+    "wer_b_vs_a": 0.3456,
+    "wer_a_vs_b": 0.3247
+   },
+   "fw_small|mlx_large_v3": {
+    "wer_b_vs_a": 0.5505,
+    "wer_a_vs_b": 0.5488
+   },
+   "fw_medium|mlx_large_v3": {
+    "wer_b_vs_a": 0.5259,
+    "wer_a_vs_b": 0.5579
+   },
+   "gigaam_mps|gigaam_cpu": {
+    "wer_b_vs_a": 0.0
+   }
+  },
+  "timing_vs_mlx_large_v3": {
+   "gigaam_raw": {
+    "matched": 201,
+    "start_median_ms": 211,
+    "start_p10_ms": 96,
+    "start_p90_ms": 990,
+    "end_median_ms": 80,
+    "start_abs_within_100ms": 0.095
+   },
+   "gigaam_mps": {
+    "matched": 201,
+    "start_median_ms": 113,
+    "start_p10_ms": -4,
+    "start_p90_ms": 840,
+    "end_median_ms": 80,
+    "start_abs_within_100ms": 0.453
+   },
+   "fw_small": {
+    "matched": 184,
+    "start_median_ms": 120,
+    "start_p10_ms": 20,
+    "start_p90_ms": 630,
+    "end_median_ms": 80,
+    "start_abs_within_100ms": 0.364
+   },
+   "fw_medium": {
+    "matched": 191,
+    "start_median_ms": 220,
+    "start_p10_ms": 110,
+    "start_p90_ms": 940,
+    "end_median_ms": 170,
+    "start_abs_within_100ms": 0.079
+   }
+  },
+  "timing_vs_fw_medium": {
+   "gigaam_raw": {
+    "matched": 279,
+    "start_median_ms": -6,
+    "start_p10_ms": -109,
+    "start_p90_ms": 259,
+    "end_median_ms": -109,
+    "start_abs_within_100ms": 0.717
+   },
+   "gigaam_mps": {
+    "matched": 279,
+    "start_median_ms": -120,
+    "start_p10_ms": -220,
+    "start_p90_ms": 130,
+    "end_median_ms": -109,
+    "start_abs_within_100ms": 0.301
+   },
+   "fw_small": {
+    "matched": 254,
+    "start_median_ms": -80,
+    "start_p10_ms": -280,
+    "start_p90_ms": 0,
+    "end_median_ms": -100,
+    "start_abs_within_100ms": 0.528
+   }
+  },
+  "timing_vs_fw_small": {
+   "gigaam_raw": {
+    "matched": 254,
+    "start_median_ms": 79,
+    "start_p10_ms": -22,
+    "start_p90_ms": 633,
+    "end_median_ms": -16,
+    "start_abs_within_100ms": 0.575
+   },
+   "gigaam_mps": {
+    "matched": 254,
+    "start_median_ms": -24,
+    "start_p10_ms": -139,
+    "start_p90_ms": 483,
+    "end_median_ms": -16,
+    "start_abs_within_100ms": 0.622
+   },
+   "fw_medium": {
+    "matched": 254,
+    "start_median_ms": 80,
+    "start_p10_ms": 0,
+    "start_p90_ms": 280,
+    "end_median_ms": 100,
+    "start_abs_within_100ms": 0.528
+   }
+  }
+ },
+ "k15": {
+  "audio_sec": 900.005,
+  "speed": {
+   "gigaam_mps": {
+    "transcribe_sec": 15.39,
+    "x_realtime": 58.5,
+    "load_sec": 2.03,
+    "words": 2474
+   },
+   "gigaam_cpu": {
+    "transcribe_sec": 14.71,
+    "x_realtime": 61.2,
+    "load_sec": 1.49,
+    "words": 2476
+   },
+   "gigaam_raw": {
+    "transcribe_sec": 14.8,
+    "x_realtime": 60.8,
+    "load_sec": 1.51,
+    "words": 2480
+   },
+   "fw_small": {
+    "transcribe_sec": 154.32,
+    "x_realtime": 5.8,
+    "load_sec": 0.48,
+    "words": 2433
+   },
+   "fw_medium": {
+    "transcribe_sec": 330.43,
+    "x_realtime": 2.7,
+    "load_sec": 1.06,
+    "words": 1269
+   },
+   "mlx_large_v3": {
+    "transcribe_sec": 243.44,
+    "x_realtime": 3.7,
+    "load_sec": 5.31,
+    "words": 2497
+   }
+  },
+  "cross_wer": {
+   "gigaam_mps|fw_small": {
+    "wer_b_vs_a": 0.1944,
+    "wer_a_vs_b": 0.2016
+   },
+   "gigaam_mps|fw_medium": {
+    "wer_b_vs_a": 0.6205,
+    "wer_a_vs_b": 1.2241
+   },
+   "gigaam_mps|mlx_large_v3": {
+    "wer_b_vs_a": 0.1463,
+    "wer_a_vs_b": 0.1469
+   },
+   "fw_small|fw_medium": {
+    "wer_b_vs_a": 0.6408,
+    "wer_a_vs_b": 1.2193
+   },
+   "fw_small|mlx_large_v3": {
+    "wer_b_vs_a": 0.1978,
+    "wer_a_vs_b": 0.1915
+   },
+   "fw_medium|mlx_large_v3": {
+    "wer_b_vs_a": 1.1754,
+    "wer_a_vs_b": 0.598
+   },
+   "gigaam_mps|gigaam_cpu": {
+    "wer_b_vs_a": 0.0012
+   }
+  },
+  "timing_vs_mlx_large_v3": {
+   "gigaam_raw": {
+    "matched": 2212,
+    "start_median_ms": 160,
+    "start_p10_ms": 70,
+    "start_p90_ms": 370,
+    "end_median_ms": 59,
+    "start_abs_within_100ms": 0.191
+   },
+   "gigaam_mps": {
+    "matched": 2212,
+    "start_median_ms": 63,
+    "start_p10_ms": -19,
+    "start_p90_ms": 244,
+    "end_median_ms": 60,
+    "start_abs_within_100ms": 0.669
+   },
+   "fw_small": {
+    "matched": 2086,
+    "start_median_ms": 70,
+    "start_p10_ms": 10,
+    "start_p90_ms": 250,
+    "end_median_ms": 70,
+    "start_abs_within_100ms": 0.597
+   },
+   "fw_medium": {
+    "matched": 1022,
+    "start_median_ms": 170,
+    "start_p10_ms": 90,
+    "start_p90_ms": 390,
+    "end_median_ms": 150,
+    "start_abs_within_100ms": 0.118
+   }
+  },
+  "timing_vs_fw_medium": {
+   "gigaam_raw": {
+    "matched": 996,
+    "start_median_ms": -25,
+    "start_p10_ms": -150,
+    "start_p90_ms": 63,
+    "end_median_ms": -110,
+    "start_abs_within_100ms": 0.756
+   },
+   "gigaam_mps": {
+    "matched": 996,
+    "start_median_ms": -120,
+    "start_p10_ms": -263,
+    "start_p90_ms": -19,
+    "end_median_ms": -110,
+    "start_abs_within_100ms": 0.368
+   },
+   "fw_small": {
+    "matched": 960,
+    "start_median_ms": -100,
+    "start_p10_ms": -260,
+    "start_p90_ms": 0,
+    "end_median_ms": -100,
+    "start_abs_within_100ms": 0.474
+   }
+  },
+  "timing_vs_fw_small": {
+   "gigaam_raw": {
+    "matched": 2070,
+    "start_median_ms": 78,
+    "start_p10_ms": -21,
+    "start_p90_ms": 215,
+    "end_median_ms": -5,
+    "start_abs_within_100ms": 0.593
+   },
+   "gigaam_mps": {
+    "matched": 2070,
+    "start_median_ms": -20,
+    "start_p10_ms": -120,
+    "start_p90_ms": 97,
+    "end_median_ms": -5,
+    "start_abs_within_100ms": 0.768
+   },
+   "fw_medium": {
+    "matched": 946,
+    "start_median_ms": 80,
+    "start_p10_ms": 0,
+    "start_p90_ms": 220,
+    "end_median_ms": 100,
+    "start_abs_within_100ms": 0.481
+   }
+  },
+  "cut": {
+   "gigaam_mps": {
+    "candidates": 2359,
+    "clips": [
+     {
+      "start": 523.69,
+      "end": 591.46,
+      "status": "snapped"
+     },
+     {
+      "start": 676.45,
+      "end": 713.15,
+      "status": "snapped"
+     },
+     {
+      "start": 144.07,
+      "end": 197.57,
+      "status": "snapped"
+     },
+     {
+      "start": 462.23,
+      "end": 518.77,
+      "status": "snapped"
+     },
+     {
+      "start": 713.0,
+      "end": 741.75,
+      "status": "snapped"
+     },
+     {
+      "start": 800.93,
+      "end": 827.65,
+      "status": "snapped"
+     },
+     {
+      "start": 605.6,
+      "end": 659.39,
+      "status": "snapped"
+     },
+     {
+      "start": 745.42,
+      "end": 769.66,
+      "status": "snapped"
+     }
+    ],
+    "same_moment_as_gigaam": 8,
+    "iou_with_mac_mini_reference_clips": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ]
+   },
+   "fw_small": {
+    "candidates": 742,
+    "clips": [
+     {
+      "start": 741.69,
+      "end": 769.61,
+      "status": "snapped"
+     },
+     {
+      "start": 676.4,
+      "end": 741.71,
+      "status": "snapped"
+     },
+     {
+      "start": 852.83,
+      "end": 891.21,
+      "status": "snapped"
+     },
+     {
+      "start": 403.36,
+      "end": 434.35,
+      "status": "snapped"
+     },
+     {
+      "start": 207.48,
+      "end": 241.27,
+      "status": "snapped"
+     },
+     {
+      "start": 770.18,
+      "end": 808.73,
+      "status": "snapped"
+     },
+     {
+      "start": 639.75,
+      "end": 675.69,
+      "status": "snapped"
+     },
+     {
+      "start": 148.53,
+      "end": 184.39,
+      "status": "snapped"
+     }
+    ],
+    "same_moment_as_gigaam": 3,
+    "iou_with_mac_mini_reference_clips": [
+     0.67,
+     0.56,
+     0.0,
+     0.0,
+     0.44
+    ]
+   },
+   "fw_medium": {
+    "candidates": 437,
+    "clips": [
+     {
+      "start": 675.59,
+      "end": 741.73,
+      "status": "snapped"
+     },
+     {
+      "start": 741.69,
+      "end": 765.21,
+      "status": "snapped"
+     },
+     {
+      "start": 765.94,
+      "end": 808.93,
+      "status": "snapped"
+     },
+     {
+      "start": 653.16,
+      "end": 675.65,
+      "status": "snapped"
+     },
+     {
+      "start": 820.07,
+      "end": 842.83,
+      "status": "snapped"
+     },
+     {
+      "start": 556.85,
+      "end": 591.31,
+      "status": "snapped"
+     },
+     {
+      "start": 98.0,
+      "end": 123.27,
+      "status": "snapped"
+     },
+     {
+      "start": 393.46,
+      "end": 424.01,
+      "status": "snapped"
+     }
+    ],
+    "same_moment_as_gigaam": 3,
+    "iou_with_mac_mini_reference_clips": [
+     0.0,
+     0.55,
+     0.0,
+     0.51,
+     0.43
+    ]
+   },
+   "mlx_large_v3": {
+    "candidates": 3150,
+    "clips": [
+     {
+      "start": 676.42,
+      "end": 741.72,
+      "status": "snapped"
+     },
+     {
+      "start": 741.72,
+      "end": 764.9,
+      "status": "snapped"
+     },
+     {
+      "start": 142.47,
+      "end": 184.3,
+      "status": "snapped"
+     },
+     {
+      "start": 470.17,
+      "end": 518.44,
+      "status": "snapped"
+     },
+     {
+      "start": 613.78,
+      "end": 649.44,
+      "status": "snapped"
+     },
+     {
+      "start": 829.95,
+      "end": 867.52,
+      "status": "snapped"
+     },
+     {
+      "start": 764.97,
+      "end": 808.7,
+      "status": "snapped"
+     },
+     {
+      "start": 116.69,
+      "end": 142.62,
+      "status": "snapped"
+     }
+    ],
+    "same_moment_as_gigaam": 5,
+    "iou_with_mac_mini_reference_clips": [
+     0.73,
+     0.56,
+     0.85,
+     0.0,
+     0.44
+    ]
+   }
+  }
+ },
+ "_method": {
+  "audio": "WAV 16 kHz extracts: kish_a=kishlak.mp4 2169-2349 s, satir=satir_cian.mp4 60-240 s, exile=exile_kringe.mp4 5880-6060 s, k15=kishlak_15m.mp4",
+  "wer": "cross-model only (no human transcript): lowercase, ё->е, punctuation removed, whisper '-то' glued",
+  "timing": "median of (model - reference model) over identical matched words, ms",
+  "faster_whisper": "1.2.1, CPU int8, language=ru, beam 5, vad, word_timestamps (worker defaults); base NOT RUN (no config.json); large-v3 NOT on disk",
+  "mlx_large_v3": "mlx-whisper 0.4.3 large-v3 fp16 (Apple only; same method as CUT_PLAYBOOK 160 ms measurement)",
+  "gigaam": "worker backend scripts/shared/asr, torch 2.14.1 MPS fp16 (gigaam_raw = no post-processing)",
+  "cut_reference": "5 Mac mini reference clips (run 20261016-233738) inside 0-900 s"
+ }
+}
