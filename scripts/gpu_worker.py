@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -105,6 +106,7 @@ _CONTENT_TYPES = {
     ".json": "application/json",
     ".srt": "text/plain",
     ".vtt": "text/vtt",
+    ".ass": "text/x-ssa",
 }
 _FILE_TYPES = {
     ".mp4": "output",
@@ -112,6 +114,7 @@ _FILE_TYPES = {
     ".json": "enrichment_json",
     ".srt": "subtitle",
     ".vtt": "subtitle",
+    ".ass": "subtitle",     # burned-in subtitle source of a clip: never counted as a clip
 }
 
 
@@ -127,6 +130,7 @@ def _on_sigterm(signum, _frame) -> None:
     logger.warning("[worker] signal=%s received active_job=%s", signum, job_id)
     if job_id:
         _ACTIVE_JOB["id"] = None
+        os.environ["WORKER_API_DURABLE_SEC"] = "5"   # docker stop grants ~10 s: never block the shutdown on retries
         _fail(job_id, "WORKER_SHUTDOWN", "worker terminated while job was running", retry=True)
     raise SystemExit(143)
 
@@ -208,6 +212,33 @@ class _BackendAPIClient:
             )
         return resp.json()
 
+    def _post_durable(self, path: str, body: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
+        """_post for the calls whose loss loses the user's result (files / complete / fail): a backend or
+        network blip (connection error, timeout, HTTP 5xx/408/429) is retried with backoff for up to
+        WORKER_API_DURABLE_SEC (default 900 s) instead of dropping the finished job. The backend handlers
+        are idempotent (files: ON CONFLICT (s3_key) DO NOTHING; complete: plain UPDATE). Other 4xx raise
+        at once: retrying a rejected request cannot help."""
+        budget = float(os.environ.get("WORKER_API_DURABLE_SEC", "900"))
+        deadline = time.monotonic() + budget
+        delay = 2.0
+        while True:
+            try:
+                return self._post(path, body, timeout=timeout)
+            except RuntimeError as exc:          # HTTP status from the backend
+                m = re.search(r"HTTP (\d{3})", str(exc))
+                code = int(m.group(1)) if m else 0
+                if not (code >= 500 or code in (408, 429)):
+                    raise
+                err: Exception = exc
+            except Exception as exc:             # connection reset / TLS EOF / timeout / DNS
+                err = exc
+            if time.monotonic() + delay > deadline:
+                raise err
+            logger.warning("[api] %s unreachable (%s) - retry in %.0f s", path.rsplit("/", 1)[-1],
+                           str(err)[:160], delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+
     def claim_job(
         self,
         job_id: Optional[str],
@@ -244,7 +275,7 @@ class _BackendAPIClient:
         processing_ms: int,
         enrichment_keys: Optional[List[str]] = None,
     ) -> None:
-        self._post(
+        self._post_durable(
             f"/api/worker/jobs/{job_id}/complete",
             {
                 "s3_output_key": s3_output_key,
@@ -262,7 +293,7 @@ class _BackendAPIClient:
         retry: bool,
     ) -> None:
         try:
-            self._post(
+            self._post_durable(
                 f"/api/worker/jobs/{job_id}/fail",
                 {
                     "error_code": error_code,
@@ -284,7 +315,7 @@ class _BackendAPIClient:
         size_bytes: int,
     ) -> None:
         try:
-            self._post(
+            self._post_durable(
                 f"/api/worker/jobs/{job_id}/files",
                 {
                     "file_type": file_type,
@@ -429,6 +460,18 @@ def ensure_models_for_mode(mode: str) -> bool:
 
 
 # ── Heartbeat ──────────────────────────────────────────────────────────────────
+
+def _progress_args(step: Any, pct: Any) -> "tuple[str, float]":
+    """Runners call progress_callback(stage, fraction) (virality, enhancer) or (fraction, text) (BEEP):
+    accept both, like the Desktop mode child (sonya_desktop/modes/child.py). Never raises."""
+    if isinstance(step, (int, float)) and not isinstance(step, bool) and not isinstance(pct, (int, float)):
+        step, pct = pct, step
+    try:
+        frac = float(pct) if pct is not None else 0.0
+    except (TypeError, ValueError):
+        frac = 0.0
+    return (str(step) if step is not None else "running"), frac
+
 
 class _HeartbeatPulse:
     """
@@ -624,7 +667,8 @@ def process_job(job: dict, worker_id: str) -> None:
             "assembling": "assembling",
         }
 
-        def _progress(step: str, pct: float) -> None:
+        def _progress(step=None, pct=None, *_a, **_kw) -> None:
+            step, pct = _progress_args(step, pct)
             logger.info(
                 "[worker] job_id=%s step=%s progress=%.0f%%", job_id, step, pct * 100
             )

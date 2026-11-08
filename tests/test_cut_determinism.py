@@ -16,6 +16,13 @@ from scripts.shared import cut_selection as cs
 REPO = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _legacy_virality_path(monkeypatch):
+    """These tests pin the OLD virality path (kept for rollback): production jobs now run the Mac mini
+    recipe (scripts/shared/cut_profile.py, tests/test_cut_profile.py); SONYA_CUT_PROFILE=legacy restores it."""
+    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")
+
+
 def interview(seed=0, n=40):
     rng = random.Random(seed)
     out, t = [], 0.4

@@ -53,6 +53,16 @@ THRESHOLDS = {
 
 
 # ----------------------------------------------------------------------------- criteria
+# What the production site really sends (auth.js collectFormData + apiCreateVideoJob): only the user's choices,
+# never Cut settings -> the worker applies the Mac mini recipe itself (scripts/shared/cut_profile.py).
+SITE_VIRALITY_PARAMS = {"source": {"mode": "upload", "url": "", "fileName": "control.mp4", "platform": "upload"},
+                        "brand": "sonya", "clipType": "viral",
+                        "settings": {"subtitleStyle": "viral", "voiceoverEnabled": False, "voiceType": "male-1",
+                                     "translation": "none"},
+                        "frontend": "legacy_static_sonya", "production_endpoint": "/api/generation/jobs"}
+SITE_BEEP_PARAMS = {"source": {"mode": "upload", "url": "", "fileName": "control_beep.mp4", "platform": "upload"},
+                    "brand": "sonya", "frontend": "legacy_static_sonya", "production_endpoint": "/api/generation/jobs"}
+
 def evaluate(rep: dict, thr: dict = THRESHOLDS) -> List[dict]:
     c: List[dict] = []
 
@@ -120,13 +130,13 @@ def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str,
 
     j1 = j2 = None
     try:
-        j1 = env.stub.enqueue("virality", control_key); say("job 1 (virality) queued")
+        j1 = env.stub.enqueue("virality", control_key, SITE_VIRALITY_PARAMS); say("job 1 (virality) queued")
         done = lambda jid: (lambda: env.stub.jobs[jid]["status"] in ("completed", "failed"))
         wait(done(j1), 25 * 60, "job 1 finished")
         insts = env.store.all(); iid = insts[0].id if insts else None
         wait(lambda: env.store.get(iid).state in ("stopped", "stopping"), 5 * 60, "instance stop requested")
         wait(lambda: env.store.get(iid).state == "stopped", 3 * 60, "instance stopped")
-        j2 = env.stub.enqueue("beep", beep_key or control_key); say("job 2 (beep) queued")
+        j2 = env.stub.enqueue("beep", beep_key or control_key, SITE_BEEP_PARAMS); say("job 2 (beep) queued")
         wait(done(j2), 25 * 60, "job 2 finished (via RESUME)")
         wait(lambda: env.store.get(iid).state in ("stopped", "stopping"), 5 * 60, "instance stopped again")
     except TimeoutError as exc:
@@ -279,10 +289,19 @@ def preflight(args) -> List[dict]:
     for name in ("S3_ENDPOINT_URL", "S3_REGION", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "MODELS_S3_BUCKET"):
         add(f"env {name} present (value not shown)", bool(os.environ.get(name)))
     add("Vast API key file present (chmod 600)", bool(os.environ.get("VAST_API_KEY_FILE")) and (pathlib.Path(os.environ["VAST_API_KEY_FILE"]).stat().st_mode & 0o077) == 0 if os.environ.get("VAST_API_KEY_FILE") and pathlib.Path(os.environ["VAST_API_KEY_FILE"]).exists() else False)
-    add("backend URL is https (tunnel to the stub)", (args.backend_url or "").startswith("https://"), "")
+    add("backend URL is https, or the bore.pub test tunnel (stub only, throwaway secret)", _tunnel_url_ok(args.backend_url), "")
     if getattr(args, "online_checks", False):
         res += online_checks(args, lock)
     return res
+
+
+def _tunnel_url_ok(url: Optional[str]) -> bool:
+    """https (any tunnel) or plain http to bore.pub: bore is a raw TCP tunnel that can re-open the SAME public port
+    after a drop, so the worker's BACKEND_API_URL never changes mid-run (pinggy's free URL died after ~18 min in run 2).
+    Plain http is acceptable ONLY for the stub API: the worker secret is throwaway, made for this run."""
+    import re as _re
+    url = url or ""
+    return url.startswith("https://") or bool(_re.fullmatch(r"http://bore\.pub:\d{4,5}", url))
 
 
 def _http(url: str, headers: Optional[dict] = None, method: str = "GET", timeout: int = 20):
@@ -320,7 +339,7 @@ def online_checks(args, lock: dict) -> List[dict]:
             st, _ = _http(f"https://ghcr.io/v2/{name}/manifests/{digest}", {"Authorization": f"Bearer {t}", "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"}, "HEAD")
             ok = st == 200
         add("image pullable WITHOUT login (Vast pulls anonymously)", ok, f"HTTP {st}" + ("" if ok else " - make the GHCR package public (base image has no SONYA code)"))
-    if args.backend_url and args.backend_url.startswith("https://"):
+    if args.backend_url and _tunnel_url_ok(args.backend_url):
         from tools.stub_worker_api import serve_in_thread
         try:
             srv, _ = serve_in_thread(StubState(), _secrets.token_urlsafe(16), port=getattr(args, "stub_port", 8787))   # same port live() will use
@@ -399,7 +418,8 @@ def live(args) -> dict:                                       # pragma: no cover
         srv.shutdown()
     rep["quality"] = {"outputs_valid": None, "compare_verdict": None, "note": "download the outputs listed in job_files, run tools/compare_runs.py vs the Mac mini reference, watch them; then set these two fields"}
     blob = "\n".join(env.logs) + json.dumps([env.timelines(i.label) for i in env.store.all()])
-    needles = [secret, os.environ.get("S3_SECRET_ACCESS_KEY", ""), os.environ.get("S3_ACCESS_KEY_ID", ""), os.environ.get("GITHUB_RELEASE_TOKEN", ""), "ghs_", "github_pat_", "BEGIN PRIVATE KEY"]
+    needles = [secret, os.environ.get("S3_SECRET_ACCESS_KEY", ""), os.environ.get("S3_ACCESS_KEY_ID", ""), os.environ.get("GITHUB_RELEASE_TOKEN", ""),
+               os.environ.get("TIMEWEB_GEMINI_API_KEY", ""), os.environ.get("OPENROUTER_API_KEY", ""), "ghs_", "github_pat_", "BEGIN PRIVATE KEY"]
     have_logs = any(l.strip() for l in env.logs)
     rep["secret_scan"] = {"clean": (not any(n and n in blob for n in needles)) if have_logs else None, "note": "scanned container log + timelines for the run secret, S3 keys, GitHub tokens" if have_logs else "could not capture logs: scan them by hand BEFORE trusting this"}
     (args.out).mkdir(parents=True, exist_ok=True)

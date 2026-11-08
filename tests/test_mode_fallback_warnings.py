@@ -17,6 +17,13 @@ from scripts.shared.crop import smart_crop_adapter
 from scripts.shared.enhancers import sonya_enhancer
 
 
+@pytest.fixture(autouse=True)
+def _legacy_virality_path(monkeypatch):
+    """These tests pin the OLD virality path (kept for rollback): production jobs now run the Mac mini
+    recipe (scripts/shared/cut_profile.py, tests/test_cut_profile.py); SONYA_CUT_PROFILE=legacy restores it."""
+    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")
+
+
 @pytest.mark.parametrize("mode,key", [
     ("virality", "virality_engine_unavailable"),
     ("stories", "stories_engine_unavailable"),

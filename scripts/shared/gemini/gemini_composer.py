@@ -375,6 +375,19 @@ def get_video_codec_params(video_path: str) -> dict:
 # GeminiComposer
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _local_model(name: str, required: bool = True):
+    """Verified weights from MODELS_LOCAL_DIR/common (models lock, sha256-checked at readiness) - never a bare
+    name, which makes ultralytics download from GitHub at job time (run 2). Missing → RuntimeError (caught by the
+    caller: that detector is just off) or None when not required."""
+    from scripts.shared.model_paths import model_file
+    path = model_file("common", name)
+    if path.exists():
+        return str(path)
+    if required:
+        raise RuntimeError(f"{name} not in {path.parent} (no runtime downloads)")
+    return None
+
+
 class GeminiComposer:
     """
     Composes vertical videos based on Gemini's layout instructions.
@@ -400,7 +413,7 @@ class GeminiComposer:
         self.YOLO_AVAILABLE = YOLO_AVAILABLE
         if YOLO_AVAILABLE:
             try:
-                self.yolo_pose = YOLO("yolo11n-pose.pt")
+                self.yolo_pose = YOLO(_local_model("yolo11n-pose.pt"))
                 print(" YOLO-Pose loaded for skeleton detection")
             except Exception as e:
                 print(f" YOLO-Pose not available: {e}")
@@ -408,7 +421,7 @@ class GeminiComposer:
             # ── YOLO plain (person bounding box) ─────────────────────────
             self.yolo = None
             try:
-                self.yolo = YOLO("yolo11n.pt")
+                self.yolo = YOLO(_local_model("yolo11n.pt"))
                 print(" YOLO loaded for person detection")
             except Exception as e:
                 print(f" YOLO not available: {e}")
@@ -418,7 +431,8 @@ class GeminiComposer:
         # ── Webcam detector (custom trained model) ────────────────────────
         self.yolo_webcam = None
         script_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        webcam_model_path = os.path.join(script_dir, "models", "webcam_detector.pt")
+        webcam_model_path = _local_model("webcam_detector.pt", required=False) or \
+            os.path.join(script_dir, "models", "webcam_detector.pt")
         self.webcam_model_path = webcam_model_path
 
         if YOLO_AVAILABLE:
@@ -436,10 +450,14 @@ class GeminiComposer:
         model_path = os.path.join(script_dir, "blaze_face_short_range.tflite")
         self.model_path = model_path
 
-        if MEDIAPIPE_AVAILABLE:
+        if MEDIAPIPE_AVAILABLE and not os.path.exists(model_path):
+            # the BlazeFace weights are not shipped (nor in the models lock): say so plainly instead of the
+            # misleading import error the old order produced; per-clip YuNet (tracked crop) needs no MediaPipe
+            print(" MediaPipe Face Detection off: blaze_face_short_range.tflite is not shipped")
+        elif MEDIAPIPE_AVAILABLE:
             try:
-                import mediapipe.tasks.python as mp_tasks
-                import mediapipe.tasks.python.vision as mp_vision
+                from mediapipe.tasks import python as mp_tasks
+                from mediapipe.tasks.python import vision as mp_vision
 
                 options = mp_vision.FaceDetectorOptions(
                     base_options=mp_tasks.BaseOptions(model_asset_path=model_path),

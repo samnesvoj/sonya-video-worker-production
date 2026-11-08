@@ -35,6 +35,11 @@ def run(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # production jobs carry no Cut settings → the Mac mini reference recipe (scripts/shared/cut_profile.py);
+    # its caches live next to output/, never inside it (everything in output/ is uploaded)
+    from scripts.shared.cut_profile import apply_profile
+    params = apply_profile("virality", params, input_video_path, str(output_dir.parent / "cut_work"))
+
     from scripts.shared.enhancers.sonya_enhancer import enrich_video_for_mode
     enrichment = enrich_video_for_mode(
         input_video_path=input_video_path,
@@ -51,6 +56,8 @@ def run(
         output_dir=output_dir,
     )
 
+    if params.get("cut_profile"):
+        selection = dict(selection or {}, cut_profile=params["cut_profile"])
     return {
         "clips": clips,
         "mode": "virality",
@@ -75,6 +82,10 @@ def _select_and_compose(
     """
     max_clips = params.get("max_clips", 3)
     words = enrichment.get("word_timestamps") or []
+    if params.get("cut_profile") and not words:
+        # Mac mini recipe: ASR is mandatory (Desktop _ensure_asr) - never the old no-words hook_mode path
+        raise RuntimeError("ASR_FAILED: no word timestamps - Cut does not run without speech recognition ("
+                           + "; ".join(str(w) for w in enrichment.get("warnings", []))[:300] + ")")
     if words:   # owner-confirmed name fixes (Вавилон→Эвелон near «стример»…) before selection and subtitles
         from scripts.shared.glossary import apply as apply_glossary
         words = apply_glossary(words, params.get("glossary"))

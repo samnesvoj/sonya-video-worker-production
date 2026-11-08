@@ -1,0 +1,162 @@
+"""
+scripts/shared/cut_profile.py
+=============================
+The Mac mini reference recipe (SONYA Desktop, docs CUT_PLAYBOOK) for production virality jobs.
+
+The production site sends only what the user picked (``clipType``, ``settings.subtitleStyle``…), never the
+Cut settings (``selection`` / ``crop``). Without them the virality runner takes the legacy path: whole-video
+YOLO + gemini_composer crop hints, letterboxed wide shots, no subtitles, hook_mode selection (it picked an ad
+insert). This module turns such a job into the recipe the owner approved on the Mac mini:
+
+  * selection ``story`` (cut-local-rank-v3: true sentences, question → whole answer, promo never a clip),
+    strategy ``qa`` (``hooks`` when the user picked Hooks); the LLM editor (Gemini via Timeweb / OpenRouter)
+    re-ranks the pool when a provider key is configured, else the local order is used;
+  * crop ``tracked`` / ``per_clip`` / ``smart``: per clip cuts + YuNet faces, full-screen 9:16, split for two;
+  * subtitles burned (ASS), font Dela Gothic One for the Viral style, never a hook title on top.
+
+  * ASR is mandatory (Desktop: «Cut без неё не запускается»): no words → the job fails with ASR_FAILED,
+    never the old no-words path;
+  * render: the Desktop encoder args (NVENC p6 / libx264 slow, 6 Mb/s cap) via SONYA_RENDER_ARGS.
+
+The old virality path (whole-video YOLO + gemini_composer + hook_mode) is OFF for production jobs; its code
+is kept (archive/legacy_virality/README.md) and ``SONYA_CUT_PROFILE=legacy`` turns it back on (rollback without
+a new release). A job that already carries Desktop settings (selection=story / crop.mode=tracked) is left as is.
+"""
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+PROFILE_VERSION = "cut-profile-macmini-v1"
+
+# site subtitle style (index.html: Viral «Яркие, анимированные» / Minimal «Элегантные» / Classic «Белые внизу»)
+#   → (subtitle_styles preset, font id or None = the preset's own font)
+SITE_STYLES = {
+    "viral": ("highlight", "dela"),      # Desktop default: per-word highlight, owner's font pick
+    "minimal": ("champagne", None),      # noble pearl / champagne, readable on any footage
+    "basic": ("minimal", None),          # plain white, bottom
+}
+DEFAULT_STYLE = "viral"                  # job without settings (API / tests) → the reference look
+
+
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def ffmpeg_has_ass(ffmpeg: Optional[str] = None) -> bool:
+    """libass in this ffmpeg (needed to burn subtitles)."""
+    try:
+        out = subprocess.run([ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg", "-hide_banner", "-filters"],
+                             capture_output=True, text=True, timeout=20).stdout
+    except Exception:            # noqa: BLE001 - no ffmpeg → the render fails later with a clear error
+        return False
+    return any(line.split()[1:2] == ["ass"] for line in out.splitlines() if len(line.split()) > 1)
+
+
+def editor_available(env: Optional[Dict[str, str]] = None) -> bool:
+    env = dict(os.environ) if env is None else env
+    if str(env.get("SONYA_LLM_EDITOR", "auto")).lower() in ("0", "off", "false", "no"):
+        return False
+    from scripts.shared import llm_provider
+    return bool(llm_provider.configured_providers(env))
+
+
+def applies(mode: str, params: Dict[str, Any]) -> bool:
+    """Every production virality job runs the Mac mini recipe (owner 2026-11-08: «старое это не надо»).
+    Left untouched only: a job that already carries the Desktop settings itself (selection=story or
+    crop.mode=tracked: tests / manual runs), and the rollback switch SONYA_CUT_PROFILE=legacy."""
+    if mode != "virality" or os.environ.get("SONYA_CUT_PROFILE", "macmini").lower() == "legacy":
+        return False
+    crop = params.get("crop") if isinstance(params.get("crop"), dict) else {}
+    if params.get("selection") == "story" or crop.get("mode") == "tracked":
+        return False
+    if "selection" in params or "crop" in params:
+        logger.warning("[cut_profile] legacy Cut settings in the job (selection=%r crop=%r) are ignored: "
+                       "the Mac mini recipe replaces the old path", params.get("selection"), crop.get("mode"))
+    return True
+
+
+# ── render encoder (Desktop: sonya_desktop/media/encoders.py, quality preset, 6 Mb/s) ──────────────────
+# Same args as the Desktop probe picks: the 6 Mb/s cap keeps a 60 s clip ≈ 45 MB (Telegram's 50 MB limit,
+# CUT_PLAYBOOK). NVENC on Vast; libx264 when there is no working NVENC (CPU box, broken driver).
+RENDER_BITRATE = "6M"
+
+
+def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
+    """sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", bitrate) for nvenc / cpu."""
+    if family == "nvenc":
+        args = ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20"]
+        args += ["-b:v", bitrate] if bitrate else ["-b:v", "0"]
+    elif family == "cpu":
+        args = ["-c:v", "libx264", "-preset", "slow", "-crf", "19"] + (["-b:v", bitrate] if bitrate else [])
+    else:
+        raise ValueError(f"unsupported encoder family {family}")
+    return args + ["-pix_fmt", "yuv420p"]
+
+
+def _encoder_works(ffmpeg: str, family: str) -> bool:
+    cmd = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi",
+           "-i", "testsrc2=size=320x240:rate=30:duration=0.5", *encoder_args(family), "-f", "null", "-"]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=30).returncode == 0
+    except Exception:            # noqa: BLE001 - no ffmpeg / timeout → not usable
+        return False
+
+
+def ensure_render_args(ffmpeg: Optional[str] = None) -> Optional[str]:
+    """Set SONYA_RENDER_ARGS (read by smart_crop_adapter._env_encoder_args) once per process, like the
+    Desktop daemon does before every Cut run. An explicit SONYA_RENDER_ARGS wins. -> chosen family."""
+    import json
+    if os.environ.get("SONYA_RENDER_ARGS"):
+        return None
+    ff = ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg"
+    family = "nvenc" if _encoder_works(ff, "nvenc") else "cpu"
+    os.environ["SONYA_RENDER_ARGS"] = json.dumps(encoder_args(family))
+    logger.info("[cut_profile] render encoder: %s @ %s", family, RENDER_BITRATE)
+    return family
+
+
+def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work_dir: str,
+                  *, ass_supported: Optional[bool] = None, editor: Optional[bool] = None) -> Dict[str, Any]:
+    """New params dict with the Mac mini recipe (or ``params`` unchanged when it does not apply)."""
+    if not applies(mode, params):
+        return params
+    out = dict(params)
+    clip_type = str(params.get("clipType") or "").lower()
+    settings = params.get("settings") if isinstance(params.get("settings"), dict) else {}
+    story = {"strategy": "hooks" if clip_type == "hooks" else "qa"}
+    if editor if editor is not None else editor_available():
+        story["editor"] = True
+    out["selection"] = "story"
+    out["story"] = dict(params.get("story") or {}, **story)
+    crop: Dict[str, Any] = {"mode": "tracked", "analysis": "per_clip", "layout": "smart",
+                            "source_sha256": _sha256(input_video_path),
+                            "clip_cache_dir": str(Path(work_dir) / "vision" / "clips")}
+    style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
+    if style not in ("none", "off"):
+        preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
+        ok = ffmpeg_has_ass() if ass_supported is None else ass_supported
+        crop["subtitles"] = {"mode": "burn", "burn_supported": ok, "style": preset, "hook": False,
+                             **({"font": font} if font else {})}
+        if not ok:
+            logger.warning("[cut_profile] ffmpeg has no libass - subtitles cannot be burned")
+    out["crop"] = crop
+    out["cut_profile"] = PROFILE_VERSION
+    out.pop("llm", None)             # legacy Gemini selection switch: the story selector has its own editor
+    try:
+        ensure_render_args()
+    except Exception as exc:         # noqa: BLE001 - the renderer's libx264 default still works
+        logger.warning("[cut_profile] encoder probe failed: %s", exc)
+    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s", PROFILE_VERSION, story["strategy"],
+                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"))
+    return out

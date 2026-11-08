@@ -9,7 +9,11 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from dispatcher.config import FleetConfig
 
 SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
-                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET", "MODELS_S3_PREFIX")
+                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET", "MODELS_S3_PREFIX",
+                      # optional: the Cut LLM editor (Gemini via Timeweb, OpenRouter fallback); without them the
+                      # worker keeps the local ranking (scripts/shared/cut_profile.py)
+                      "TIMEWEB_GEMINI_API_KEY", "TIMEWEB_GEMINI_BASE_URL", "TIMEWEB_GEMINI_MODEL",
+                      "SONYA_LLM_TIMEWEB_ENABLED", "OPENROUTER_API_KEY", "SONYA_LLM_OPENROUTER_MODEL")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
