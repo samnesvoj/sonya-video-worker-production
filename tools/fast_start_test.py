@@ -106,13 +106,21 @@ class Env:
     logs: List[str] = field(default_factory=list)
 
 
+from dispatcher.vast_api import VastError  # noqa: E402
+
 def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str, usd_rub: Decimal, beep_key: Optional[str] = None) -> dict:
     t0 = env.clock()
     say = lambda m: env.log.append(f"[+{env.clock()-t0:6.0f}s] {m}")
     aborted = {"reason": None}
 
     def tick() -> None:
-        env.mgr.tick(); env.step()
+        try:
+            env.mgr.tick()
+        except VastError as exc:          # a Vast/network blip (run 3 died on one URLError): skip this tick like the
+            if not exc.retryable:         # production loop (dispatcher/main.py) does; the guards below still apply
+                raise
+            say(f"vast api blip ({exc}) - tick skipped")
+        env.step()
         cost = usage.cost_between(env.store, t0, env.clock(), env.clock())
         usd = cost["gpu"] + cost["disk"]
         if usd > Decimal(str(max_usd)) or env.clock() - t0 > max_minutes * 60:

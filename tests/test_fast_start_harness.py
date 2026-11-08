@@ -73,3 +73,21 @@ def test_live_mode_refuses_without_apply_and_confirmation_and_spends_nothing(cap
 def test_report_markdown_marks_simulation_loudly():
     rep, _ = run(); rep["mode"] = "SIMULATION"
     assert "NOT a measurement" in fs.render_md(rep, fs.evaluate(rep))
+
+
+def test_vast_api_blip_skips_a_tick_instead_of_killing_the_run():
+    """Run 3 died on one URLError from GET /instances (Mac mini network blip): a retryable Vast error must
+    skip that tick like the production loop does, and the scenario still completes and tears down."""
+    from dispatcher.vast_api import VastError
+    env = fs.build_sim_env()
+    real, calls = env.vast.list_instances, {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] in (5, 6):
+            raise VastError("network error: URLError", retryable=True)
+        return real()
+    env.vast.list_instances = flaky
+    rep = fs.run_scenario(env, 3.0, 90, "fast-start-test/x/input.mp4", Decimal("82.1386"))
+    assert rep["jobs_completed"] == 2 and rep["leftover_instances"] == 0 and calls["n"] > 6
+    assert any("vast api blip" in line for line in rep["log"])
