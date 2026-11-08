@@ -1,0 +1,154 @@
+{
+ "generated": "2026-11-07",
+ "machine": "Mac mini M4 16 GB",
+ "tool": "tools/models_publish.py scan (manifest from PR #3 / 69cff30)",
+ "command": "models_publish.py scan --src '~/Desktop/for my agent/вся соня/boosta restore' --src ~/.cache/gigaam --src ~/.cache/huggingface/hub/models--Systran--faster-whisper-base/snapshots/ebe41f70… --map yolo11n=…/boosta_local_recovered/yolo11n.pt --map yolo11n_pose=…/boosta_local_recovered/yolo11n-pose.pt --map whisper_base_tokenizer=<faster-whisper-small snapshot>/tokenizer.json --map whisper_base_vocabulary=<faster-whisper-small snapshot>/vocabulary.txt",
+ "notes": [
+  "yolo11n/yolo11n-pose: two byte-identical copies (boosta_local_recovered, boosta_standalone_recovered) -> --map to one",
+  "whisper_base_tokenizer/vocabulary: the faster-whisper-base cache holds only model.bin; the small snapshot files are byte-identical to the public base files (same SHA-256 as the manifest), so they were mapped",
+  "whisper_base_config: MISSING on the Mac mini (not downloaded: no downloads in this task)"
+ ],
+ "models": [
+  {
+   "key": "gigaam_v3_e2e_rnnt_ckpt",
+   "local_path": "gigaam/v3_e2e_rnnt.ckpt",
+   "s3_path": "models/gigaam/v3_e2e_rnnt.ckpt",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": null,
+   "public_size": 448929252,
+   "path": "~/.cache/gigaam/v3_e2e_rnnt.ckpt",
+   "size": 448929252,
+   "sha256": "f60c62fe45902d967000770a12f260de7c5ac4d4b8e5e852f1df8c548e3958b5",
+   "upstream_md5": "2730de7545ac43ad256485a462b0a27a",
+   "md5": "2730de7545ac43ad256485a462b0a27a",
+   "status": "matches_upstream_md5"
+  },
+  {
+   "key": "gigaam_v3_e2e_rnnt_tokenizer",
+   "local_path": "gigaam/v3_e2e_rnnt_tokenizer.model",
+   "s3_path": "models/gigaam/v3_e2e_rnnt_tokenizer.model",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": null,
+   "public_size": 255336,
+   "path": "~/.cache/gigaam/v3_e2e_rnnt_tokenizer.model",
+   "size": 255336,
+   "sha256": "828c12c991019eef952a960661f25a92d6ad279591e2ea466b4aeddf1d20a18a",
+   "status": "private_ok"
+  },
+  {
+   "key": "yolo11n",
+   "local_path": "common/yolo11n.pt",
+   "s3_path": "models/common/yolo11n.pt",
+   "used_by": [
+    "virality"
+   ],
+   "source_type": "public",
+   "public_sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+   "public_size": 5613764,
+   "path": "~/Desktop/for my agent/вся соня/boosta restore/boosta_local_recovered/yolo11n.pt",
+   "size": 5613764,
+   "sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+   "status": "matches_public"
+  },
+  {
+   "key": "yolo11n_pose",
+   "local_path": "common/yolo11n-pose.pt",
+   "s3_path": "models/common/yolo11n-pose.pt",
+   "used_by": [
+    "virality"
+   ],
+   "source_type": "public",
+   "public_sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+   "public_size": 6255593,
+   "path": "~/Desktop/for my agent/вся соня/boosta restore/boosta_local_recovered/yolo11n-pose.pt",
+   "size": 6255593,
+   "sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+   "status": "matches_public"
+  },
+  {
+   "key": "webcam_detector",
+   "local_path": "common/webcam_detector.pt",
+   "s3_path": "models/common/webcam_detector.pt",
+   "used_by": [
+    "virality"
+   ],
+   "source_type": "private",
+   "public_sha256": null,
+   "public_size": null,
+   "path": "~/Desktop/for my agent/вся соня/boosta restore/boosta_local_recovered/models/webcam_detector.pt",
+   "size": 5441498,
+   "sha256": "b011911e6129fddebbc32a75cc3f7b3c22b5216dd9d6a6f446757cb67aa8481b",
+   "status": "private_ok"
+  },
+  {
+   "key": "whisper_base_config",
+   "local_path": "whisper-base/config.json",
+   "s3_path": "models/whisper-base/config.json",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
+   "public_size": 2309,
+   "status": "missing",
+   "candidates": []
+  },
+  {
+   "key": "whisper_base_model",
+   "local_path": "whisper-base/model.bin",
+   "s3_path": "models/whisper-base/model.bin",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+   "public_size": 145217532,
+   "path": "~/.cache/huggingface/hub/blobs/0c/0c4d8d814973160f53608ff0aa1618a90abbce9ed632bbc54930475ba82ce973",
+   "size": 145217532,
+   "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+   "status": "matches_public"
+  },
+  {
+   "key": "whisper_base_tokenizer",
+   "local_path": "whisper-base/tokenizer.json",
+   "s3_path": "models/whisper-base/tokenizer.json",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "public_size": 2203239,
+   "path": "~/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120/tokenizer.json",
+   "size": 2203239,
+   "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+   "status": "matches_public"
+  },
+  {
+   "key": "whisper_base_vocabulary",
+   "local_path": "whisper-base/vocabulary.txt",
+   "s3_path": "models/whisper-base/vocabulary.txt",
+   "used_by": [
+    "virality",
+    "beep"
+   ],
+   "source_type": "public",
+   "public_sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "public_size": 459861,
+   "path": "~/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120/vocabulary.txt",
+   "size": 459861,
+   "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+   "status": "matches_public"
+  }
+ ]
+}
