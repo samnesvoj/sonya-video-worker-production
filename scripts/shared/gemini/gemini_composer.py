@@ -814,6 +814,8 @@ class GeminiComposer:
                     kps = r.keypoints.cpu().numpy() if hasattr(r.keypoints, "cpu") else r.keypoints
                     for person_kps in kps:
                         pts = person_kps.data if hasattr(person_kps, "data") else person_kps
+                        if getattr(pts, "ndim", 2) == 3:  # ultralytics >=8.1: one person = (1, 17, 3)
+                            pts = pts[0]
                         if len(pts) < 7:
                             continue
                         left_sh_x = float(pts[5][0]) if pts[5][2] > 0.3 else None
@@ -961,6 +963,8 @@ class GeminiComposer:
                     kps = r.keypoints.cpu().numpy() if hasattr(r.keypoints, "cpu") else r.keypoints
                     for person_kps in kps:
                         pts = person_kps.data if hasattr(person_kps, "data") else person_kps
+                        if getattr(pts, "ndim", 2) == 3:  # ultralytics >=8.1: one person = (1, 17, 3)
+                            pts = pts[0]
                         if len(pts) < 6:
                             continue
                         nose_x = float(pts[0][0])
@@ -1305,6 +1309,8 @@ class GeminiComposer:
                 kps = r.keypoints.cpu().numpy() if hasattr(r.keypoints, "cpu") else r.keypoints
                 for person_kps in kps:
                     pts = person_kps.data if hasattr(person_kps, "data") else person_kps
+                    if getattr(pts, "ndim", 2) == 3:  # ultralytics >=8.1: one person = (1, 17, 3)
+                        pts = pts[0]
                     if len(pts) < 7:
                         continue
                     nose_x = float(pts[0][0])
