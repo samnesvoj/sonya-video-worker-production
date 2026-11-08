@@ -27,10 +27,18 @@ def step(name, fn):
 def fetch(m):
     p = dest / m["local_path"]
     p.parent.mkdir(parents=True, exist_ok=True)
-    h, n = hashlib.sha256(), 0
-    with urllib.request.urlopen(m["source"]["url"], timeout=120) as r, open(p, "wb") as f:
-        for chunk in iter(lambda: r.read(1 << 20), b""):
-            f.write(chunk); h.update(chunk); n += len(chunk)
+    for attempt in range(1, 7):          # GitHub release CDN returns transient 5xx; only the transport is retried, the hash check stays strict
+        h, n = hashlib.sha256(), 0
+        try:
+            with urllib.request.urlopen(m["source"]["url"], timeout=120) as r, open(p, "wb") as f:
+                for chunk in iter(lambda: r.read(1 << 20), b""):
+                    f.write(chunk); h.update(chunk); n += len(chunk)
+            break
+        except OSError as exc:
+            if attempt == 6:
+                raise
+            print(f"download retry {attempt}/6 for {m['key']}: {exc}", flush=True)
+            time.sleep(min(10 * attempt, 40))
     assert n == m["public_size"], f"size {n} != {m['public_size']}"
     assert h.hexdigest() == m["public_sha256"], "sha256 mismatch"
     return f"{n/1e6:.1f} MB sha256 ok"
