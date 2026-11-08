@@ -107,6 +107,11 @@ def test_never_ends_on_a_trailing_ellipsis():
 def test_promo_and_reported_speech_are_not_clips():
     from scripts.shared.cut_selection import is_promo
     assert is_promo("Условия будут у нас в Telegram-каналах. Не пропустите.") and not is_promo("Мы долго гуляли.")
+    # sponsor read inside the kishlak_15m control (picked as clip 1 before): never a clip
+    assert is_promo("Фоновое прослушивание доступно лишь с подпиской Премиум, которую невозможно оплатить напрямую.")
+    assert is_promo("Но маркетплейс GJS легко помогает нам решить эту проблему.")
+    assert is_promo("Все ссылки оставили в описании.") and is_promo("Заходим, выбираем YouTube Premium.")
+    assert not is_promo("Я подписал контракт и уехал в Москву, там всё описание работы было другое.")
     ans = [s + "." for s in ANSWER.split(". ") if s.strip()]
     quoted = ["И значит, мне пишут: «Ну, как ты можешь сравнивать такую музыку?»"] + ans
     promo = ["А что это у тебя за футболка такая?"] + ans[:2] + ["Условия розыгрыша будут у нас в Telegram-каналах."]
