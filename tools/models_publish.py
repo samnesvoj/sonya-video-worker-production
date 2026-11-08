@@ -23,6 +23,8 @@ from typing import Dict, List, Optional
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "release" / "models.required.json"
+sys.path.insert(0, str(ROOT))
+from scripts.ops.models_prefix import s3_key  # noqa: E402
 CHUNK = 8 << 20
 
 
@@ -117,26 +119,27 @@ def upload(rows: List[dict], bucket: str, client, apply: bool) -> List[str]:
     cfg = TransferConfig(multipart_threshold=64 << 20, multipart_chunksize=32 << 20, max_concurrency=8)
     log = []
     for r in rows:
+        key = s3_key(r["s3_path"])               # MODELS_S3_PREFIX (default models/ = the path as written)
         if "sha256" not in r:
             raise SystemExit(f"{r['key']}: no local file; fix `scan` first")
         try:
-            head = client.head_object(Bucket=bucket, Key=r["s3_path"])
+            head = client.head_object(Bucket=bucket, Key=key)
             same = head["ContentLength"] == r["size"] and head.get("Metadata", {}).get("sha256") == r["sha256"]
         except Exception:  # noqa: BLE001 - not there
             head, same = None, False
         if same:
-            log.append(f"skip   {r['s3_path']} (already uploaded, same size + sha256)")
+            log.append(f"skip   {key} (already uploaded, same size + sha256)")
             continue
         if head is not None:
-            log.append(f"REPLACE {r['s3_path']} (different content already in the bucket)")
+            log.append(f"REPLACE {key} (different content already in the bucket)")
         if not apply:
-            log.append(f"would upload {r['s3_path']} ({r['size']/1e6:.1f} MB)")
+            log.append(f"would upload {key} ({r['size']/1e6:.1f} MB)")
             continue
-        client.upload_file(r["path"], bucket, r["s3_path"], ExtraArgs={"Metadata": {"sha256": r["sha256"]}}, Config=cfg)
-        got = client.head_object(Bucket=bucket, Key=r["s3_path"])
+        client.upload_file(r["path"], bucket, key, ExtraArgs={"Metadata": {"sha256": r["sha256"]}}, Config=cfg)
+        got = client.head_object(Bucket=bucket, Key=key)
         if got["ContentLength"] != r["size"] or got.get("Metadata", {}).get("sha256") != r["sha256"]:
-            raise SystemExit(f"{r['s3_path']}: uploaded object does not match (size/metadata)")
-        log.append(f"uploaded {r['s3_path']} ({r['size']/1e6:.1f} MB) verified size+sha256 metadata")
+            raise SystemExit(f"{key}: uploaded object does not match (size/metadata)")
+        log.append(f"uploaded {key} ({r['size']/1e6:.1f} MB) verified size+sha256 metadata")
     return log
 
 
@@ -174,6 +177,7 @@ def main(argv=None) -> int:
     make_lock(rows, set(a.accept_custom))                      # same completeness/identity gate as `lock`
     if a.apply and a.confirm_bucket != a.bucket:
         raise SystemExit("refusing to upload: pass --confirm-bucket with the exact bucket name to confirm")
+    print(f"target: s3://{a.bucket}/{s3_key('models/')} (MODELS_S3_PREFIX)")
     for line in upload(rows, a.bucket, s3_client() if (a.apply or os.environ.get("S3_ENDPOINT_URL")) else _NoClient(), a.apply):
         print(line)
     if not a.apply:

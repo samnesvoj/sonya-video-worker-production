@@ -39,6 +39,7 @@ from dispatcher.config import FleetConfig          # noqa: E402
 from dispatcher.fleet import FleetManager          # noqa: E402
 from dispatcher.store import FleetStore            # noqa: E402
 from tools.stub_worker_api import StubState        # noqa: E402
+from scripts.ops.models_prefix import s3_key       # noqa: E402
 
 THRESHOLDS = {
     "create_request_to_ready_s": 480,        # new instance: request -> worker ready
@@ -339,7 +340,7 @@ def online_checks(args, lock: dict) -> List[dict]:
             bad = []
             for k, pin in lock.get("models", {}).items():
                 try:
-                    h = s3.head_object(Bucket=os.environ["MODELS_S3_BUCKET"], Key=pin["s3_path"])
+                    h = s3.head_object(Bucket=os.environ["MODELS_S3_BUCKET"], Key=s3_key(pin["s3_path"]))
                     if h["ContentLength"] != pin["size"] or h.get("Metadata", {}).get("sha256") != pin["sha256"]:
                         bad.append(f"{k}: differs")
                 except Exception as e:  # noqa: BLE001

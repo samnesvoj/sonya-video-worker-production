@@ -27,6 +27,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
+from scripts.ops.models_prefix import s3_key
+
 log = logging.getLogger("sonya.model_fetch")
 CHUNK = 8 << 20
 
@@ -139,7 +141,7 @@ def _download_one(it: Item, client, bucket: str, retries: int, sleep: Callable[[
         part = it.local.with_name(it.local.name + ".part")
         try:
             it.local.parent.mkdir(parents=True, exist_ok=True)
-            client.download_file(bucket, it.s3_path, str(part), Config=cfg)
+            client.download_file(bucket, s3_key(it.s3_path), str(part), Config=cfg)
             size = part.stat().st_size
             if it.size is not None and size != it.size:
                 raise ModelFetchError(f"size mismatch {size} != {it.size}")

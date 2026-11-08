@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from dispatcher.config import FleetConfig
 
 SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
-                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET")
+                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET", "MODELS_S3_PREFIX")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
