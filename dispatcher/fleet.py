@@ -186,7 +186,10 @@ class FleetManager:
             return                                  # work is coming / cannot prove it is safe
         worked = bool(terminal or inst.last_work_at)
         last = max(terminal or 0.0, inst.last_work_at or 0.0)
-        due = (last + self.cfg.idle_timeout_seconds) if worked else ((inst.running_since or now) + self.cfg.boot_grace_seconds)
+        grace = self.cfg.boot_grace_seconds
+        if not worked and self._idle_action(inst) == "destroy" and snap.active_total == 0:
+            grace = self.cfg.idle_timeout_seconds   # a burst that came too late: no job anywhere -> nothing to boot for
+        due = (last + self.cfg.idle_timeout_seconds) if worked else ((inst.running_since or now) + grace)
         too_old = inst.running_since and now - inst.running_since > self.cfg.max_running_hours * 3600
         if now >= due or too_old:
             self._begin_stop(inst, now, actions)

@@ -225,3 +225,18 @@ def test_old_fleet_db_without_role_column_is_migrated(tmp_path):
     c.commit(); c.close()
     s = FleetStore(str(db))
     assert s.get(1).role == "burst" and s.get(1).state == "stopped"
+
+
+def test_burst_that_got_no_job_is_destroyed_after_the_idle_timeout_not_the_boot_grace():
+    mgr, vast, queue, store, clock = fleet()
+    vast.offers += [offer(2, 8), offer(3, 9)]
+    w = _stopped_warm(mgr, vast, queue, store, clock)
+    for k in range(6):
+        queue.add(f"j{k}", ts=clock())
+    mgr.tick(); mgr.tick()
+    wl = store.get(w.id).label
+    for k in range(6):                                  # the warm wakes first and takes everything
+        queue.set(f"j{k}", "completed", wl, clock())
+    run_until(mgr, clock, 80)
+    bursts = [i for i in store.all() if i.id != w.id]
+    assert all(store.get(b.id).state == "destroyed" for b in bursts) and store.get(w.id).state == "stopped"
