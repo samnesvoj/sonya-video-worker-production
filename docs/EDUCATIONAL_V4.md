@@ -15,8 +15,8 @@ Branch `feat/educational-v4` (from `origin/release/first-vast-test`, v2 overlays
    score / complete / self_contained / title / topic. Timestamps never come from the model. Budget forecast before the
    request (`overlays/budget.py`, 5 RUB per video, ledger per job in `<out>/edu_llm_ledger.json`).
 5. `scripts/shared/boundaries.refine_segments` — exact render edges on ASR words (−150 ms pre-roll, as Cut).
-6. Per clip: `stage.choose` → **stage** (whole slide/board on the template background, rounded corners) or **crop**
-   (a big talking head, existing `compose_vertical_clip`). Stage render failure → crop + warning `edu_stage_failed`.
+6. Per clip: `stage.choose` → **stage** (default: whole frame on the template background, rounded corners) or **crop**
+   (only a «single speaker» layout or `edu.frame=crop`; existing `compose_vertical_clip`). Stage render failure → crop + warning `edu_stage_failed`.
 7. `overlays.apply_overlays(template=…)`: template subtitles (ASS, libass), the title (first 3.6 s), cards (v2 planner +
    evidence gate; on a stage cards live above the slide and never cover it).
 8. No v4 segments at all → the old fallback (first minute / layout cuts) with warning `educational_engine_unavailable`.
@@ -30,7 +30,7 @@ Branch `feat/educational-v4` (from `origin/release/first-vast-test`, v2 overlays
 | `edu_title=false` | no title | on |
 | `llm` = `on`/`off`, `edu.editor` | Gemini editor + card planner | on when a provider is configured (same rule as Cut: `SONYA_LLM_EDITOR`) |
 | `edu.cards` / `edu_overlays` | cards | follows the LLM switch |
-| `edu.frame` = `stage`/`crop` | force the frame layout | auto (YuNet faces) |
+| `edu.frame` = `stage`/`crop` | force the frame layout | stage (crop for a single-speaker layout) |
 | `max_clips` | series length | 6 |
 
 ## Enable on Vast

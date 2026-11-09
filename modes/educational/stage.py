@@ -5,8 +5,7 @@ stage.py — how a lecture frame becomes 9:16 in Educational v4.
            lecturer writes or shows is cropped away. Title above, subtitles below — on the stage, not on the picture.
     crop   a talking head big enough to fill a vertical frame: the existing smart crop (compose_vertical_clip).
 
-choose() decides per clip from YuNet faces (scripts/shared/crop/clip_analysis): crop only when one large face is on
-screen most of the time; a board, a slide or a small lecturer at the blackboard → stage.
+choose(): stage by default; crop only for a «single speaker» layout (Gemini layout analysis) or when forced.
 """
 from __future__ import annotations
 
@@ -23,26 +22,15 @@ W, H = 1080, 1920
 SIDE = 36                  # stage margin left/right at 1080
 RADIUS = 28
 VIDEO_TOP = 0.355          # share of the height where the picture starts (title above, subtitles below)
-BIG_FACE = 0.2             # face height / frame height that counts as a talking head
-TALKING_HEAD_SHARE = 0.6
 
 
 def choose(src: str, start: float, duration: float, layout_mode: str = "unknown") -> Tuple[str, Dict[str, Any]]:
-    if layout_mode == "preserve_screen":
-        return "stage", {"why": "layout:screen"}
+    """Stage unless the layout analysis says «one speaker» (person_focus). Measured on 4 lectures (2026-11-09): the
+    smart crop letterboxed the «talking head» clips anyway (black bands, off-template) or would cut board / slide
+    text next to the lecturer, so a face-based switch made things worse. params.edu.frame=crop forces the crop."""
     if layout_mode == "person_focus":
         return "crop", {"why": "layout:person"}
-    try:
-        from scripts.shared.crop.clip_analysis import analyze_clip
-        a = analyze_clip(src, start, min(duration, 60.0), face_fps=1.0)
-    except Exception as exc:  # noqa: BLE001 — no detector: the whole frame is the safe choice for a lesson
-        return "stage", {"why": f"no_face_analysis:{type(exc).__name__}"}
-    h = float(a["meta"]["height"]) or 1.0
-    samples = a.get("samples") or []
-    big = sum(1 for s in samples if any(f[3] / h >= BIG_FACE for f in s.get("faces") or []))
-    share = big / max(1, len(samples))
-    return ("crop" if share >= TALKING_HEAD_SHARE else "stage"), {"why": "faces", "big_face_share": round(share, 2),
-                                                                   "samples": len(samples)}
+    return "stage", {"why": f"default:{layout_mode}"}
 
 
 def video_rect(src_w: int, src_h: int) -> Tuple[int, int, int, int]:
