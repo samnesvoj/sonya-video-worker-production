@@ -24,11 +24,15 @@ export WEBCAM_DETECTOR_ENABLED="${WEBCAM_DETECTOR_ENABLED:-false}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
 CONC="${SONYA_WORKER_CONCURRENCY:-1}"
-# 1..32: production uses <= 4 (dispatcher SONYA_JOBS_PER_INSTANCE is capped at 4); 5..32 only for the big-GPU load tests
-# (L40S, RTX 4090 + EPYC 128 threads: levels 24 / 32)
-case "${CONC}" in [1-9]|[12][0-9]|3[0-2]) ;; *) log "SONYA_WORKER_CONCURRENCY must be 1..32 (got ${CONC})"; exit 3 ;; esac
+# 1..32 = exactly that many worker processes (the dispatcher sends jobs_per_instance: 2 on the default RTX 3060; 5..32 only
+# for big-server load tests: RTX 4090 / 2x A40 + EPYC 128 threads, levels 24 / 32);
+# auto = as many as the server's cards, CPU threads and RAM carry (multi-GPU power class; scripts/ops/gpu_plan.py),
+# capped by SONYA_WORKER_CONCURRENCY_MAX. The count and the card of each worker are decided by readiness (gpu_plan.json).
+case "${CONC}" in [1-9]|[12][0-9]|3[0-2]|auto) ;; *) log "SONYA_WORKER_CONCURRENCY must be 1..32 or auto (got ${CONC})"; exit 3 ;; esac
+export SONYA_GPU_PLAN_FILE="${SONYA_GPU_PLAN_FILE:-${STATE_DIR}/gpu_plan.json}"
 mkdir -p "${TMPDIR}" "${MODELS_LOCAL_DIR}"
-rm -f "${SONYA_READY_FILE}" "${SONYA_WORKER_PID_FILE}"
+rm -f "${SONYA_READY_FILE}" "${SONYA_WORKER_PID_FILE}" "${SONYA_GPU_PLAN_FILE}"
+rm -rf "${STATE_DIR}/nvenc"     # NVENC session slots (scripts/shared/nvenc_guard.py) of a previous run
 wipe() { find "${TMPDIR}" -mindepth 1 -maxdepth 1 -name 'sonya_*' -exec rm -rf {} + 2>/dev/null || true; }
 wipe   # never keep user video from a crashed previous run
 
@@ -41,25 +45,21 @@ python3 scripts/prod_preflight_check.py --role worker >/dev/null || { log "prefl
 mark preflight_done
 python3 -m scripts.ops.readiness || { log "readiness failed - worker NOT started"; python3 -m scripts.ops.timeline upload || true; exit 4; }
 
+# Parallel jobs on one server (dispatcher jobs_per_instance): N independent worker PROCESSES under the same WORKER_ID,
+# each claims and runs ONE job at a time (own memory, own CUDA context; no shared state between jobs). The production
+# claim API has no per-worker limit, so N processes = N jobs. Default 1 = exactly the old behaviour.
+# Several cards: each worker is pinned to ONE card (CUDA_VISIBLE_DEVICES=<GPU uuid>: torch, ctranslate2 and h264_nvenc all
+# use it as device 0), spread evenly; a card that failed readiness gets no worker. One visible card: nothing is pinned.
+PLAN_OUT="$(python3 -m scripts.ops.gpu_plan workers)" || PLAN_OUT=""
+[ -n "${PLAN_OUT}" ] || { log "worker plan failed - worker NOT started"; rm -f "${SONYA_READY_FILE}"; exit 3; }
+mapfile -t PLAN <<<"${PLAN_OUT}"
+CONC="${#PLAN[@]}"
 python3 "${BOOT}/healthd.py" &
 HEALTH_PID=$!
 # Load tests only (SONYA_RES_SAMPLER=1): VRAM/RAM/CPU samples -> S3 fast-start-test/res/ (scripts/ops/res_sampler.py)
 [ "${SONYA_RES_SAMPLER:-0}" = "1" ] && { python3 -m scripts.ops.res_sampler & }
-# Parallel jobs on one server (dispatcher jobs_per_instance): N independent worker PROCESSES under the same WORKER_ID,
-# each claims and runs ONE job at a time (own memory, own CUDA context; no shared state between jobs). The production
-# claim API has no per-worker limit, so N processes = N jobs. Default 1 = exactly the old behaviour.
 WORKER_PIDS=()
-for n in $(seq 1 "${CONC}"); do
-  SONYA_WORKER_SLOT="${n}" python3 scripts/gpu_worker.py --poll --worker-id "${WORKER_ID}" &
-  WORKER_PIDS+=("$!")
-  [ "${n}" -lt "${CONC}" ] && sleep 2       # stagger the prewarm / CUDA init
-done
-WORKER_PID="${WORKER_PIDS[0]}"
-echo "${WORKER_PID}" > "${SONYA_WORKER_PID_FILE}"
-mark worker_started
-(python3 -m scripts.ops.timeline upload || true) &   # best-effort: lets the central dispatcher see the start-up breakdown
-log "worker pids=${WORKER_PIDS[*]} (concurrency ${CONC}); health on 127.0.0.1:${SONYA_HEALTH_PORT:-8099}"
-
+# trap BEFORE the first worker starts: a SIGTERM while N workers are still starting (2 s apart) must stop them all
 _term() {
   log "SIGTERM: workers requeue their jobs and exit"
   kill -TERM "${WORKER_PIDS[@]}" 2>/dev/null || true
@@ -69,6 +69,20 @@ _term() {
   exit 143
 }
 trap _term TERM INT
+for line in "${PLAN[@]}"; do
+  read -r n assign <<<"${line}"
+  # shellcheck disable=SC2086  # "KEY=VAL KEY=VAL": gpu_plan only emits [A-Za-z0-9_./:-] values
+  env SONYA_WORKER_SLOT="${n}" ${assign} python3 scripts/gpu_worker.py --poll --worker-id "${WORKER_ID}" &
+  WORKER_PIDS+=("$!")
+  log "worker ${n}: ${assign:-no GPU pinning}"
+  [ "${n}" -lt "${CONC}" ] && sleep 2       # stagger the prewarm / CUDA init
+done
+WORKER_PID="${WORKER_PIDS[0]}"
+echo "${WORKER_PID}" > "${SONYA_WORKER_PID_FILE}"
+mark worker_started
+(python3 -m scripts.ops.timeline upload || true) &   # best-effort: lets the central dispatcher see the start-up breakdown
+log "worker pids=${WORKER_PIDS[*]} (concurrency ${CONC}); health on 127.0.0.1:${SONYA_HEALTH_PORT:-8099}"
+
 # One worker process dying = the server is unhealthy: stop the others (they requeue their jobs) and exit.
 set +e; wait -n "${WORKER_PIDS[@]}"; RC=$?; set -e
 kill -TERM "${WORKER_PIDS[@]}" 2>/dev/null || true

@@ -116,3 +116,26 @@ def test_run_encode_nvenc_failure_or_hang_falls_back_to_libx264(monkeypatch):
     r, used, _s = cp.run_encode(make, cp.encoder_args("cpu"))
     assert used == "cpu" and len(calls) == 5                     # libx264 is never retried
     assert cp.encode_timeout(5) == 300                            # floor for short clips
+
+
+def test_encoder_family_trusts_the_readiness_probe(monkeypatch):
+    monkeypatch.setattr(cp, "_FAMILY", {})
+    monkeypatch.setattr(cp, "_encoder_works", lambda ff, fam: (_ for _ in ()).throw(AssertionError("probed again")))
+    monkeypatch.setenv("SONYA_NVENC_PROBED", "ok")
+    assert cp.encoder_family("ffmpeg-a") == "nvenc"
+    monkeypatch.setenv("SONYA_NVENC_PROBED", "fail")
+    assert cp.encoder_family("ffmpeg-b") == "cpu"
+
+
+def test_run_encode_all_nvenc_sessions_busy_goes_straight_to_libx264(monkeypatch, tmp_path):
+    """GeForce session cap (feat/multi-gpu nvenc_guard) inside run_encode: no free slot -> libx264 at once, reported as nvenc->cpu."""
+    import contextlib
+    import subprocess
+    from scripts.shared import nvenc_guard
+    calls = []
+    monkeypatch.setattr(cp.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(nvenc_guard, "session", lambda limit=None: contextlib.nullcontext(False))
+    monkeypatch.setattr(nvenc_guard, "max_sessions", lambda: 3)
+    make = lambda a: ["ffmpeg", *a]
+    r, used, _s = cp.run_encode(make, cp.encoder_args("nvenc", "6M"))
+    assert used == "nvenc->cpu" and calls == [make(cp.encoder_args("cpu", "6M"))]

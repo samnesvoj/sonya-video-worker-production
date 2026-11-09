@@ -124,12 +124,23 @@ def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Op
         except subprocess.TimeoutExpired:
             return subprocess.CompletedProcess(make_cmd(a), 124, "", f"timeout after {timeout:.0f} s")
 
-    r = once(args)
-    used = "nvenc" if nvenc else "cpu"
-    if r.returncode != 0 and nvenc:
-        logger.warning("[cut_profile] %s: NVENC failed (%s) - re-encoding on CPU (libx264)", what, (r.stderr or "")[-200:].strip())
+    def cpu_args():
         bitrate = args[args.index("-b:v") + 1] if "-b:v" in args and args[args.index("-b:v") + 1] != "0" else None
-        r, used = once(encoder_args("cpu", bitrate)), "nvenc->cpu"
+        return encoder_args("cpu", bitrate)
+
+    if not nvenc:
+        r = once(args)
+        return r, "cpu", round(time.monotonic() - t0, 1)
+    from scripts.shared import nvenc_guard     # GeForce session cap (SONYA_NVENC_MAX_SESSIONS); no cap -> always a slot
+    with nvenc_guard.session() as got:
+        if not got:
+            logger.info("[cut_profile] %s: all %d NVENC sessions busy - encoding on CPU (libx264)", what, nvenc_guard.max_sessions())
+            return once(cpu_args()), "nvenc->cpu", round(time.monotonic() - t0, 1)
+        r = once(args)
+    used = "nvenc"
+    if r.returncode != 0:
+        logger.warning("[cut_profile] %s: NVENC failed (%s) - re-encoding on CPU (libx264)", what, (r.stderr or "")[-200:].strip())
+        r, used = once(cpu_args()), "nvenc->cpu"
     return r, used, round(time.monotonic() - t0, 1)
 
 
@@ -146,8 +157,13 @@ _FAMILY: Dict[str, str] = {}
 
 
 def encoder_family(ffmpeg: Optional[str] = None) -> str:
-    """"nvenc" when a 0.5 s NVENC smoke encode works (once per process), else "cpu"."""
+    """"nvenc" when a 0.5 s NVENC smoke encode works (once per process), else "cpu". SONYA_NVENC_PROBED=ok|fail: readiness
+    already did that encode on this worker's card (scripts/ops/gpu_plan.py) - trusted, so N workers starting together on a
+    GeForce do not race for the driver's few NVENC sessions with their probes (a lost race would pin a worker to libx264)."""
     ff = ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg"
+    probed = os.environ.get("SONYA_NVENC_PROBED", "").lower()
+    if probed in ("ok", "fail") and ff not in _FAMILY:
+        _FAMILY[ff] = "nvenc" if probed == "ok" else "cpu"
     if ff not in _FAMILY:
         _FAMILY[ff] = "nvenc" if _encoder_works(ff, "nvenc") else "cpu"
     return _FAMILY[ff]

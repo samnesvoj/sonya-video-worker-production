@@ -63,12 +63,30 @@ class FleetConfig:
     max_storage_gb_month: Decimal = Decimal("0.20")  # USD per GB-month: pause cost = disk_gb x this (30 x 0.20 = $6 = ~490 RUB/month max)
     min_reliability: float = 0.98
     min_inet_down_mbps: int = 800
+    # POWER class (multi-GPU, off by default; MULTIGPU_NOTES.md): for a RUSH, one big server with several data-center cards
+    # (e.g. 2x A40 in Belgium) instead of several RTX 3060s. Never the warm (always burst: destroyed when idle); the warm stays
+    # the default single RTX 3060. Used when the jobs not yet covered by running/booting servers are >= power_min_gap.
+    power_enabled: bool = False              # SONYA_POWER_ENABLED
+    power_gpus: Tuple[str, ...] = ("A40", "L40S", "L40", "RTX A6000", "RTX 6000Ada")   # SONYA_POWER_GPUS (Vast gpu_name, comma list)
+    power_min_gpus: int = 2                  # SONYA_POWER_MIN_GPUS  (Vast num_gpus)
+    power_max_gpus: int = 4                  # SONYA_POWER_MAX_GPUS
+    power_min_total_vram_gb: int = 48        # SONYA_POWER_MIN_TOTAL_VRAM_GB (all cards together)
+    power_min_cpu_cores: float = 16.0        # SONYA_POWER_MIN_CPU_CORES (Vast cpu_cores_effective of OUR slice; ~4 per video)
+    power_min_cpu_ram_gb: int = 32           # SONYA_POWER_MIN_CPU_RAM_GB (~4 GB per video + 4)
+    power_max_dph: Decimal = Decimal("1.00")  # SONYA_POWER_MAX_DPH (USD/h, the whole multi-GPU offer)
+    power_jobs_per_instance: int = 0         # SONYA_POWER_JOBS_PER_INSTANCE: 0 = from the offer (cards x VRAM, CPU threads, RAM;
+                                             # scripts/ops/gpu_plan.capacity), the worker re-checks on its real hardware ("auto")
+    power_min_gap: int = 0                   # SONYA_POWER_MIN_GAP: 0 = jobs_per_instance + 1 (more than one default server carries)
     pin_machine_id: int = 0                  # LOAD TESTS ONLY (tools/load_test.py phase G): rent exactly this Vast machine, class rule
                                              # not applied (e.g. an L40S + EPYC host). Never read from the env: production stays 0
     # Release identity (passed to the worker as env; the token is minted per instance)
     image: str = ""
     release_sha: str = ""
     release_repo: str = "samnesvoj/sonya-video-worker-production"
+
+    def power_gap(self) -> int:
+        """Uncovered jobs from which a power server is created instead of a default one."""
+        return self.power_min_gap or self.jobs_per_instance + 1
 
     @classmethod
     def from_env(cls, env: Dict[str, str] | None = None) -> "FleetConfig":
@@ -97,10 +115,24 @@ class FleetConfig:
             max_dph=Decimal(e.get("SONYA_MAX_DPH", "0.18")),
             max_storage_gb_month=Decimal(e.get("SONYA_MAX_STORAGE_GB_MONTH", "0.20")),
             min_inet_down_mbps=_int(e, "SONYA_MIN_INET_DOWN_MBPS", 800, lo=100, hi=100000),
+            power_enabled=e.get("SONYA_POWER_ENABLED", "false").lower() in TRUE,
+            power_gpus=tuple(g.strip() for g in e.get("SONYA_POWER_GPUS", ",".join(cls.power_gpus)).split(",") if g.strip()),
+            power_min_gpus=_int(e, "SONYA_POWER_MIN_GPUS", 2, lo=1, hi=16),
+            power_max_gpus=_int(e, "SONYA_POWER_MAX_GPUS", 4, lo=1, hi=16),
+            power_min_total_vram_gb=_int(e, "SONYA_POWER_MIN_TOTAL_VRAM_GB", 48, lo=8, hi=4096),
+            power_min_cpu_cores=float(_int(e, "SONYA_POWER_MIN_CPU_CORES", 16, lo=4, hi=1024)),
+            power_min_cpu_ram_gb=_int(e, "SONYA_POWER_MIN_CPU_RAM_GB", 32, lo=8, hi=4096),
+            power_max_dph=Decimal(e.get("SONYA_POWER_MAX_DPH", "1.00")),
+            power_jobs_per_instance=_int(e, "SONYA_POWER_JOBS_PER_INSTANCE", 0, lo=0, hi=16),
+            power_min_gap=_int(e, "SONYA_POWER_MIN_GAP", 0, lo=0, hi=1000),
             image=e.get("SONYA_WORKER_IMAGE", ""),
             release_sha=e.get("SONYA_RELEASE_SHA", ""),
             release_repo=e.get("SONYA_RELEASE_REPO", "samnesvoj/sonya-video-worker-production"),
         )
+        if cfg.power_min_gpus > cfg.power_max_gpus:
+            raise ValueError("SONYA_POWER_MIN_GPUS must be <= SONYA_POWER_MAX_GPUS")
+        if cfg.power_enabled and not cfg.power_gpus:
+            raise ValueError("SONYA_POWER_GPUS is empty")
         if any(m.startswith("trailer") for m in cfg.pool_modes):
             raise ValueError("SONYA_POOL_MODES must not contain Trailer modes")
         return cfg

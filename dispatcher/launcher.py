@@ -15,7 +15,10 @@ SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3
                       "TIMEWEB_GEMINI_API_KEY", "TIMEWEB_GEMINI_BASE_URL", "TIMEWEB_GEMINI_MODEL",
                       "SONYA_LLM_TIMEWEB_ENABLED", "OPENROUTER_API_KEY", "SONYA_LLM_OPENROUTER_MODEL",
                       # load tests only (not secrets): resource sampler, clips rendered in parallel inside one job
-                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC")
+                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC",
+                      # multi-GPU sizing overrides (not secrets; scripts/ops/gpu_plan.py, MULTIGPU_NOTES.md)
+                      "SONYA_NVENC_MAX_SESSIONS", "SONYA_VRAM_PER_JOB_MB", "SONYA_RAM_PER_JOB_MB", "SONYA_CPU_THREADS_PER_JOB",
+                      "SONYA_JOBS_PER_GPU_MAX")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
@@ -123,14 +126,82 @@ def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known
     return min(ok, key=lambda o: offer_rank(o, cfg, known)) if ok else None
 
 
-def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str]) -> Dict[str, Any]:
+# ── POWER class: several data-center cards on one offer, for a rush (off by default; FleetConfig.power_*) ─────────────────
+def num_gpus(o: Mapping[str, Any]) -> int:
+    try:
+        return max(1, int(o.get("num_gpus") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def total_vram_mb(o: Mapping[str, Any]) -> int:
+    """All cards together. Vast: gpu_ram is PER card (MB), gpu_total_ram (when present) is the sum."""
+    if o.get("gpu_total_ram"):
+        return int(float(o["gpu_total_ram"]))
+    return int(float(o.get("gpu_ram") or 0)) * num_gpus(o)
+
+
+def offer_slots(o: Mapping[str, Any], cfg: FleetConfig, *, power: bool = False, environ: Mapping[str, str] | None = None) -> int:
+    """Parallel videos the fleet counts for this server. Default / fallback class: jobs_per_instance (unchanged, 2).
+    Power: SONYA_POWER_JOBS_PER_INSTANCE, else the SAME formula the worker applies to its real hardware
+    (scripts/ops/gpu_plan.capacity: VRAM of each card, CPU threads, RAM - ~1.5 GB VRAM / ~3.5 GB RAM / ~4 threads per video).
+    environ: the dispatcher env - the per-video budget overrides (SONYA_VRAM_PER_JOB_MB ...) it passes to the worker too."""
+    if not power:
+        return cfg.jobs_per_instance
+    if cfg.power_jobs_per_instance:
+        return cfg.power_jobs_per_instance
+    from scripts.ops.gpu_plan import Budget, capacity   # stdlib-only module; one formula for worker and fleet
+    n = num_gpus(o)
+    per_card = total_vram_mb(o) // n
+    return capacity([per_card] * n, float(o.get("cpu_cores_effective") or 0), int(float(o.get("cpu_ram") or 0)),
+                    Budget.from_env(dict(environ or {})))["total"]
+
+
+def power_search_query(cfg: FleetConfig) -> dict:
+    q = search_query(cfg)
+    q.update({"num_gpus": {"gte": cfg.power_min_gpus, "lte": cfg.power_max_gpus}, "gpu_name": {"in": list(cfg.power_gpus)},
+              "cpu_cores_effective": {"gte": cfg.power_min_cpu_cores},
+              "cpu_ram": {"gte": cfg.power_min_cpu_ram_gb * 1000}, "dph_total": {"lte": float(cfg.power_max_dph)}})
+    return q
+
+
+def power_ok(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
+    """Acceptable as a POWER server. The CPU is judged by our effective cores (data-center hosts run EPYC / Xeon, which the
+    desktop MODERN_CPU rule does not list); per-video speed comes from many cores + NVENC on every card."""
+    return (o.get("gpu_name") in cfg.power_gpus and cfg.power_min_gpus <= num_gpus(o) <= cfg.power_max_gpus
+            and total_vram_mb(o) >= cfg.power_min_total_vram_gb * 1000 - 500 * num_gpus(o)
+            and float(o.get("cpu_cores_effective") or 0) >= cfg.power_min_cpu_cores
+            and float(o.get("cpu_ram") or 0) >= cfg.power_min_cpu_ram_gb * 1000
+            and Decimal(str(o.get("dph_total", 99))) <= cfg.power_max_dph
+            and float(o.get("inet_down") or 0) >= cfg.min_inet_down_mbps
+            and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability)
+
+
+def pick_power_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                     *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None) -> Optional[dict]:
+    """Best power offer: Europe first (S3 + API are in Russia), then a host that has our image cached, then the price of ONE
+    video slot per hour (hourly cost / parallel videos), then faster internet."""
+    skip, known = set(exclude), set(known_machines)
+    ok = [o for o in offers if power_ok(o, cfg) and o.get("machine_id") not in banned_machines
+          and o.get("id") not in skip and o.get("machine_id") not in skip]
+
+    def rank(o):
+        return (not in_europe(o), o.get("machine_id") not in known,
+                hourly_cost(o, cfg) / max(1, offer_slots(o, cfg, power=True, environ=environ)), -float(o.get("inet_down") or 0))
+    return min(ok, key=rank) if ok else None
+
+
+def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str], *,
+                   power_slots: int = 0) -> Dict[str, Any]:
+    """power_slots > 0: a POWER server - the worker sizes itself ("auto": its real cards, CPU threads, RAM; a broken card is
+    left out) but never runs more than the fleet counted for it."""
     validate_release(cfg)
     if not github_token:
         raise LaunchError("no GitHub release token")
     env = {"SONYA_RELEASE_SHA": cfg.release_sha, "SONYA_RELEASE_REPO": cfg.release_repo, "GITHUB_RELEASE_TOKEN": github_token,
            "WORKER_ID": label, "WORKER_BACKEND_MODE": "api", "ENABLED_MODES": ",".join(cfg.pool_modes),
            "SONYA_REQUIRE_MODEL_LOCK": "1", "SONYA_MIN_VRAM_MB": str(cfg.min_vram_gb * 1000 - 4000),
-           "SONYA_WORKER_CONCURRENCY": str(cfg.jobs_per_instance),
+           "SONYA_WORKER_CONCURRENCY": "auto" if power_slots else str(cfg.jobs_per_instance),
            # NVENC: the NVIDIA runtime mounts libnvidia-encode only with the "video" capability; without it the worker
            # fell back to libx264 on Vast (run 4: "render encoder: cpu @ 6M", 179 s vs 108 s on the Mac mini)
            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"}
@@ -138,6 +209,8 @@ def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Map
                if not environ.get(k)]
     if missing or not (environ.get("S3_BUCKET_NAME") or environ.get("S3_BUCKET")):
         raise LaunchError(f"dispatcher is missing worker env: {', '.join(missing) or 'S3_BUCKET_NAME'}")
+    if power_slots:
+        env["SONYA_WORKER_CONCURRENCY_MAX"] = str(power_slots)
     env.update({k: environ[k] for k in SECRET_PASSTHROUGH if environ.get(k)})
     return {"client_id": "me", "image": cfg.image, "env": env, "disk": cfg.disk_gb, "label": label, "runtype": "args"}
 
