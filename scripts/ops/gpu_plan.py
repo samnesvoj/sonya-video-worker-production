@@ -236,8 +236,66 @@ def resolve_concurrency(env: Mapping[str, str], cap_total: int) -> tuple:
     return int(raw), "env"
 
 
+# ── CPU window per worker (2x A40 load test 2026-11-09) ──────────────────────────────────────────────────────────────
+# ffmpeg (decoder, filters, swscale, libx264), OpenCV and torch size their thread pools by the CPUs they may run on. On a
+# 128-thread EPYC every ffmpeg starts hundreds of threads; with 16+ workers the container ran out of threads ("Resource
+# temporarily unavailable", Python "can't start new thread"): clips were lost (4090 and A40 at 16), uploads and whole jobs
+# failed (A40 at 24). Each worker therefore gets its own window of CPUs (sched affinity, inherited by every child), so its
+# pools are sized like on a normal 16-32 thread server. Windows overlap (a worker in a heavy phase can still use idle CPUs
+# of its neighbours). Small servers (< CPU_WINDOW_MIN_HOST CPUs) and one worker: nothing changes.
+CPU_WINDOW_MIN = 16                   # never fewer CPUs per worker than a 3060 box has (12-16 threads)
+CPU_WINDOW_MIN_HOST = 32
+
+
+def cpu_windows(cpus: Sequence[int], n_workers: int, env: Mapping[str, str] | None = None) -> List[Optional[List[int]]]:
+    """Worker k -> its CPU list (None = not pinned). SONYA_CPU_WINDOW: 0 = off, N = N CPUs per worker, unset = automatic:
+    max(16, 2 x CPUs / workers), i.e. every CPU is in about two windows."""
+    e = os.environ if env is None else env
+    cpus = sorted(int(c) for c in cpus)
+    raw = (e.get("SONYA_CPU_WINDOW") or "").strip()
+    if raw == "0" or n_workers <= 1 or len(cpus) < CPU_WINDOW_MIN_HOST:
+        return [None] * max(0, n_workers)
+    w = int(raw) if raw.isdigit() else max(CPU_WINDOW_MIN, math.ceil(2 * len(cpus) / n_workers))
+    if w >= len(cpus):
+        return [None] * n_workers
+    out: List[Optional[List[int]]] = []
+    for k in range(n_workers):
+        start = (k * len(cpus)) // n_workers
+        out.append(sorted(cpus[(start + i) % len(cpus)] for i in range(w)))
+    return out
+
+
+def cpu_list(cpus: Sequence[int]) -> str:
+    """[0,1,2,3,8,9] -> "0-3,8-9" (taskset / cpuset syntax)."""
+    parts: List[str] = []
+    xs = sorted(set(int(c) for c in cpus))
+    i = 0
+    while i < len(xs):
+        j = i
+        while j + 1 < len(xs) and xs[j + 1] == xs[j] + 1:
+            j += 1
+        parts.append(str(xs[i]) if i == j else f"{xs[i]}-{xs[j]}")
+        i = j + 1
+    return ",".join(parts)
+
+
+def parse_cpu_list(text: str) -> List[int]:
+    out: List[int] = []
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        a, _, b = part.partition("-")
+        out.extend(range(int(a), int(b or a) + 1))
+    return out
+
+
+def allowed_cpus() -> List[int]:
+    return sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else list(range(os.cpu_count() or 1))
+
+
 def build_plan(gpus: Sequence[Gpu], env: Mapping[str, str] | None = None, *, threads: Optional[float] = None,
-               ram: Optional[int] = None, gpu_check: bool = True) -> Dict[str, Any]:
+               ram: Optional[int] = None, gpu_check: bool = True, cpus: Optional[Sequence[int]] = None) -> Dict[str, Any]:
     """gpus: every card nvidia-smi listed, with readiness probe results filled in. gpu_check=False: GPU check skipped
     (local smoke / CPU tests): workers are not pinned and VRAM does not limit."""
     e = dict(os.environ if env is None else env)
@@ -261,8 +319,11 @@ def build_plan(gpus: Sequence[Gpu], env: Mapping[str, str] | None = None, *, thr
     slots = assign(n, cap["per_gpu"]) if usable else []
     nv_limit = nvenc_session_limit(usable, e) if usable else 0
     workers = []
+    windows = cpu_windows(allowed_cpus() if cpus is None else cpus, n, e)
     for k in range(n):
         w: Dict[str, Any] = {"slot": k + 1, "env": {}}
+        if windows[k]:
+            w["env"]["SONYA_CPU_AFFINITY"] = cpu_list(windows[k])
         if usable:
             g = usable[slots[k]]
             w.update(gpu_index=g.index, gpu_uuid=g.uuid, gpu_name=g.name, nvenc=g.nvenc_ok)
@@ -278,6 +339,7 @@ def build_plan(gpus: Sequence[Gpu], env: Mapping[str, str] | None = None, *, thr
     return {"schema": 1, "gpus": [asdict(g) | {"consumer": g.consumer} for g in gpus], "usable": [g.index for g in usable],
             "gpu_check": gpu_check, "cpu_threads": threads, "ram_mb": ram, "budget": asdict(budget), "capacity": cap,
             "concurrency": n, "source": source, "workers": workers, "per_gpu_workers": per_card,
+            "cpu_window": len(windows[0]) if windows and windows[0] else 0,
             "nvenc_max_sessions": nv_limit, "warnings": warnings}
 
 
@@ -287,7 +349,8 @@ def describe(plan: Mapping[str, Any]) -> str:
     nv = plan.get("nvenc_max_sessions") or 0
     return (f"{plan['concurrency']} worker(s) ({plan['source']}) on {len(plan['usable'])} GPU(s): {spread}; hardware carries "
             f"{cap['total']} (vram {cap['by_vram']}, cpu {cap['by_cpu']} of {plan['cpu_threads']} threads, ram {cap['by_ram']} of "
-            f"{plan['ram_mb']} MB; limit: {cap['limit']}); nvenc sessions: {nv if nv else 'unlimited'}")
+            f"{plan['ram_mb']} MB; limit: {cap['limit']}); nvenc sessions: {nv if nv else 'unlimited'}; "
+            f"cpu window per worker: {plan.get('cpu_window') or 'off'}")
 
 
 def plan_path(env: Mapping[str, str] | None = None) -> Path:
@@ -301,7 +364,7 @@ def worker_lines(plan: Mapping[str, Any], state_dir: str) -> List[str]:
         env = dict(w["env"])
         if env.get("SONYA_NVENC_MAX_SESSIONS"):
             env["SONYA_NVENC_SLOT_DIR"] = str(Path(state_dir) / "nvenc")   # shared by all workers of this server
-        bad = [v for v in env.values() if not re.fullmatch(r"[A-Za-z0-9_./:-]+", v)]
+        bad = [v for v in env.values() if not re.fullmatch(r"[A-Za-z0-9_./:,-]+", v)]
         if bad:
             raise ValueError("unsafe value in the worker plan")
         out.append(" ".join([str(w["slot"])] + [f"{k}={v}" for k, v in sorted(env.items())]))
@@ -379,7 +442,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         gpus[i].cuda_ok, gpus[i].error = False, "simulated broken card"
     env = {"SONYA_WORKER_CONCURRENCY": a.concurrency, **({"SONYA_WORKER_CONCURRENCY_MAX": a.max} if a.max else {})}
     env.update({k: v for k, v in os.environ.items() if k in Budget.ENV.values() or k == "SONYA_NVENC_MAX_SESSIONS"})
-    plan = build_plan(gpus, env, threads=a.threads, ram=int(a.ram_gb * 1024), gpu_check=bool(gpus))
+    plan = build_plan(gpus, env, threads=a.threads, ram=int(a.ram_gb * 1024), gpu_check=bool(gpus), cpus=range(int(a.threads)))
     print(describe(plan))
     for w in plan["warnings"]:
         print(f"WARNING {w}")

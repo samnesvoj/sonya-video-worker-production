@@ -28,6 +28,20 @@ Flow (both modes):
 """
 from __future__ import annotations
 
+import os as _os
+
+if _os.environ.get("SONYA_CPU_AFFINITY") and hasattr(_os, "sched_setaffinity"):
+    # big multi-worker servers (scripts/ops/gpu_plan.cpu_windows): this worker's CPU window, set BEFORE any import starts
+    # a thread pool; ffmpeg / OpenCV / torch inherit it and size their pools by it. A bad value leaves the default.
+    try:
+        _cpus = set()
+        for _part in _os.environ["SONYA_CPU_AFFINITY"].split(","):
+            _a, _, _b = _part.partition("-")
+            _cpus.update(range(int(_a), int(_b or _a) + 1))
+        _os.sched_setaffinity(0, _cpus & _os.sched_getaffinity(0) or _os.sched_getaffinity(0))
+    except (OSError, ValueError):
+        pass
+
 import argparse
 import json
 import logging

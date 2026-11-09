@@ -61,6 +61,13 @@ def cgroup() -> Dict[str, Any]:
             usec = next(int(l.split()[1]) for l in open(f"{root}/cpu.stat") if l.startswith("usage_usec"))
         elif os.path.exists(f"{root}/cpuacct/cpuacct.usage"):
             usec = int(open(f"{root}/cpuacct/cpuacct.usage").read()) / 1000
+        for cur, mx in ((f"{root}/pids.current", f"{root}/pids.max"), (f"{root}/pids/pids.current", f"{root}/pids/pids.max")):
+            if os.path.exists(cur):                     # threads count as pids: the A40 2026-11-09 limit
+                out["pids"] = int(open(cur).read().strip())
+                m = open(mx).read().strip() if os.path.exists(mx) else "max"
+                if m != "max":
+                    out["pids_max"] = int(m)
+                break
         if usec is not None:
             now = time.time()
             if "u" in _CG:
@@ -93,6 +100,7 @@ def sample(nv, h) -> Dict[str, Any]:
     try:
         ff = [p.info.get("cmdline") or [] for p in psutil.process_iter(["name", "cmdline"]) if (p.info.get("name") or "").startswith("ffmpeg")]
         s["ffmpeg"] = len(ff)
+        s["threads"] = sum(p.info.get("num_threads") or 0 for p in psutil.process_iter(["num_threads"]))
         s["ff_nvenc"] = sum(1 for c in ff if "h264_nvenc" in c)      # NVENC sessions in use (GeForce: max 8)
         s["ff_x264"] = sum(1 for c in ff if "libx264" in c)
     except Exception:  # noqa: BLE001
@@ -103,7 +111,7 @@ def sample(nv, h) -> Dict[str, Any]:
 def summary(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"n": len(samples)}
     for k in ("vram_used_mb", "ram_used_mb", "cpu_pct", "gpu_util", "enc_util", "load1", "ffmpeg", "ff_nvenc", "ff_x264", "disk_used_gb", "tmp_gb", "cg_mem_mb",
-              "cg_cpu_cores"):
+              "cg_cpu_cores", "threads", "pids", "pids_max"):
         vals = [x[k] for x in samples if k in x]
         if vals:
             out[k + "_max"] = max(vals)

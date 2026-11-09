@@ -228,3 +228,44 @@ def test_readiness_nvenc_result_is_handed_to_each_worker():
 def test_explicit_32_on_two_cards_is_16_per_card():
     p = plan("2xA40:46068", 32, threads=128, ram_gb=1024)
     assert p["concurrency"] == 32 and p["per_gpu_workers"] == {0: 16, 1: 16}
+
+
+# ── CPU window per worker (2x A40 2026-11-09: 16+ workers on 128 threads ran the container out of threads) ──────────
+def test_cpu_windows_off_for_small_servers_one_worker_and_env_zero():
+    assert gp.cpu_windows(range(16), 2) == [None, None]                    # RTX 3060 box: unchanged
+    assert gp.cpu_windows(range(128), 1) == [None]
+    assert gp.cpu_windows(range(128), 2) == [None, None]                   # window would be the whole server
+    assert gp.cpu_windows(range(128), 24, {"SONYA_CPU_WINDOW": "0"}) == [None] * 24
+
+
+def test_cpu_windows_big_server_overlap_and_cover_every_cpu():
+    w = gp.cpu_windows(range(128), 24, {})
+    assert all(len(x) == 16 for x in w)                                     # max(16, 2*128/24 = 11)
+    assert set().union(*map(set, w)) == set(range(128))
+    w8 = gp.cpu_windows(range(128), 8, {})
+    assert [len(x) for x in w8] == [32] * 8 and w8[0] == list(range(32)) and w8[1] == list(range(16, 48))
+    w32 = gp.cpu_windows(range(128), 32, {"SONYA_CPU_WINDOW": "20"})
+    assert all(len(x) == 20 for x in w32) and w32[31] == sorted([(124 + i) % 128 for i in range(20)])   # wraps around
+
+
+def test_cpu_windows_use_the_allowed_cpu_ids_not_0_to_n():
+    cpus = list(range(64, 128)) + list(range(192, 256))                     # a cpuset of 128 non-contiguous ids
+    w = gp.cpu_windows(cpus, 16, {})
+    assert all(set(x) <= set(cpus) for x in w) and set().union(*map(set, w)) == set(cpus)
+
+
+def test_cpu_list_round_trip():
+    assert gp.cpu_list([0, 1, 2, 3, 8, 9, 11]) == "0-3,8-9,11"
+    assert gp.parse_cpu_list("0-3,8-9,11") == [0, 1, 2, 3, 8, 9, 11]
+    assert gp.cpu_list(gp.cpu_windows(range(128), 32, {})[31]) == "0-11,124-127"
+
+
+def test_plan_puts_the_window_into_the_worker_env_and_worker_lines_accept_it(tmp_path):
+    gpus = [gp.Gpu(i, f"GPU-{i}", "A40", 46068, cuda_ok=True, nvenc_ok=True) for i in range(2)]
+    plan = gp.build_plan(gpus, {"SONYA_WORKER_CONCURRENCY": "24"}, threads=128, ram=1_000_000, cpus=range(128))
+    assert plan["cpu_window"] == 16
+    assert plan["workers"][0]["env"]["SONYA_CPU_AFFINITY"] == "0-15"
+    lines = gp.worker_lines(plan, str(tmp_path))
+    assert "SONYA_CPU_AFFINITY=0-15" in lines[0] and len(lines) == 24
+    small = gp.build_plan(gpus[:1], {"SONYA_WORKER_CONCURRENCY": "2"}, threads=16, ram=32768, cpus=range(16))
+    assert all("SONYA_CPU_AFFINITY" not in w["env"] for w in small["workers"]) and small["cpu_window"] == 0

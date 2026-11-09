@@ -193,7 +193,7 @@ def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jp
 
 # ── phase G: how many videos at once on ONE (big) GPU ─────────────────────────────────────────────────────────────────
 RES_KEYS = ("vram_used_mb", "vram_total_mb", "cg_mem_mb", "ram_used_mb", "cg_cpu_cores", "cpu_pct", "load1", "gpu_util", "enc_util",
-            "ffmpeg", "ff_nvenc", "ff_x264", "tmp_gb", "disk_used_gb")
+            "ffmpeg", "ff_nvenc", "ff_x264", "tmp_gb", "disk_used_gb", "threads", "pids", "pids_max")
 
 
 def peaks(docs: List[dict], t0: float, t1: float) -> dict:
