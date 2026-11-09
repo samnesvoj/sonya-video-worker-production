@@ -171,7 +171,14 @@ def test_look_options_from_site_settings():
     assert runner._look_options({"settings": {"subtitleStyle": "none"}})["subtitles"] is False
 
 
-def test_llm_switch():
+def test_llm_switch(monkeypatch):
     from modes.educational import runner
+    monkeypatch.setenv("SONYA_LLM_EDITOR", "off")
     assert runner._llm_on({"llm": "on"}) and not runner._llm_on({})
+    assert not runner._llm_on({"llm": "off"})
+    opts = runner._overlay_options({"llm": "on"}, {"template": 2, "subtitles": True, "title": True},
+                                   {"title": "T", "series_index": 1, "series_total": 3}, 3)
+    assert opts["cards"] and opts["llm_opt_in"] and opts["template"] == 2 and opts["part"] == (1, 3)
+    assert not runner._overlay_options({"llm": "on", "edu": {"cards": False}}, {"template": 1, "subtitles": True,
+                                       "title": True}, {}, 1)["cards"]
     assert not runner._llm_on({"llm": "on", "edu": {"editor": False}})

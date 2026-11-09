@@ -561,6 +561,7 @@ def _runner(monkeypatch):
 
 def test_runner_default_never_draws_cards_or_calls_the_llm(monkeypatch, tmp_path):
     """v4: every clip gets the template (subtitles + title), but cards and the LLM stay off unless the job asks."""
+    monkeypatch.setenv("SONYA_LLM_EDITOR", "off")      # no provider on this worker
     runner, composed = _runner(monkeypatch)
     from modes.educational import overlays as ov
     seen = []

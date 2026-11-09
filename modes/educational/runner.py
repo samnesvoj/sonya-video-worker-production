@@ -167,11 +167,18 @@ def _asr_segments(words: List[Dict]) -> List[Dict]:
 
 
 def _llm_on(params: Dict[str, Any]) -> bool:
-    """Gemini editor only when the job opts in (the same switch the other LLM paths use) and not explicitly off."""
+    """Gemini (analysis only): params.edu.editor wins; then params.llm; otherwise the same rule as Cut — on when a
+    provider is configured on this worker (TIMEWEB / OPENROUTER key) and SONYA_LLM_EDITOR is not off."""
     edu = params.get("edu") if isinstance(params.get("edu"), dict) else {}
     if "editor" in edu:
         return bool(edu["editor"])
-    return params.get("llm") == "on"
+    if params.get("llm") in ("on", "off"):
+        return params.get("llm") == "on"
+    try:
+        from scripts.shared.cut_profile import editor_available
+        return editor_available()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def select_segments(input_video_path: str, words: List[Dict], params: Dict[str, Any], output_dir: Path,
@@ -258,7 +265,11 @@ def _overlay_options(params: Dict[str, Any], look: Dict[str, Any], seg: Dict[str
     for them (params.edu_overlays, v2 semantics) — they need the LLM planner."""
     base = params.get("edu_overlays")
     opts: Dict[str, Any] = dict(base) if isinstance(base, dict) else {}
-    opts.setdefault("cards", bool(base))
+    edu = params.get("edu") if isinstance(params.get("edu"), dict) else {}
+    llm = _llm_on(params)
+    # cards need the LLM planner: on with the LLM unless the job says otherwise (edu.cards / edu_overlays=False)
+    opts.setdefault("cards", bool(base) if base is not None else bool(edu.get("cards", llm)))
+    opts.setdefault("llm_opt_in", llm)
     opts.setdefault("preset", "deep")       # terms, facts, formulas, steps, charts — each still has to pass evidence
     opts.setdefault("template", look["template"])
     opts.setdefault("burn_subtitles", look["subtitles"])
@@ -273,7 +284,7 @@ def _apply_overlays(clip_path: str, input_video_path: str, words: List[Dict], se
                     index: int, params: Dict[str, Any], enrichment: Dict[str, Any]) -> bool:
     """Educational v2 (params["edu_overlays"], default off). The plain clip stays in place if anything goes wrong."""
     options = dict(params["edu_overlays"]) if isinstance(params["edu_overlays"], dict) else {}
-    options.setdefault("llm_opt_in", params.get("llm") == "on")
+    options.setdefault("llm_opt_in", _llm_on(params))
     options.setdefault("ledger_path", params.get("edu_ledger_path"))
     options.setdefault("video_id", Path(input_video_path).stem)
     try:
