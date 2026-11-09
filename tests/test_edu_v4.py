@@ -202,3 +202,16 @@ def test_filler_openers_are_penalised():
     a, _ = sl.completeness("Ой, ребята, да тут, а, нет, тут есть вариация. Поэтому так.")
     b, _ = sl.completeness("Тут есть вариация начального состояния. Поэтому так.")
     assert a < b
+
+
+def test_editor_approved_pieces_come_first():
+    words = _words(LECTURE, step=0.45)
+    ranked, _ = sl.score_candidates(words, sl.EduConfig(min_duration=15, skip_intro_sec=0))
+    last = ranked[-1]                                   # the locally worst candidate
+
+    def editor(pool):
+        return {last["id"]: {"score": 90.0, "complete": True, "self_contained": True, "title": "Трение",
+                             "topic": "трение", "reason": "ok"}}, {"status": "ok"}
+    cfg = sl.EduConfig(max_clips=1, min_duration=15, skip_intro_sec=0, editor=True, editor_pool=10_000)
+    segs, meta = sl.select_lesson_clips(words, cfg, None, editor)
+    assert segs[0]["candidate_id"] == last["id"] and segs[0]["title"] == "Трение"

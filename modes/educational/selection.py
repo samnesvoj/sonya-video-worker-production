@@ -256,7 +256,17 @@ def select_lesson_clips(words_raw: Sequence[Dict[str, Any]], cfg: Optional[EduCo
             for c in ranked:
                 if c.get("topic_title"):
                     c["topic_id"] = topic_ids.setdefault(c["topic_title"].lower(), 1000 + len(topic_ids))
-    chosen = pick_series(ranked, cfg.max_clips, cfg.min_gap_sec)
+    if verdicts:
+        # the editor read these: a series is built from its approved pieces first, the unread ones only fill gaps
+        approved = [c for c in ranked if c["id"] in verdicts and tier(c) >= 1.0]
+        chosen = pick_series(approved, cfg.max_clips, cfg.min_gap_sec)
+        for c in pick_series(ranked, cfg.max_clips, cfg.min_gap_sec):
+            if len(chosen) >= cfg.max_clips:
+                break
+            if c not in chosen and _free(c, chosen, cfg.min_gap_sec):
+                chosen.append(c)
+    else:
+        chosen = pick_series(ranked, cfg.max_clips, cfg.min_gap_sec)
     chosen.sort(key=lambda c: c["start"])
     segs = []
     for k, c in enumerate(chosen, 1):
