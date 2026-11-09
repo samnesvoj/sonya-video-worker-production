@@ -297,7 +297,8 @@ def test_themes_are_readable(name):
 
 
 def test_three_themes_only_light_and_dark_and_no_gold_or_beige():
-    assert set(themes.THEMES) == {"academic-minimal", "modern-tech", "clean-whiteboard"}
+    assert set(themes.THEMES) == {"academic-minimal", "modern-tech", "clean-whiteboard",
+                                  "edu-white", "edu-silver", "edu-graphite", "edu-violet"}
     lums = [themes.luminance(t.panel) for t in themes.THEMES.values()]
     assert max(lums) > 0.7 and min(lums) < 0.1
     for t in themes.THEMES.values():
@@ -558,12 +559,15 @@ def _runner(monkeypatch):
     return importlib.import_module("modes.educational.runner"), composed
 
 
-def test_runner_default_never_touches_overlays(monkeypatch, tmp_path):
+def test_runner_default_never_draws_cards_or_calls_the_llm(monkeypatch, tmp_path):
+    """v4: every clip gets the template (subtitles + title), but cards and the LLM stay off unless the job asks."""
     runner, composed = _runner(monkeypatch)
     from modes.educational import overlays as ov
-    monkeypatch.setattr(ov, "apply_overlays", lambda *a, **k: pytest.fail("overlays must be off by default"))
+    seen = []
+    monkeypatch.setattr(ov, "apply_overlays", lambda base, out, words, s, d, opts: seen.append(opts) or {"warnings": []})
     r = runner.run("in.mp4", str(tmp_path), {"max_clips": 1})
     assert r["clips"] and len(composed) == 1
+    assert seen and seen[0]["cards"] is False and seen[0]["llm_opt_in"] is False and seen[0]["template"] == 1
 
 
 def test_overlay_failure_keeps_the_plain_clip(monkeypatch, tmp_path):

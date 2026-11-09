@@ -255,3 +255,16 @@ def select_lesson_clips(words_raw: Sequence[Dict[str, Any]], cfg: Optional[EduCo
                 selected=[{k: s[k] for k in ("candidate_id", "start", "duration", "topic_id", "title", "segment_type",
                                              "selection_reason")} | {"text": s["text"][:300]} for s in segs])
     return segs, meta
+
+
+def sentence_edges(words: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Deterministic check of a finished clip's own ASR: the first word starts a sentence (capital letter / digit),
+    the last word ends a statement (. or !), never a question, «…» or a dangling comma."""
+    ws = [str(w.get("word", "")).strip() for w in words if str(w.get("word", "")).strip()]
+    if not ws:
+        return {"ok": False, "start_ok": False, "end_ok": False, "first": "", "last": ""}
+    first, last = ws[0], ws[-1]
+    letter = re.sub(r"^[^\w]+", "", first)
+    start_ok = bool(letter) and (letter[0].isupper() or letter[0].isdigit())
+    end_ok = bool(re.search(r"[.!][\"'»”)]*$", last)) and not last.endswith("...")
+    return {"ok": start_ok and end_ok, "start_ok": start_ok, "end_ok": end_ok, "first": first, "last": last}

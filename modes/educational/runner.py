@@ -88,14 +88,20 @@ def run(
             if not other_aspect:    # compose_vertical_clip only makes 9:16; other aspects re-cut the source themselves
                 frame, why = _frame_choice(params, input_video_path, seg_start, seg_duration, layout_mode)
                 seg["frame_layout"], seg["frame_reason"] = frame, why
+                st = None
                 if frame == "stage":
-                    from modes.educational.stage import render_stage
-                    from modes.educational.templates import get_template
-                    st = render_stage(input_video_path, out, seg_start, seg_duration,
-                                      get_template(look["template"]).stage)
-                    if overlays_opt is not None:
-                        overlays_opt.update(on_stage=True, protect_rect=st["video_rect"])
-                else:
+                    try:
+                        from modes.educational.stage import render_stage
+                        from modes.educational.templates import get_template
+                        st = render_stage(input_video_path, out, seg_start, seg_duration,
+                                          get_template(look["template"]).stage)
+                        if overlays_opt is not None:
+                            overlays_opt.update(on_stage=True, protect_rect=st["video_rect"])
+                    except Exception as exc:  # noqa: BLE001 — the user still gets the clip, cropped as before
+                        logger.warning("[educational] stage render failed for clip %d (%s) — smart crop", i + 1, exc)
+                        enrichment.setdefault("warnings", []).append(f"edu_stage_failed: {type(exc).__name__}")
+                        seg["frame_layout"] = "crop"
+                if st is None:
                     compose_vertical_clip(
                         input_video_path=input_video_path,
                         output_path=out,
@@ -210,7 +216,8 @@ def select_segments(input_video_path: str, words: List[Dict], params: Dict[str, 
         warnings.append(f"educational_selection_failed: {type(exc).__name__}: {str(exc)[:160]}")
         trace["selection_error"] = f"{type(exc).__name__}: {str(exc)[:300]}"
     if not segments:
-        warnings.append("educational_fallback_used: no complete explanation found — first minute / layout cuts")
+        warnings.append("educational_engine_unavailable: no complete explanation found — fallback first minute / "
+                        "layout cuts")
         logger.warning("[educational] FALLBACK: no v4 segments — the old first-60-s / layout segments are used")
         segments = _fallback_segments(words, enrichment.get("layout_segments") or [])[:max_clips]
     else:
@@ -240,6 +247,8 @@ def _look_options(params: Dict[str, Any]) -> Dict[str, Any]:
     raw = params.get("template", settings.get("edu_template", settings.get("template")))
     tpl = get_template(raw)
     subs = params.get("subtitles", settings.get("subtitles", True))
+    if str(settings.get("subtitleStyle") or "").lower() in ("none", "off"):      # the site's subtitles switch
+        subs = False
     return {"template": tpl.id, "subtitles": subs not in (False, "off", "false", 0),
             "title": params.get("edu_title", settings.get("edu_title", True)) not in (False, "off", "false", 0)}
 
