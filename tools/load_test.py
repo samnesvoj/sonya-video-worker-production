@@ -357,6 +357,11 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     from tools.stub_worker_api import serve_in_thread
 
     run = Run(a.max_usd, a.max_minutes)
+    import signal
+
+    def _stop(*_):                # a background run ignores Ctrl-C (SIGINT): SIGTERM -> the same teardown + report
+        raise KeyboardInterrupt("SIGTERM")
+    signal.signal(signal.SIGTERM, _stop)
     secret = _secrets.token_urlsafe(32)
     stub = StubState()
     srv, _ = serve_in_thread(stub, secret, port=a.stub_port)
