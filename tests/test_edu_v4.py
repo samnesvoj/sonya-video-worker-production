@@ -182,3 +182,11 @@ def test_llm_switch(monkeypatch):
     assert not runner._overlay_options({"llm": "on", "edu": {"cards": False}}, {"template": 1, "subtitles": True,
                                        "title": True}, {}, 1)["cards"]
     assert not runner._llm_on({"llm": "on", "edu": {"editor": False}})
+
+
+def test_cue_never_ends_on_a_preposition():
+    text = ("Цикл почти никогда не может быть зациклен на бесконечное число шагов потому что "
+            "у него всегда есть граница и счётчик который растёт с каждым шагом.")
+    cues = tp.build_cues(_words(text, step=0.42), 30.0, tp.get_template(1), tp.Layout(1080, 1920))
+    for c in cues[:-1]:
+        assert c.words[-1][0].strip(",.").lower() not in tp._WEAK, [w[0] for w in c.words]

@@ -267,8 +267,12 @@ def build_cues(words: Sequence[Dict[str, Any]], duration: float, tpl: Template, 
                     continue
             if (cur[-1][0][-1:] in ".!?…" or w[1] - cur[-1][2] > gap_sec or w[2] - cur[0][1] > max_sec
                     or too_long or (cur[-1][0][-1:] in ",;:" and len(text) > 26)):
+                carry = []
+                if (len(cur) > 2 and cur[-1][0].strip(",.").lower() in _WEAK and cur[-1][0][-1:].isalpha()
+                        and w[1] - cur[-1][2] <= gap_sec):
+                    carry = [cur.pop()]             # «зациклен на» → «на» opens the next cue
                 groups.append(cur)
-                cur = []
+                cur = carry
         cur.append(w)
     if cur:
         groups.append(cur)
