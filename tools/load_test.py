@@ -206,6 +206,11 @@ def peaks(docs: List[dict], t0: float, t1: float) -> dict:
                 for k in RES_KEYS:
                     if k in x:
                         out[k] = max(out.get(k, x[k]), x[k])
+                for g in x.get("gpus") or []:           # multi-GPU server: peaks of every card on its own
+                    d = out.setdefault("per_gpu", {}).setdefault(str(g.get("i")), {})
+                    for k in ("vram_used_mb", "vram_total_mb", "gpu_util", "enc_util", "procs"):
+                        if k in g:
+                            d[k] = max(d.get(k, g[k]), g[k])
     return out
 
 
@@ -303,10 +308,20 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
             run.say(f"G: {out['stopped']}")
             todo = []
             continue
+        def level_usd(k: int) -> float:       # conservative: wall grows linearly with the level (CPU-bound server)
+            est = (lv["cold_start_s"] or 300) + (lv["wall_s"] or 0) * k / n * 1.2 + flush_s + 120
+            return est / 3600 * float(Decimal(str(inst.dph_base)) + Decimal("0.02")) * 1.3
+        if todo:                              # 2x A40 2026-11-09: a level that cannot finish inside the budget is not started
+            spent = float(run.spent())
+            if spent + level_usd(todo[0]) > run.max_usd * 0.95:
+                out["stopped"] = (f"budget: spent {spent:.2f} + est {level_usd(todo[0]):.2f} for level {todo[0]} > "
+                                  f"{run.max_usd * 0.95:.2f} - levels skipped: {todo}")
+                run.say(f"G: {out['stopped']}")
+                todo = []
+                continue
         if not todo and extra_level and n < extra_level:
             spent = float(run.spent())
-            est = (lv["cold_start_s"] or 300) + (lv["wall_s"] or 0) * extra_level / n * 1.2 + flush_s + 120
-            est_usd = est / 3600 * float(Decimal(str(inst.dph_base)) + Decimal("0.02")) * 1.3
+            est_usd = level_usd(extra_level)
             if lv["limit"]:
                 out["extra_skipped"] = f"level {n} hit the limit: {', '.join(lv['limit'])}"
             elif spent + est_usd > run.max_usd * 0.95:

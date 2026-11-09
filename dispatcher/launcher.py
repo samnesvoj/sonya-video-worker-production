@@ -41,7 +41,9 @@ def search_query(cfg: FleetConfig) -> dict:
             "cpu_cores_effective": {"gte": cfg.min_cpu_cores}, "cpu_ram": {"gte": max(cfg.min_cpu_ram_gb, 4 * cfg.jobs_per_instance + 4) * 1000},   # ~3.5 GB RAM per parallel video
             "reliability2": {"gte": cfg.min_reliability}, "inet_down": {"gte": cfg.min_inet_down_mbps},
             "cuda_max_good": {"gte": 12.6}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
-            "order": [["dph_total", "asc"]], "limit": 200}
+            "order": [["dph_total", "asc"]], "limit": 200,
+            # load tests only: the pinned host may have several cards (2x A40 test 2026-11-09); production stays 1 card
+            **({"num_gpus": {"gte": 1}, "machine_id": {"eq": cfg.pin_machine_id}} if cfg.pin_machine_id else {})}
 
 
 # ── server choice (owner 2026-11-08: «процессор под стать Mac mini, норм видеокарта, недорого и сразу с хорошим интернетом»;

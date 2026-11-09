@@ -215,3 +215,24 @@ def test_phase_g_hung_job_ends_the_level_and_skips_bigger_levels_clip_encoders_r
     assert lv["hung"] == first and lv["failed"] == 1 and lv["videos_per_hour"] and lv["wall_done_s"] < lv["wall_s"]
     assert lv["encoders"] == {"None": 1, "nvenc": 1, "nvenc->cpu": 1} and lv["clips_missing"] == 1
     assert clock() - run.t0 < 40 * 60 and not vast.list_instances()
+
+
+def test_pinned_search_allows_a_multi_gpu_host_production_query_stays_one_card():
+    from dispatcher import launcher
+    base = dict(enabled=True, dry_run=False, image=IMAGE, release_sha=SHA)
+    assert launcher.search_query(FleetConfig(**base))["num_gpus"] == {"eq": 1}
+    q = launcher.search_query(FleetConfig(**base, pin_machine_id=51337))
+    assert q["num_gpus"] == {"gte": 1} and q["machine_id"] == {"eq": 51337}
+
+
+def test_peaks_keep_every_card_of_a_multi_gpu_server():
+    from tools.load_test import peaks
+    docs = [{"samples": [{"t": 10, "vram_used_mb": 30000, "gpus": [{"i": 0, "vram_used_mb": 20000, "gpu_util": 90, "procs": 4},
+                                                                    {"i": 1, "vram_used_mb": 10000, "gpu_util": 40, "procs": 4}]},
+                         {"t": 20, "vram_used_mb": 31000, "gpus": [{"i": 0, "vram_used_mb": 15000, "gpu_util": 99},
+                                                                    {"i": 1, "vram_used_mb": 16000, "gpu_util": 30}]},
+                         {"t": 99, "gpus": [{"i": 0, "vram_used_mb": 47000}]}]}]          # outside the level: ignored
+    p = peaks(docs, 0, 50)
+    assert p["vram_used_mb"] == 31000 and p["samples"] == 2
+    assert p["per_gpu"] == {"0": {"vram_used_mb": 20000, "gpu_util": 99, "procs": 4},
+                            "1": {"vram_used_mb": 16000, "gpu_util": 40, "procs": 4}}
