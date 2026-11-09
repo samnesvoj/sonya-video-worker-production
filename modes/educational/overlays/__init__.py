@@ -6,7 +6,8 @@ decides that, and it stays opt-in). Any failure here leaves the plain clip in pl
 
     apply_overlays(base_clip, out_clip, words, clip_start, clip_duration, options) -> report dict
 
-options: preset (minimal|balanced|deep), enabled_types, max_per_min, theme, intensity, size, position, burn_subtitles,
+options: template (1–4, modes/educational/templates.py: subtitles + cards + title in one look), title, part (k, n),
+preset (minimal|balanced|deep), enabled_types, max_per_min, theme, intensity, size, position, burn_subtitles,
 manifest (path of an edited manifest: replaces the planner), llm_opt_in, ledger_path, video_id, author_materials,
 verified_sources, cache_dir, formula_backend, work_dir, providers/transport (tests).
 """
@@ -71,7 +72,18 @@ def _write_subtitles(words: List[Dict[str, Any]], duration: float, f: pl.Frame, 
     return str(path)
 
 
-def _subtitle_top(f: pl.Frame, burn: bool) -> int:
+def _template(opts: Dict[str, Any]):
+    if opts.get("template") in (None, "", 0, "0"):
+        return None
+    from .. import templates as tp
+    return tp.get_template(opts["template"])
+
+
+def _subtitle_top(f: pl.Frame, burn: bool, tpl=None, on_stage: bool = False) -> int:
+    if tpl is not None:
+        from .. import templates as tp
+        lay = tp.Layout(f.width, f.height, on_stage)
+        return tp.subtitle_block_top(tpl, lay) if burn else int(lay.bottom)
     style = _subtitle_style(f)
     band = int(2 * style.size * 1.25) + int(16 * f.short / 1080)
     bottom = f.height - style.margin_v
@@ -95,11 +107,30 @@ def _load_items(options: Dict[str, Any], words: List[Dict[str, Any]], report: Di
     return res["items"]
 
 
+def _title_layer(tpl, f: pl.Frame, title: str, part, duration: float, work: Path,
+                 layers: List[cp.PlacedLayer]) -> float:
+    """The hook title as the first layer; returns the second it is gone (0 = no title drawn)."""
+    from .. import templates as tp
+    lay = tp.Layout(f.width, f.height)
+    img = tp.title_image(title, tpl, lay, tuple(part) if part else None)
+    if img is None or duration < 6.0:
+        return 0.0
+    x, y = tp.title_position(img, lay)
+    t0, t1 = tp.TITLE_SHOW
+    png = work / "title.png"
+    img.save(png)
+    layers.append(cp.PlacedLayer(str(png), x, y, t0, min(t1, duration - 1.0), cp.slide_px(f.short, "soft")))
+    return min(t1, duration - 1.0) + 0.2
+
+
 def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]], clip_start: float, clip_duration: float,
                    options: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Writes out_clip and <out_clip stem>.overlays.json (the editable manifest with statuses and a profile)."""
     t_all = time.monotonic()
     opts = {**DEFAULTS, **(options or {})}
+    tpl = _template(opts)
+    if tpl is not None and not (options or {}).get("theme"):
+        opts["theme"] = tpl.theme
     prof: Dict[str, float] = {}
     report: Dict[str, Any] = {"warnings": []}
     info = cp.probe(base_clip)
@@ -108,7 +139,7 @@ def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]
     words = ev.clip_local_words(words_abs, float(clip_start), float(clip_start) + duration)
 
     t = time.monotonic()
-    raw = _load_items(opts, words, report)
+    raw = _load_items(opts, words, report) if opts.get("cards", True) else []
     prof["planning_sec"] = time.monotonic() - t
 
     for it in raw:
@@ -136,18 +167,32 @@ def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]
         t = time.monotonic()
         from scripts.shared.crop.clip_analysis import analyze_clip
         analysis = analyze_clip(base_clip, 0.0, duration, face_fps=5.0)
+    if opts.get("protect_rect"):
+        analysis["protected"] = [list(opts["protect_rect"])]
         prof["frame_analysis_sec"] = time.monotonic() - t
-    if burn and pl.burned_caption_share(base_clip, _subtitle_top(f, True), f.height, duration) >= BURNED_SUBS_SHARE:
+    if burn and pl.burned_caption_share(base_clip, _subtitle_top(f, True, tpl, bool(opts.get("on_stage"))), f.height, duration) >= BURNED_SUBS_SHARE:
         burn = False            # the source already has captions where ours would go: two layers of text are unreadable
         report["subtitles_skipped"] = "source_has_burned_text"
     layers: List[cp.PlacedLayer] = []
+    title_end = 0.0
+    if tpl is not None and opts.get("title"):
+        title_end = _title_layer(tpl, f, str(opts["title"]), opts.get("part"), duration, work, layers)
+        report["title"] = bool(title_end)
     prof["card_render_sec"] = prof["placement_sec"] = 0.0
     cache_hits = 0
     if accepted:
         # burned-in captions occupy the same band ours would: it stays reserved even when ours are switched off
-        sub_top = _subtitle_top(f, burn or "subtitles_skipped" in report)
+        sub_top = _subtitle_top(f, burn or "subtitles_skipped" in report, tpl, bool(opts.get("on_stage")))
+        max_h = pl.max_card_height(f)
+        if opts.get("protect_rect"):        # on a stage the card lives above the slide, never over it
+            max_h = min(max_h, int(opts["protect_rect"][1]) - pl.safe_margins(f)["top"] - int(f.height * 0.012))
         for it in sorted(accepted, key=lambda x: x["start_ms"]):
             start, end = pl.snap_to_cuts(it["start_ms"] / 1000.0, it["end_ms"] / 1000.0, analysis.get("cuts", []))
+            if title_end and start < title_end:     # the title leads in alone; a card waits for it to leave
+                start = title_end
+                if end - start < 1.5:
+                    it["status"], it["reason"] = "skipped", "under_title"
+                    continue
             t = time.monotonic()
             edges = pl.edge_density_maps(base_clip, start, end)
             prof["placement_sec"] += time.monotonic() - t
@@ -157,7 +202,7 @@ def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]
                 sized = {**it, "style": {**it["style"], "size": float(it["style"].get("size", 1.0)) * k}}
                 t = time.monotonic()
                 try:
-                    card, hit = cd.render_cached(sized, pl.card_width(f), f.short, pl.max_card_height(f),
+                    card, hit = cd.render_cached(sized, pl.card_width(f), f.short, max_h,
                                                  opts.get("cache_dir"), opts.get("formula_backend"), pl.text_scale(f))
                 except (cd.CardOverflow, fm.FormulaError) as e:
                     why = {"render": str(e)}
@@ -190,7 +235,14 @@ def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]
     drawn = [i for i in items if i.get("status") == "ok"]
 
     t = time.monotonic()
-    subtitle = _write_subtitles(words, duration, f, work / "subs.ass") if burn else None
+    if tpl is not None:
+        from .. import templates as tp
+        subtitle = tp.write_subtitles(_join_punctuation(words), duration, tpl,
+                                      tp.Layout(f.width, f.height, bool(opts.get("on_stage"))),
+                                      work / "subs.ass") if burn else None
+        report["template"] = tpl.id
+    else:
+        subtitle = _write_subtitles(words, duration, f, work / "subs.ass") if burn else None
     from scripts.shared.subtitle_styles import FONTS_DIR
     if layers or subtitle:
         cp.composite(base_clip, out_clip, layers, subtitle_path=subtitle, fonts_dir=str(FONTS_DIR))

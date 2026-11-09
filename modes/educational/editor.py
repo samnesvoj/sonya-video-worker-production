@@ -41,23 +41,44 @@ SYSTEM = (
 
 def build_messages(cands: List[Dict[str, Any]], want: int) -> List[Dict[str, str]]:
     items = [{"id": c["id"], "dur": round(c["end"] - c["start"]), "text": c["text"][:TEXT_CHARS]} for c in cands]
-    user = (f"Нужна серия из {want} лучших учебных клипов. Фрагменты:\n" + json.dumps(items, ensure_ascii=False) +
-            "\n\nДля КАЖДОГО фрагмента верни JSON {\"clips\": [{\"id\": str, \"score\": 0-100, \"complete\": bool, "
-            "\"self_contained\": bool, \"title\": \"заголовок до 6 слов: о чём объяснение, словами лектора, без "
-            "кликбейта и эмодзи, без кавычек\", \"topic\": \"тема 2–4 слова\", \"reason\": \"до 8 слов\"}]} "
+    user = (f"Из них соберём серию из {want} учебных клипов. Фрагменты ({len(items)} шт.):\n" +
+            json.dumps(items, ensure_ascii=False) +
+            f"\n\nОцени ВСЕ {len(items)} фрагментов — ровно {len(items)} объектов, ни одного не пропускай. Верни JSON "
+            "{\"clips\": [{\"id\": str, \"score\": 0-100, \"complete\": bool, \"self_contained\": bool, "
+            "\"title\": \"заголовок-крючок до 6 слов: вопрос или суть, на который фрагмент САМ отвечает; по-русски, "
+            "без кликбейта, эмодзи и кавычек\", \"topic\": \"тема 2–4 слова\", \"reason\": \"до 8 слов\"}]} "
             "по убыванию score.")
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
-def parse(text: str, valid: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+def _load(text: str) -> Any:
+    t = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
     try:
-        data = json.loads(re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M))
+        return json.loads(t)
     except ValueError:
-        return {}
+        m = re.search(r"[\[{].*[\]}]", t, flags=re.S)       # prose around the JSON
+        if m:
+            try:
+                return json.loads(m.group(0))
+            except ValueError:
+                return None
+    return None
+
+
+def parse(text: str, valid: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    data = _load(text)
+    if isinstance(data, list) and len(data) == 1 and isinstance(data[0], dict) and "id" not in data[0]:
+        data = data[0]                       # Gemini sometimes wraps the object in a list: [{"clips": [...]}]
+    if isinstance(data, dict):
+        data = data.get("clips") or data.get("fragments") or next((v for v in data.values() if isinstance(v, list)), [])
     out: Dict[str, Dict[str, Any]] = {}
-    for x in (data.get("clips") if isinstance(data, dict) else data) or []:
-        if not isinstance(x, dict) or x.get("id") not in valid:
+    for x in data or []:
+        if not isinstance(x, dict):
             continue
+        cid = str(x.get("id", "")).strip()
+        if cid not in valid:
+            continue
+        x = {**x, "id": cid}
         try:
             score = max(0.0, min(100.0, float(x.get("score", 0))))
         except (TypeError, ValueError):
@@ -110,6 +131,8 @@ def make_editor(*, video_id: str, ledger: bg.Ledger, want: int, providers: Optio
         meta.update(status="ok", provider=res.provider, model=res.model, input_tokens=res.input_tokens,
                     output_tokens=res.output_tokens, booked_rub=round(booked, 3), latency_ms=res.latency_ms,
                     verdicts=len(verdicts))
+        if not verdicts:        # say why, without logging the transcript
+            meta.update(status="unparsed", answer_chars=len(res.text or ""), answer_head=(res.text or "")[:160])
         return verdicts, meta
 
     return editor

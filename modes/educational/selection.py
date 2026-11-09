@@ -38,6 +38,7 @@ _ALSO = {"тоже", "также", "ещё", "еще", "опять", "снова
 _NO_TITLE = {"первое", "второе", "третье", "это", "он", "она", "оно", "они", "который", "которая", "так", "вот"}
 _BACK_REF = re.compile(r"(?i)(как я уже (говорил|сказал)|как мы уже|в прошлый раз|в прошлой лекции|выше мы|"
                        r"на прошлом занятии|как было сказано)")
+_OPEN_REF = re.compile(r"(?i)(таким же образом|точно так же|так же, как|аналогично|обстоят .{0,20}так же)")
 
 
 @dataclass
@@ -82,6 +83,9 @@ def completeness(text: str) -> Tuple[float, List[str]]:
     if any(w in _ALSO for w in head):
         score -= 0.4
         why.append("opens with «тоже / также / ещё» (continues something)")
+    if _OPEN_REF.search(" ".join(sents[:2])):
+        score -= 0.5
+        why.append("opens comparing with something shown before")
     if _BACK_REF.search(text):
         score -= 0.6
         why.append("refers back to earlier parts")

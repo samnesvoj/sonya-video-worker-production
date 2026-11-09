@@ -97,6 +97,7 @@ def occupied(analysis: Dict[str, Any], t0: float, t1: float) -> Tuple[List[Seque
     for s in analysis.get("text", []):
         if t0 - 0.5 <= s["t"] <= t1 + 0.5:
             texts += s.get("boxes", [])
+    texts += list(analysis.get("protected") or [])     # e.g. the slide on an Educational v4 stage: never covered
     return faces, texts
 
 

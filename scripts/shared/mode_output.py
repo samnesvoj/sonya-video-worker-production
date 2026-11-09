@@ -45,6 +45,10 @@ def _interval(seg: Dict[str, Any]) -> Dict[str, float]:
     return {"start": round(start, 3), "end": round(end, 3)}
 
 
+# optional per-clip facts a mode may report (Educational v4: the title, the place in a series, the frame layout)
+_CLIP_KEYS = ("title", "topic_title", "series_index", "series_total", "frame_layout")
+
+
 def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[str, Any]],
                             clip_paths: Sequence[Optional[str]],
                             max_duration: Optional[float] = None) -> Optional[str]:
@@ -62,7 +66,7 @@ def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[
             item = {"index": i + 1, "file": os.path.basename(path) if path else None,
                     **iv, "score": seg.get("score"), "source": seg.get("source")}
             # boundary engine metadata (scripts/shared/boundaries.py), when applied
-            for k in _BOUNDARY_KEYS:
+            for k in _BOUNDARY_KEYS + _CLIP_KEYS:
                 if k in seg:
                     item[k] = seg[k]
             items.append(item)

@@ -71,7 +71,7 @@ def _graph(layers: List[PlacedLayer], ass_name: Optional[str], fonts_dir: Option
                      f"fade=t=out:st={dur - fade_out:.3f}:d={fade_out:.3f}:alpha=1,"
                      f"setpts=PTS+{l.start:.3f}/TB[l{i}]")
         if l.slide_px:
-            y = f"{l.y}+{l.slide_px}*pow(max(0\\,1-(t-{l.start:.3f})/{fade_in:.3f})\\,2)"
+            y = f"{l.y}+{l.slide_px}*pow(max(0\\,1-(t-{l.start:.3f})/{fade_in:.3f})\\,3)"
         else:
             y = str(l.y)
         parts.append(f"[{label}][l{i}]overlay=x={l.x}:y='{y}':eof_action=pass:eval=frame[o{i}]")
