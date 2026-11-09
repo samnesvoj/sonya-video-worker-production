@@ -42,7 +42,7 @@ from dispatcher.config import FleetConfig                      # noqa: E402
 from dispatcher.fleet import FleetManager                      # noqa: E402
 from dispatcher.store import FleetStore                        # noqa: E402
 from dispatcher.vast_api import VastError                      # noqa: E402
-from tools.fast_start_test import SITE_VIRALITY_PARAMS, _tunnel_url_ok   # noqa: E402
+from tools.fast_start_test import SITE_BEEP_PARAMS, SITE_VIRALITY_PARAMS, _tunnel_url_ok   # noqa: E402
 from tools.stub_worker_api import StubState                    # noqa: E402
 
 TERMINAL = ("completed", "failed")
@@ -110,10 +110,11 @@ class Run:
         self.say(what)
 
 
-def batch(run: Run, mgrs, stub: StubState, key: str, n: int, name: str, timeout_s: int = 40 * 60) -> dict:
+def batch(run: Run, mgrs, stub: StubState, key: str, n: int, name: str, timeout_s: int = 40 * 60, mode: str = "virality") -> dict:
     t = run.clock()
-    ids = [stub.enqueue("virality", key, SITE_VIRALITY_PARAMS) for _ in range(n)]
-    run.say(f"{name}: {n} virality job(s) queued")
+    params = SITE_BEEP_PARAMS if mode == "beep" else SITE_VIRALITY_PARAMS
+    ids = [stub.enqueue(mode, key, params) for _ in range(n)]
+    run.say(f"{name}: {n} {mode} job(s) queued")
     run.wait(mgrs, lambda: all(stub.jobs[j]["status"] in TERMINAL for j in ids), timeout_s, f"{name}: all {n} finished")
     jobs = [job_times(stub, j) for j in ids]
     return {"name": name, "n": n, "start": t, "end": run.clock(), "wall_s": round(run.clock() - t, 1), "jobs": jobs,
@@ -137,7 +138,7 @@ def optimum(ph: dict) -> int:
 POWER_GPUS = ("RTX 4060 Ti", "RTX 4070", "RTX A4000", "RTX 3090", "RTX 4070 Ti", "RTX 3080", "RTX 3060")
 
 
-def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jpi: int) -> None:
+def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jpi: int, beep_key: Optional[str] = None) -> None:
     """The phases A/B/C (module doc). `manager(prefix, **cfg)` makes a FleetManager on the shared stub queue."""
     if "A" in phases or "B" in phases:
         A = manager("sonya-pool-", max_instances=1, jobs_per_instance=4)
@@ -159,6 +160,8 @@ def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jp
         r5 = batch(run, mg, stub, key, 1, "A5 warm resume")
         r5["_ev"] = (inst.id, 1, ph["warm_stop_at"], r5["jobs"][0]["id"])
         ph["A5"] = r5
+        if beep_key:
+            ph["A6"] = batch(run, mg, stub, beep_key, 1, "A6 beep", mode="beep")
         run.phases["A"] = ph
         if "B" in phases:
             run.wait(mg, lambda: A.store.get(inst.id).state == "stopped", 6 * 60, "B: warm stopped again")
@@ -187,7 +190,7 @@ def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jp
 def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--release-sha", required=True); ap.add_argument("--image", required=True); ap.add_argument("--backend-url", required=True)
-    ap.add_argument("--control-video", required=True); ap.add_argument("--stub-port", type=int, default=8787)
+    ap.add_argument("--control-video", required=True); ap.add_argument("--control-video-beep"); ap.add_argument("--stub-port", type=int, default=8787)
     ap.add_argument("--max-usd", type=float, default=1.3); ap.add_argument("--confirm-spend", type=float); ap.add_argument("--apply", action="store_true")
     ap.add_argument("--max-minutes", type=float, default=150); ap.add_argument("--phases", default="A,B,C")
     ap.add_argument("--jobs-per-instance", type=int, default=0, help="phase B; 0 = the A-phase optimum")
@@ -213,6 +216,10 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     run_id = _secrets.token_hex(4)
     key = f"fast-start-test/{run_id}/input{pathlib.Path(a.control_video).suffix}"
     s3.upload_file(a.control_video, bucket, key)
+    beep_key = None
+    if a.control_video_beep:
+        beep_key = f"fast-start-test/{run_id}/beep{pathlib.Path(a.control_video_beep).suffix}"
+        s3.upload_file(a.control_video_beep, bucket, beep_key)
     environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket, "SONYA_RES_SAMPLER": "1"}
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     token = static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"])
@@ -234,7 +241,7 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
         return m
 
     try:
-        scenario(run, stub, manager, vast, key, set(a.phases.split(",")), a.jobs_per_instance)
+        scenario(run, stub, manager, vast, key, set(a.phases.split(",")), a.jobs_per_instance, beep_key)
     except (TimeoutError, VastError) as exc:
         run.aborted = str(exc)
         run.say(f"ABORT: {exc}")

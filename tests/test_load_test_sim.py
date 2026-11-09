@@ -73,12 +73,13 @@ def test_all_phases_finish_and_leave_only_what_teardown_removes():
         run.managers.append(m)
         return m
 
-    scenario(run, stub, manager, vast, "fast-start-test/x/input.mp4", {"A", "B", "C"}, 2)
+    scenario(run, stub, manager, vast, "fast-start-test/x/input.mp4", {"A", "B", "C"}, 2, "fast-start-test/x/beep.mp4")
     assert run.aborted is None
     A, B = run.phases["A"], run.phases["B"]
     assert [A[k]["n"] for k in ("A1", "A2", "A3", "A4", "A5")] == [1, 2, 3, 4, 1]
     assert all(A[k]["failed"] == 0 for k in ("A1", "A2", "A3", "A4", "A5"))
     assert A["A1"]["instance"]["gpu"] == "RTX 3060"
+    assert A["A6"]["failed"] == 0 and stub.jobs[A["A6"]["jobs"][0]["id"]]["mode"] == "beep"
     assert A["A1"]["jobs"][0]["wait_s"] >= BOOT_S and A["A5"]["jobs"][0]["wait_s"] < 60     # cold vs warm
     assert B["failed"] == 0 and len(B["jobs"]) == 6
     roles = sorted((i["role"], i["state"]) for i in B["instances"])
