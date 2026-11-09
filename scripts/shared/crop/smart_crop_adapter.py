@@ -772,7 +772,8 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
            "-ss", f"{max(0.0, start_time):.3f}", "-i", input_video_path, "-t", f"{duration:.3f}",
            "-vf", vf, *(encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]),
            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    from scripts.shared import nvenc_guard            # GeForce NVENC session cap -> this clip on the CPU, never an error
+    result = nvenc_guard.run(cmd, capture_output=True, text=True, cwd=cwd)
     if result.returncode != 0:
         raise RuntimeError(f"tracked crop failed: {result.stderr[-500:]}")
     return output_path

@@ -120,7 +120,8 @@ def render(input_video: str, output: str, intervals: Sequence[Sequence[float]], 
     cmd += ["-filter_complex", graph, *vmap, "-map", "[aout]", "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart", output]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+        from scripts.shared import nvenc_guard        # GeForce NVENC session cap -> CPU, never an error
+        r = nvenc_guard.run(cmd, capture_output=True, text=True, cwd=cwd)
     finally:
         if preset_wav:
             Path(preset_wav).unlink(missing_ok=True)

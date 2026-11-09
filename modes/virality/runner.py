@@ -193,7 +193,6 @@ def _insert_integration(clip: str, promo: Dict[str, Any], words: List[Dict[str, 
     variant falls back to a midroll when the clip is too short for it to play out (offer rule:
     «интеграция должна успеть полностью воспроизвестись»)."""
     import os
-    import subprocess
     from scripts.shared.promo import PromoSpec, check_asset, insert_asset_cmd, media_info, pick_insert_time
     from scripts.shared.crop.smart_crop_adapter import _env_encoder_args, ffmpeg_bin
     from scripts.shared.subtitle_styles import FONTS, FONTS_DIR
@@ -213,7 +212,8 @@ def _insert_integration(clip: str, promo: Dict[str, Any], words: List[Dict[str, 
     cmd = insert_asset_cmd(clip, info["path"], tmp, mode, t, info["duration"], clip_info["duration"],
                            clip_info["has_audio"], spec.marking(), font, ffmpeg=ff,
                            encoder_args=_env_encoder_args() or None)
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    from scripts.shared import nvenc_guard            # GeForce NVENC session cap -> CPU, never an error
+    r = nvenc_guard.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"integration failed: {r.stderr[-400:]}")
     os.replace(tmp, clip)
