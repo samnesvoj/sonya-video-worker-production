@@ -190,3 +190,9 @@ def test_cue_never_ends_on_a_preposition():
     cues = tp.build_cues(_words(text, step=0.42), 30.0, tp.get_template(1), tp.Layout(1080, 1920))
     for c in cues[:-1]:
         assert c.words[-1][0].strip(",.").lower() not in tp._WEAK, [w[0] for w in c.words]
+
+
+def test_a_clip_never_opens_on_a_continuation():
+    assert not sl._opens_cleanly("...за доходами Церкви, контроля за политикой.")
+    assert not sl._opens_cleanly("и поэтому так вышло.")
+    assert sl._opens_cleanly("Что же это были за реформы?") and sl._opens_cleanly("«Квант» — это порция.")

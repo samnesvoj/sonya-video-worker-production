@@ -92,6 +92,15 @@ def completeness(text: str) -> Tuple[float, List[str]]:
     return score, why
 
 
+def _opens_cleanly(text: str) -> bool:
+    """ASR marks a continuation with «...за доходами…» or a lowercase start: not a beginning of a thought."""
+    t = text.lstrip()
+    if t.startswith(("...", "…", "-", "—")):
+        return False
+    m = re.search(r"\w", t)
+    return bool(m) and (t[m.start()].isupper() or t[m.start()].isdigit())
+
+
 def _semantic(text: str, topic_keywords: Optional[List[str]] = None) -> Tuple[float, Dict[str, Any]]:
     """The v5 semantic layer (rule-based, no LLM) on the candidate's own words."""
     from scripts.legacy_gpu import educational_mode_v5 as v5
@@ -150,7 +159,8 @@ def score_candidates(words_raw: Sequence[Dict[str, Any]], cfg: EduConfig,
     words, _ = normalize_words(words_raw)
     scfg = StoryConfig(min_duration=cfg.min_duration, max_duration=cfg.max_duration, sweet_min=cfg.sweet_min,
                        sweet_max=cfg.sweet_max, skip_intro_sec=cfg.skip_intro_sec, strategy="educational")
-    cands = [c for c in build_story_candidates(words, scfg) if not is_promo(c["text"])] if words else []
+    cands = [c for c in build_story_candidates(words, scfg) if not is_promo(c["text"]) and _opens_cleanly(c["text"])] \
+        if words else []
     topics = list((v5_result or {}).get("topic_segments") or [])
     moments = list((v5_result or {}).get("educational_moments") or [])
     for c in cands:
