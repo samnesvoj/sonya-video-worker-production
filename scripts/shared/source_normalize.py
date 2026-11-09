@@ -121,7 +121,10 @@ def normalize_source(path: str, work_dir: str, mode: str) -> Dict[str, Any]:
     dst = Path(work_dir) / (Path(path).stem + ".normalized.mp4")
     dst.parent.mkdir(parents=True, exist_ok=True)
     logger.info("[normalize] %s: re-encoding (%s)", Path(path).name, ", ".join(reasons))
-    r = subprocess.run(normalize_cmd(ff, Path(path), dst, summary, args), capture_output=True, text=True)
+    from scripts.shared.cut_profile import run_encode
+    r, used, _ = run_encode(lambda a: normalize_cmd(ff, Path(path), dst, summary, a), args, what="normalize")
+    if used == "nvenc->cpu":
+        logger.info("[normalize] NVENC busy/failed - re-encoded on CPU")
     if r.returncode != 0:
         raise RuntimeError(f"NORMALIZE_FAILED: {r.stderr[-400:]}")
     return {"path": str(dst), "reasons": reasons, "normalized": True}

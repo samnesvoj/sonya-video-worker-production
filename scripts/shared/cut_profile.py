@@ -28,6 +28,7 @@ import hashlib
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -102,6 +103,34 @@ def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
     else:
         raise ValueError(f"unsupported encoder family {family}")
     return args + ["-pix_fmt", "yuv420p"]
+
+
+def encode_timeout(duration_s: float) -> float:
+    """Watchdog for ONE encode: a hung ffmpeg must not block a job forever (L40S 2026-11-09: one NVENC render waited
+    11+ min at CPU 0). Generous: libx264 slow of a 60 s 1080x1920 clip on a busy CPU takes ~1-3 min."""
+    return max(float(os.environ.get("SONYA_RENDER_TIMEOUT_MIN_S", "300")), 10.0 * max(0.0, duration_s))
+
+
+def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Optional[str] = None, what: str = "render"):
+    """Run ``make_cmd(args)``. When the NVENC encode fails or hangs (GeForce: at most 8 NVENC sessions at once;
+    L40S: cuCtxCreate CUDA_ERROR_OPERATING_SYSTEM with 6 jobs), the SAME command is re-run once with the libx264
+    args instead of dropping the clip. -> (CompletedProcess, "nvenc" | "cpu" | "nvenc->cpu", seconds)."""
+    t0 = time.monotonic()
+    nvenc = "h264_nvenc" in args
+
+    def once(a):
+        try:
+            return subprocess.run(make_cmd(a), capture_output=True, text=True, cwd=cwd, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(make_cmd(a), 124, "", f"timeout after {timeout:.0f} s")
+
+    r = once(args)
+    used = "nvenc" if nvenc else "cpu"
+    if r.returncode != 0 and nvenc:
+        logger.warning("[cut_profile] %s: NVENC failed (%s) - re-encoding on CPU (libx264)", what, (r.stderr or "")[-200:].strip())
+        bitrate = args[args.index("-b:v") + 1] if "-b:v" in args and args[args.index("-b:v") + 1] != "0" else None
+        r, used = once(encoder_args("cpu", bitrate)), "nvenc->cpu"
+    return r, used, round(time.monotonic() - t0, 1)
 
 
 def _encoder_works(ffmpeg: str, family: str) -> bool:

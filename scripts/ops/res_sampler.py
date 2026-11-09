@@ -70,7 +70,10 @@ def sample(nv, h) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
     try:
-        s["ffmpeg"] = sum(1 for p in psutil.process_iter(["name"]) if (p.info.get("name") or "").startswith("ffmpeg"))
+        ff = [p.info.get("cmdline") or [] for p in psutil.process_iter(["name", "cmdline"]) if (p.info.get("name") or "").startswith("ffmpeg")]
+        s["ffmpeg"] = len(ff)
+        s["ff_nvenc"] = sum(1 for c in ff if "h264_nvenc" in c)      # NVENC sessions in use (GeForce: max 8)
+        s["ff_x264"] = sum(1 for c in ff if "libx264" in c)
     except Exception:  # noqa: BLE001
         pass
     return s
@@ -78,7 +81,8 @@ def sample(nv, h) -> Dict[str, Any]:
 
 def summary(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"n": len(samples)}
-    for k in ("vram_used_mb", "ram_used_mb", "cpu_pct", "gpu_util", "enc_util", "load1", "ffmpeg", "disk_used_gb", "tmp_gb", "cg_mem_mb", "cg_cpu_cores"):
+    for k in ("vram_used_mb", "ram_used_mb", "cpu_pct", "gpu_util", "enc_util", "load1", "ffmpeg", "ff_nvenc", "ff_x264", "disk_used_gb", "tmp_gb", "cg_mem_mb",
+              "cg_cpu_cores"):
         vals = [x[k] for x in samples if k in x]
         if vals:
             out[k + "_max"] = max(vals)

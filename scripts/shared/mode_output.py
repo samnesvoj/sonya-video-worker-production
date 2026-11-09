@@ -26,7 +26,7 @@ _BOUNDARY_KEYS = ("semantic_start", "semantic_end", "render_start", "render_end"
                   "boundary_version", "boundary_reasons", "boundary_params",
                   "candidate_id", "selection_reason",
                   "crop_version", "crop_status", "crop_fallback_reason", "crop_detector", "crop_cache",
-                  "crop_detector_error",
+                  "crop_detector_error", "render_encoder", "render_s",
                   "source_width", "source_height", "output_aspect", "crop_keyframes", "crop_cuts", "crop_shots",
                   "subtitle_status", "subtitle_version", "subtitle_style", "subtitle_path", "subtitle_cues",
                   "subtitle_words", "subtitle_first_word", "subtitle_last_word", "subtitle_burn",

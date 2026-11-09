@@ -168,3 +168,50 @@ def test_stub_level_jobs_only_go_to_that_levels_server():
     assert stub.claim("sonya-g1-abcd", ["virality"]) is None
     assert stub.claim("sonya-g12-abcd", ["virality"]) is None
     assert stub.claim("sonya-g2-abcd", ["virality"])["id"] == jid
+
+
+def test_phase_g_hung_job_ends_the_level_and_skips_bigger_levels_clip_encoders_recorded():
+    """L40S 2026-11-09: one job hung forever. Now the level ends once the rest is done and the hung job ran hang_factor x longer
+    than the slowest finished one; with > 25 % not completed no bigger level is rented. Per clip encoders come from
+    selected_segments.json (render_encoder: nvenc / nvenc->cpu)."""
+    from decimal import Decimal
+    from tools.load_test import single_gpu
+    clock = Clock()
+    vast = SimVast(clock)
+    host = lambda: offer(9, 113477, gpu="RTX 4090", cpu="AMD EPYC 7742 64-Core Processor", cores=128, dph=0.91, geo="Hungary, HU")
+    vast.offers.append(host())
+    stub = StubState(clock)
+    sim = workers(vast, stub, clock)
+    first = []
+
+    def step():
+        for jid, j in stub.jobs.items():
+            if j["status"] == "mode_running" and not first:
+                first.append(jid)                                # this one never finishes (hung ffmpeg)
+            if j["status"] == "mode_running" and jid not in first and not j["files"]:
+                stub.add_file(jid, {"file_type": "enrichment_json", "s3_key": f"out/{jid}/selected_segments.json",
+                                    "filename": "selected_segments.json"})
+        sim()
+        if first and stub.jobs[first[0]]["status"] == "completed":
+            stub.jobs[first[0]]["status"] = "mode_running"       # (the sim worker "finished" it: undo, it is hung)
+            stub.jobs[first[0]]["history"] = [h for h in stub.jobs[first[0]]["history"] if h[0] not in ("uploading_result", "completed")]
+    run = Run(2.0, 300, clock=clock, sleep=clock.advance, step=step)
+    base = dict(enabled=True, dry_run=False, image=IMAGE, release_sha=SHA, max_creates_per_hour=6, warm_prime=False)
+
+    def manager(prefix, **over):
+        m = FleetManager(FleetConfig(label_prefix=prefix, **{**base, **over}), FleetStore(str(Path(tempfile.mkdtemp()) / "f.db")),
+                         vast, stub, lambda: GH_TOKEN, ENV, clock)
+        run.managers.append(m)
+        return m
+    orig = vast.create
+    vast.create = lambda oid, p: (vast.offers.append(host()), orig(oid, p))[1]
+    segs = {"segments": [{"file": "viral_clip_01.mp4", "render_encoder": "nvenc"}, {"file": "viral_clip_02.mp4", "render_encoder": "nvenc->cpu"},
+                         {"file": None, "render_encoder": None}]}
+    single_gpu(run, stub, manager, vast, "k.mp4", gpu="RTX 4090", machine_id=113477, levels=[2, 4], max_dph=Decimal("1.0"),
+               fetch_res=lambda l: [], fetch_json=lambda k: segs)
+    G = run.phases["G"]
+    lv = G["levels"]["2"]
+    assert list(G["levels"]) == ["2"] and "bigger levels skipped" in G["stopped"]
+    assert lv["hung"] == first and lv["failed"] == 1 and lv["videos_per_hour"] and lv["wall_done_s"] < lv["wall_s"]
+    assert lv["encoders"] == {"None": 1, "nvenc": 1, "nvenc->cpu": 1} and lv["clips_missing"] == 1
+    assert clock() - run.t0 < 40 * 60 and not vast.list_instances()

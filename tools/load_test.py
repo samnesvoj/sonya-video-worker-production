@@ -193,7 +193,7 @@ def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jp
 
 # ── phase G: how many videos at once on ONE (big) GPU ─────────────────────────────────────────────────────────────────
 RES_KEYS = ("vram_used_mb", "vram_total_mb", "cg_mem_mb", "ram_used_mb", "cg_cpu_cores", "cpu_pct", "load1", "gpu_util", "enc_util",
-            "ffmpeg", "tmp_gb", "disk_used_gb")
+            "ffmpeg", "ff_nvenc", "ff_x264", "tmp_gb", "disk_used_gb")
 
 
 def peaks(docs: List[dict], t0: float, t1: float) -> dict:
@@ -223,7 +223,8 @@ def saturated(lv: dict, eff_cores: float) -> List[str]:
 
 def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, machine_id: int, levels: List[int],
                extra_level: int = 0, max_dph: Decimal = Decimal("1.0"), fetch_res=lambda label: [], flush_s: int = 65,
-               eff_cores: float = 0.0) -> dict:
+               eff_cores: float = 0.0, fetch_json=lambda s3_key: None, hang_factor: float = 3.0, hang_min_s: float = 600,
+               stop_fail_share: float = 0.25) -> dict:
     """Phase G (module doc). Each level gets its OWN fresh server (concurrency = level), so idle worker processes of a bigger
     level never inflate the peaks of a smaller one. Same host every time (pin_machine_id)."""
     out: dict = run.phases.setdefault("G", {})     # filled level by level: an abort keeps the finished levels in the report
@@ -247,7 +248,19 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
             bad = [e["event"] for e in m.store.events(inst.id) if e["event"] in ("unexpected_stop", "host_error", "lost", "worker_stalled")]
             if bad:
                 raise TimeoutError(f"G{n}: host unstable ({', '.join(sorted(set(bad)))}) on machine {machine_id}")
-            return all(stub.jobs[j]["status"] in TERMINAL for j in ids)
+            if all(stub.jobs[j]["status"] in TERMINAL for j in ids):
+                return True
+            # L40S 2026-11-09: one job hung forever (ffmpeg at CPU 0). Once some jobs are done, a job still running
+            # hang_factor x longer than the slowest finished one counts as HUNG: the level ends instead of burning budget.
+            fin = [job_times(stub, j)["process_s"] for j in ids if stub.jobs[j]["status"] in TERMINAL]
+            if fin:
+                lim, now = max(hang_min_s, hang_factor * max([x for x in fin if x] or [0])), run.clock()
+                if all(stub.jobs[j]["status"] in TERMINAL or now - next((h for st, h in stub.jobs[j]["history"] if st == "claimed"), now) > lim
+                       for j in ids):
+                    hung[:] = [j for j in ids if stub.jobs[j]["status"] not in TERMINAL]
+                    return True
+            return False
+        hung: List[str] = []
         run.wait(mg, done, 20 * 60 + 4 * 60 * n, f"G{n}: all {n} finished")
         t_done = run.clock()
         jobs = [job_times(stub, j) for j in ids]
@@ -259,7 +272,21 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
               "cold_start_s": round(min(claims) - t, 1) if claims else None,          # queue -> first job claimed (boot of a new server)
               "wall_s": round(max(ends) - min(claims), 1) if claims else None,        # first claim -> last done = the batch itself
               "start": t, "end": t_done}
-        lv["videos_per_hour"] = round(n * 3600 / lv["wall_s"], 1) if lv["wall_s"] else None
+        lv["hung"] = hung
+        done_n = sum(1 for j in jobs if j["status"] == "completed")
+        ok_end = [e for j, e in zip(ids, ends) if stub.jobs[j]["status"] == "completed"]
+        lv["wall_done_s"] = round(max(ok_end) - min(claims), 1) if ok_end and claims else None   # without the hang wait
+        lv["videos_per_hour"] = round(done_n * 3600 / lv["wall_done_s"], 1) if lv["wall_done_s"] else None
+        for j, jt in zip(ids, jobs):          # per clip: which encoder rendered it (selected_segments.json, read-only from S3)
+            f = next((x for x in stub.jobs[j]["files"] if (x.get("filename") or "") == "selected_segments.json"), None)
+            try:
+                segs = (fetch_json(f["s3_key"]) or {}).get("segments", []) if f else []
+            except Exception as exc:  # noqa: BLE001
+                segs, jt["segments_error"] = [], type(exc).__name__
+            jt["clips"] = [{"file": x.get("file"), "enc": x.get("render_encoder"), "render_s": x.get("render_s")} for x in segs]
+        encs = [str(c["enc"]) for jt in jobs for c in jt["clips"]]
+        lv["encoders"] = {e: encs.count(e) for e in sorted(set(encs))}
+        lv["clips_missing"] = sum(1 for jt in jobs for c in jt["clips"] if not c["file"])
         run.wait(mg, lambda: run.clock() >= t_done + flush_s, flush_s + 30, f"G{n}: res_sampler flush")
         lv["peaks"] = peaks(fetch_res(inst.label), min(claims or [t]), max(ends))
         lv["cost_usd"] = float(sum(usage.cost_between(m.store, run.t0 - 1, run.clock(), run.clock())[k] for k in ("gpu", "disk")))
@@ -268,7 +295,14 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
         out["levels"][str(n)] = lv
         lv["limit"] = saturated(lv, eff_cores)
         run.say(f"G{n}: wall {lv['wall_s']} s, each {[j['process_s'] for j in jobs]}, {lv['videos_per_hour']} videos/h, "
-                f"peaks {lv['peaks']}, limit {lv['limit'] or 'no'}")
+                f"failed {lv['failed']} hung {len(hung)}, encoders {lv['encoders']}, clips missing {lv['clips_missing']}, "
+                f"s3 download {[j['s3_download_s'] for j in jobs]}, peaks {lv['peaks']}, limit {lv['limit'] or 'no'}")
+        bad_share = lv["failed"] / n                         # "failed" = not completed, hung jobs included
+        if todo and bad_share > stop_fail_share:
+            out["stopped"] = f"level {n}: {lv['failed']} of {n} not completed (hung {len(hung)}) - bigger levels skipped: {todo}"
+            run.say(f"G: {out['stopped']}")
+            todo = []
+            continue
         if not todo and extra_level and n < extra_level:
             spent = float(run.spent())
             est = (lv["cold_start_s"] or 300) + (lv["wall_s"] or 0) * extra_level / n * 1.2 + flush_s + 120
@@ -360,7 +394,8 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
         if "G" in phases:
             single_gpu(run, stub, manager, vast, key, gpu=a.gpu, machine_id=a.machine_id,
                                          levels=[int(x) for x in a.levels.split(",")], extra_level=a.extra_level,
-                                         max_dph=Decimal(a.max_dph), fetch_res=fetch_res, eff_cores=eff_cores)
+                                         max_dph=Decimal(a.max_dph), fetch_res=fetch_res, eff_cores=eff_cores,
+                                         fetch_json=lambda k: json.loads(s3.get_object(Bucket=bucket, Key=k)["Body"].read()))
         else:
             scenario(run, stub, manager, vast, key, phases, a.jobs_per_instance, beep_key)
     except (TimeoutError, VastError) as exc:

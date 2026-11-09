@@ -92,3 +92,27 @@ def test_worker_progress_accepts_both_argument_orders():
     assert _progress_args("word_timestamps", 0.72) == ("word_timestamps", 0.72)
     assert _progress_args(0.2, "asr: gigaam 120 words") == ("asr: gigaam 120 words", 0.2)
     assert _progress_args(None, None) == ("running", 0.0)
+
+
+def test_run_encode_nvenc_failure_or_hang_falls_back_to_libx264(monkeypatch):
+    """GeForce: max 8 NVENC sessions; L40S: cuCtxCreate errors / a hung NVENC render. The clip is re-encoded on CPU."""
+    import subprocess
+    from scripts.shared import cut_profile as cp
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append((cmd, kw.get("timeout")))
+        if "h264_nvenc" in cmd:
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(cmd, 1, "", "OpenEncodeSessionEx failed: incompatible client key (21)")
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(cp.subprocess, "run", run)
+    make = lambda a: ["ffmpeg", "-i", "in.mp4", *a, "out.mp4"]
+    for _ in range(2):                                            # 1st: error, 2nd: hang (timeout)
+        r, used, _s = cp.run_encode(make, cp.encoder_args("nvenc"), timeout=cp.encode_timeout(45))
+        assert r.returncode == 0 and used == "nvenc->cpu"
+        assert calls[-1][0] == make(cp.encoder_args("cpu", "6M")) and calls[-1][1] == 450
+    r, used, _s = cp.run_encode(make, cp.encoder_args("cpu"))
+    assert used == "cpu" and len(calls) == 5                     # libx264 is never retried
+    assert cp.encode_timeout(5) == 300                            # floor for short clips

@@ -703,9 +703,10 @@ def _glass_graph(vf: str, mask_name: str) -> str:
 
 def render_tracked(input_video_path: str, output_path: str, start_time: float, duration: float,
                    track: Dict[str, Any], encoder_args: Optional[List[str]] = None,
-                   subtitle_path: Optional[str] = None) -> str:
+                   subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None) -> str:
     """Single ffmpeg pass: accurate seek → crop along the track → 1080x1920
-    [→ burn-in ASS subtitles, same pass]."""
+    [→ burn-in ASS subtitles, same pass]. A failed / hung NVENC encode is re-run on libx264 (cut_profile.run_encode);
+    ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s."""
     if track.get("layout") == "game":
         cx, cy, cw_, ch_ = track["cam"]
         gx, gy, gw, gh = track["game"]
@@ -768,11 +769,15 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
             mask.write_text(glass_mask_ass(json.loads(glass.read_text(encoding="utf-8"))), encoding="utf-8")
             vf = _glass_graph(vf, mask.name)
         vf += f",ass=filename={sub.name}:fontsdir='{fd}'"
-    cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",
-           "-ss", f"{max(0.0, start_time):.3f}", "-i", input_video_path, "-t", f"{duration:.3f}",
-           "-vf", vf, *(encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]),
-           "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    from scripts.shared.cut_profile import encode_timeout, run_encode
+    make = lambda enc: [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",          # noqa: E731
+                        "-ss", f"{max(0.0, start_time):.3f}", "-i", input_video_path, "-t", f"{duration:.3f}",
+                        "-vf", vf, *enc,
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
+    enc = encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
+    result, used, secs = run_encode(make, enc, timeout=encode_timeout(duration), cwd=cwd, what=Path(output_path).name)
+    if report is not None:
+        report.update(render_encoder=used, render_s=secs)
     if result.returncode != 0:
         raise RuntimeError(f"tracked crop failed: {result.stderr[-500:]}")
     return output_path

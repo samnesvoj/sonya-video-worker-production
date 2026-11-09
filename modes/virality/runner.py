@@ -288,7 +288,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             seg.update(sm)
             sub_path = str(Path(out).with_suffix(".ass")) if burn else None
         try:
-            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path)
+            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
             if crop.get("promo") and crop["promo"].get("integration"):
                 seg.update(_insert_integration(out, crop["promo"], words or [], start, dur))
             return out
