@@ -60,7 +60,7 @@ Dispatcher, POWER class for rushes (VPS env; default `SONYA_POWER_ENABLED=false`
 | `SONYA_POWER_MIN_CPU_CORES` | 16 | `cpu_cores_effective` (EPYC/Xeon allowed here) |
 | `SONYA_POWER_MIN_CPU_RAM_GB` | 32 | |
 | `SONYA_POWER_MAX_DPH` | 1.00 | USD/h for the whole offer |
-| `SONYA_POWER_JOBS_PER_INSTANCE` | 0 = from the offer (same formula) | slots the fleet counts |
+| `SONYA_POWER_JOBS_PER_INSTANCE` | 8 (safe until the A40 test gives the final number); 0 = from the offer (same formula) | slots the fleet counts |
 | `SONYA_POWER_MIN_GAP` | 0 = jobs_per_instance + 1 (3) | use power when this many jobs are still uncovered |
 
 Rules: the warm is still exactly one European RTX 3060 (a power server is never the warm and is DESTROYED when idle). Demand is
@@ -69,6 +69,8 @@ covered in **video slots**: a default server counts `jobs_per_instance` (2, as b
 then the cached image, then price per video slot per hour, then the fastest internet. No power offer -> default-class bursts as
 before. `max_instances` and `max_creates_per_hour` still apply. The power server gets `SONYA_WORKER_CONCURRENCY=auto` +
 `SONYA_WORKER_CONCURRENCY_MAX=<slots>`, so it never runs more than the fleet counted, and runs fewer when a card is broken.
+
+Spare offers per class and the paused POWER reserve (both off by default): docs/FLEET_SPARES.md.
 
 Dry run of a rush (real FleetManager + real worker plan, virtual time):
 
