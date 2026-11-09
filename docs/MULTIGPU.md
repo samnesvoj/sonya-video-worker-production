@@ -96,3 +96,13 @@ python tools/multigpu_sim.py --jobs 12 --broken-card  # A40 card 1 broken: 8 wor
 - Trailer modes (not in the pool) still call ffmpeg directly.
 - The power class slot count is an estimate from the offer. If the container gets less (cgroup), the worker runs fewer workers
   and the fleet waits for those slots a bit longer.
+
+## Live test 2x A40 (Belgium, EPYC 7662 128 threads, 2026-11-09)
+
+Both cards used and balanced (readiness `GPU 0/1 ... cuda OK, nvenc: OK`, `GPU0 x12, GPU1 x12`, per-card VRAM equal).
+Old code: 16 at once lost 10 of 48 clips, 24 lost 19 of 72 - the container ran out of THREADS (pids.max 31232; ffmpeg /
+OpenCV "Resource temporarily unavailable", Python "can't start new thread"), not VRAM (30-40 % used). Fix `0404dd3`:
+per-worker CPU window (`SONYA_CPU_AFFINITY`, sched affinity, max(16, 2 x CPUs / workers); off below 32 CPUs, for 1-2
+workers, or `SONYA_CPU_WINDOW=0`). With it: 8 -> 269 s, 16 -> 355 s, **32 -> 438 s (263 videos/h, 0 clips lost, all
+NVENC)**, ~9.7k threads. `auto` still caps at 16 per server (AUTO_MAX); 32 needs AUTO_MAX + SONYA_JOBS_PER_GPU_MAX raised.
+Full report: worker-prep/vast-run/A40_REPORT.md.
