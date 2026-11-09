@@ -34,6 +34,7 @@ _CONCLUSION = re.compile(r"(?i)(таким образом|поэтому|зна�
                          r"то есть|в результате|именно поэтому|вот почему|это и есть|так что)")
 _NEEDS_CONTEXT = {"он", "она", "оно", "они", "его", "её", "ее", "их", "этот", "эта", "это", "эти", "этого", "такой",
                   "такая", "такие", "там", "тут", "здесь", "тогда", "тоже", "также", "кроме"}
+_DEMONSTR = {"этой", "этого", "этому", "этим", "той", "того", "тому", "тем", "эту", "ту"}
 _FILLER = {"ой", "ну", "короче", "э", "эм", "ммм", "блин", "ладно", "а-а", "э-э", "ааа", "эээ", "м-м"}
 _ALSO = {"тоже", "также", "ещё", "еще", "опять", "снова", "остальные", "второе", "второй", "третье", "третий"}
 _NO_TITLE = {"первое", "второе", "третье", "это", "он", "она", "оно", "они", "который", "которая", "так", "вот"}
@@ -84,6 +85,9 @@ def completeness(text: str) -> Tuple[float, List[str]]:
         score -= 0.5
         why.append(f"opens leaning on context «{_first_word(first)}»")
     head = [re.sub(r"[^\w-]", "", w).lower() for w in first.split()[:5]]
+    if _first_word(first) not in _NEEDS_CONTEXT and any(w in _DEMONSTR for w in head[1:]) and not first.endswith("?"):
+        score -= 0.3
+        why.append("opens pointing at something before («этой / той»)")
     if any(w in _ALSO for w in head):
         score -= 0.4
         why.append("opens with «тоже / также / ещё» (continues something)")
