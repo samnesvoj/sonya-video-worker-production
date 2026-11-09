@@ -1,8 +1,11 @@
 """scripts/ops/res_sampler.py: never raises, summary = per-metric max."""
+import pytest
+
 from scripts.ops import res_sampler as r
 
 
 def test_sample_without_gpu_and_summary():
+    pytest.importorskip("psutil")                # in the image; not in the light CI test env
     s = r.sample(None, None)
     assert {"t", "cpu_pct", "ram_used_mb", "load1"} <= set(s) and "vram_used_mb" not in s
     out = r.summary([{"vram_used_mb": 3000, "cg_mem_mb": 5}, {"vram_used_mb": 7000, "cg_mem_mb": 9}, {"cpu_pct": 50}])
