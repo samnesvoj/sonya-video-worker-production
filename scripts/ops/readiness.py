@@ -46,10 +46,22 @@ def check_ffmpeg() -> List[str]:
     ff = os.environ.get("FFMPEG_BIN", "ffmpeg")
     if not shutil.which(ff):
         return ["ffmpeg not found"]
-    if os.environ.get("SONYA_REQUIRE_NVENC") == "1":
-        enc = subprocess.run([ff, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
-        if "h264_nvenc" not in enc:
-            return ["h264_nvenc not available in ffmpeg"]
+    enc = subprocess.run([ff, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+    if os.environ.get("SONYA_REQUIRE_NVENC") == "1" and "h264_nvenc" not in enc:
+        return ["h264_nvenc not available in ffmpeg"]
+    if "h264_nvenc" in enc and os.environ.get("SONYA_SKIP_GPU_CHECK") != "1":
+        # A REAL 0.5 s encode, not just the encoder list: run 4 had h264_nvenc compiled in but no libnvidia-encode in the
+        # container (NVIDIA_DRIVER_CAPABILITIES without "video") -> every clip silently went to libx264 on the CPU.
+        r = subprocess.run([ff, "-hide_banner", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "testsrc2=size=320x240:rate=30:duration=0.5", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=60)
+        caps = os.environ.get("NVIDIA_DRIVER_CAPABILITIES", "(unset)")
+        if r.returncode == 0:
+            _p(f"nvenc: OK (driver capabilities {caps})")
+        else:
+            _p(f"nvenc: NOT usable (driver capabilities {caps}): {(r.stderr or '').strip().splitlines()[-1:]} - clips render on the CPU")
+            if os.environ.get("SONYA_REQUIRE_NVENC") == "1":
+                return ["h264_nvenc does not encode"]
     return []
 
 

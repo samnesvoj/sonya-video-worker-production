@@ -33,10 +33,19 @@ RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}
  && { find "$SP/nvidia" -type d -name include -prune -exec rm -rf {} + || true; } \
  && { find "$SP/nvidia" -name '*.a' -delete || true; } && rm -rf /tmp/req/01.txt /root/.cache
 COPY ${SPLIT_DIR}/02-torch.lock.txt /tmp/req/02.txt
+# triton (0.67 GB unpacked) is only used by torch.compile / inductor, which SONYA never calls; the package files go,
+# its dist-info stays (versions + `pip check` unchanged, torch sees "no triton" and never imports it).
 RUN pip install --require-hashes --no-deps --extra-index-url "${TORCH_INDEX_URL}" -r /tmp/req/02.txt \
- && rm -rf "$SP/torch/include" "$SP/torch/share" /tmp/req/02.txt /root/.cache
+ && rm -rf "$SP/torch/include" "$SP/torch/share" "$SP/triton" /tmp/req/02.txt /root/.cache
 COPY ${SPLIT_DIR}/03-rest.lock.txt /tmp/req/03.txt
-RUN pip install --require-hashes --no-deps -r /tmp/req/03.txt && rm -rf /tmp/req/03.txt /root/.cache
+# Slim (SPEED_REPORT.md, 2026-11-08) - same versions, same lock, only files no code path loads:
+#  * opencv: the three 4.14.0.94 wheels share ONE cv2/ package; the active cv2.abi3.so belongs to opencv-contrib-python and
+#    links only $ORIGIN/../opencv_contrib_python.libs -> the other two *.libs dirs (0.21 GB) are dead. Checked by hash below.
+#  * mediapipe (0.13 GB): only the removed old virality path imported it (optional import everywhere).
+#  * onnx/backend/test (25 MB): onnx's own test data.
+COPY tools/slim_site_packages.py /tmp/slim.py
+RUN pip install --require-hashes --no-deps -r /tmp/req/03.txt \
+ && python3 /tmp/slim.py "$SP" && rm -rf /tmp/req/03.txt /tmp/slim.py /root/.cache
 # The full lock (hash-checked by bootstrap against the release) stays as a tiny read-only file.
 COPY ${LOCK_FILE} /opt/sonya-bootstrap/worker.lock.txt
 
@@ -45,6 +54,9 @@ RUN chmod 0555 /opt/sonya-bootstrap/*.py /opt/sonya-bootstrap/entrypoint.sh && c
 
 ARG BASE_LOCK_SHA256
 ARG IMAGE_VERSION=dev
+# "video" makes the NVIDIA runtime mount libnvidia-encode/-decode: without it NVENC fails and the clips render on the CPU
+# (run 4, 2026-11-08: "render encoder: cpu @ 6M", 179 s vs 108 s on the Mac mini). The dispatcher also passes it per instance.
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 ENV SONYA_BASE_LOCK_SHA256=${BASE_LOCK_SHA256} SONYA_IMAGE_VERSION=${IMAGE_VERSION} \
     APP_ENV=production WORKER_BACKEND_MODE=api MODELS_LOCAL_DIR=/opt/sonya/models SONYA_STATE_DIR=/run/sonya
 

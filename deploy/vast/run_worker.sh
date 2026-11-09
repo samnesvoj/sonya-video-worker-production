@@ -23,6 +23,8 @@ export GEMINI_LAYOUT_ENABLED="${GEMINI_LAYOUT_ENABLED:-false}"
 export WEBCAM_DETECTOR_ENABLED="${WEBCAM_DETECTOR_ENABLED:-false}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
+CONC="${SONYA_WORKER_CONCURRENCY:-1}"
+case "${CONC}" in 1|2|3|4) ;; *) log "SONYA_WORKER_CONCURRENCY must be 1..4 (got ${CONC})"; exit 3 ;; esac
 mkdir -p "${TMPDIR}" "${MODELS_LOCAL_DIR}"
 rm -f "${SONYA_READY_FILE}" "${SONYA_WORKER_PID_FILE}"
 wipe() { find "${TMPDIR}" -mindepth 1 -maxdepth 1 -name 'sonya_*' -exec rm -rf {} + 2>/dev/null || true; }
@@ -39,23 +41,36 @@ python3 -m scripts.ops.readiness || { log "readiness failed - worker NOT started
 
 python3 "${BOOT}/healthd.py" &
 HEALTH_PID=$!
-python3 scripts/gpu_worker.py --poll --worker-id "${WORKER_ID}" &
-WORKER_PID=$!
+# Load tests only (SONYA_RES_SAMPLER=1): VRAM/RAM/CPU samples -> S3 fast-start-test/res/ (scripts/ops/res_sampler.py)
+[ "${SONYA_RES_SAMPLER:-0}" = "1" ] && { python3 -m scripts.ops.res_sampler & }
+# Parallel jobs on one server (dispatcher jobs_per_instance): N independent worker PROCESSES under the same WORKER_ID,
+# each claims and runs ONE job at a time (own memory, own CUDA context; no shared state between jobs). The production
+# claim API has no per-worker limit, so N processes = N jobs. Default 1 = exactly the old behaviour.
+WORKER_PIDS=()
+for n in $(seq 1 "${CONC}"); do
+  SONYA_WORKER_SLOT="${n}" python3 scripts/gpu_worker.py --poll --worker-id "${WORKER_ID}" &
+  WORKER_PIDS+=("$!")
+  [ "${n}" -lt "${CONC}" ] && sleep 2       # stagger the prewarm / CUDA init
+done
+WORKER_PID="${WORKER_PIDS[0]}"
 echo "${WORKER_PID}" > "${SONYA_WORKER_PID_FILE}"
 mark worker_started
 (python3 -m scripts.ops.timeline upload || true) &   # best-effort: lets the central dispatcher see the start-up breakdown
-log "worker pid=${WORKER_PID}; health on 127.0.0.1:${SONYA_HEALTH_PORT:-8099}"
+log "worker pids=${WORKER_PIDS[*]} (concurrency ${CONC}); health on 127.0.0.1:${SONYA_HEALTH_PORT:-8099}"
 
 _term() {
-  log "SIGTERM: worker requeues its job and exits"
-  kill -TERM "${WORKER_PID}" 2>/dev/null || true
-  wait "${WORKER_PID}" 2>/dev/null || true
+  log "SIGTERM: workers requeue their jobs and exit"
+  kill -TERM "${WORKER_PIDS[@]}" 2>/dev/null || true
+  wait "${WORKER_PIDS[@]}" 2>/dev/null || true
   kill "${HEALTH_PID}" 2>/dev/null || true
   rm -f "${SONYA_READY_FILE}"; wipe
   exit 143
 }
 trap _term TERM INT
-set +e; wait "${WORKER_PID}"; RC=$?; set -e
+# One worker process dying = the server is unhealthy: stop the others (they requeue their jobs) and exit.
+set +e; wait -n "${WORKER_PIDS[@]}"; RC=$?; set -e
+kill -TERM "${WORKER_PIDS[@]}" 2>/dev/null || true
+wait "${WORKER_PIDS[@]}" 2>/dev/null || true
 kill "${HEALTH_PID}" 2>/dev/null || true
 rm -f "${SONYA_READY_FILE}"
 log "worker exited rc=${RC}"
