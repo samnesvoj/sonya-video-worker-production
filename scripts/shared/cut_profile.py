@@ -117,8 +117,13 @@ _FAMILY: Dict[str, str] = {}
 
 
 def encoder_family(ffmpeg: Optional[str] = None) -> str:
-    """"nvenc" when a 0.5 s NVENC smoke encode works (once per process), else "cpu"."""
+    """"nvenc" when a 0.5 s NVENC smoke encode works (once per process), else "cpu". SONYA_NVENC_PROBED=ok|fail: readiness
+    already did that encode on this worker's card (scripts/ops/gpu_plan.py) - trusted, so N workers starting together on a
+    GeForce do not race for the driver's few NVENC sessions with their probes (a lost race would pin a worker to libx264)."""
     ff = ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg"
+    probed = os.environ.get("SONYA_NVENC_PROBED", "").lower()
+    if probed in ("ok", "fail") and ff not in _FAMILY:
+        _FAMILY[ff] = "nvenc" if probed == "ok" else "cpu"
     if ff not in _FAMILY:
         _FAMILY[ff] = "nvenc" if _encoder_works(ff, "nvenc") else "cpu"
     return _FAMILY[ff]

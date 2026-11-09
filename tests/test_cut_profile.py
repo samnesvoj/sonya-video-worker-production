@@ -92,3 +92,12 @@ def test_worker_progress_accepts_both_argument_orders():
     assert _progress_args("word_timestamps", 0.72) == ("word_timestamps", 0.72)
     assert _progress_args(0.2, "asr: gigaam 120 words") == ("asr: gigaam 120 words", 0.2)
     assert _progress_args(None, None) == ("running", 0.0)
+
+
+def test_encoder_family_trusts_the_readiness_probe(monkeypatch):
+    monkeypatch.setattr(cp, "_FAMILY", {})
+    monkeypatch.setattr(cp, "_encoder_works", lambda ff, fam: (_ for _ in ()).throw(AssertionError("probed again")))
+    monkeypatch.setenv("SONYA_NVENC_PROBED", "ok")
+    assert cp.encoder_family("ffmpeg-a") == "nvenc"
+    monkeypatch.setenv("SONYA_NVENC_PROBED", "fail")
+    assert cp.encoder_family("ffmpeg-b") == "cpu"
