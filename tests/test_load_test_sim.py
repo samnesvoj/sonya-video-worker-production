@@ -159,3 +159,12 @@ def test_phase_g_aborts_at_once_when_the_host_stops_our_server():
     with pytest.raises(TimeoutError, match="host unstable"):
         single_gpu(run, stub, manager, vast, "k.mp4", gpu="L40S", machine_id=28581, levels=[1], fetch_res=lambda l: [])
     assert clock() - run.t0 < 600
+
+
+def test_stub_level_jobs_only_go_to_that_levels_server():
+    """2026-11-09: the G1 container still ran seconds after Vast stopped listing it and claimed a G2 job, which then hung."""
+    stub = StubState(Clock())
+    jid = stub.enqueue("virality", "k.mp4", only_worker_prefix="sonya-g2-")
+    assert stub.claim("sonya-g1-abcd", ["virality"]) is None
+    assert stub.claim("sonya-g12-abcd", ["virality"]) is None
+    assert stub.claim("sonya-g2-abcd", ["virality"])["id"] == jid

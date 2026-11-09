@@ -236,7 +236,7 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
                     min_cpu_ram_gb=max(16, 4 * n + 4))
         mg = [m]
         t = run.clock()
-        ids = [stub.enqueue("virality", key, SITE_VIRALITY_PARAMS) for _ in range(n)]
+        ids = [stub.enqueue("virality", key, SITE_VIRALITY_PARAMS, only_worker_prefix=f"sonya-g{n}-") for _ in range(n)]
         run.say(f"G{n}: {n} virality job(s) queued for a {gpu} with {n} worker process(es)")
         run.wait(mg, lambda: bool(m.store.all()), 5 * 60, f"G{n}: server created")
         inst = m.store.all()[0]
