@@ -36,6 +36,7 @@ class FleetConfig:
     resume_timeout_seconds: int = 90         # 'scheduling' longer than this -> GPU likely taken (Vast docs: ~30 s)
     max_resume_failures: int = 2
     create_timeout_seconds: int = 900        # create -> running must happen within this
+    host_error_grace_seconds: int = 60       # Vast reports a docker/GPU start error this long -> drop the host now
     stall_seconds: int = 900                 # jobs wait, worker is up but claims nothing for this long -> replace the instance
     max_creates_per_hour: int = 6            # runaway-cost guard
     max_running_hours: int = 24              # hard cap for a single continuous run
@@ -68,6 +69,7 @@ class FleetConfig:
             resume_timeout_seconds=_int(e, "SONYA_RESUME_TIMEOUT_SECONDS", 90, lo=30, hi=900),
             max_resume_failures=_int(e, "SONYA_MAX_RESUME_FAILURES", 2, lo=1, hi=10),
             create_timeout_seconds=_int(e, "SONYA_CREATE_TIMEOUT_SECONDS", 900, lo=120, hi=3600),
+            host_error_grace_seconds=_int(e, "SONYA_HOST_ERROR_GRACE_SECONDS", 60, lo=20, hi=900),
             stall_seconds=_int(e, "SONYA_STALL_SECONDS", 900, lo=300, hi=7200),
             max_creates_per_hour=_int(e, "SONYA_MAX_CREATES_PER_HOUR", 6, lo=1, hi=60),
             pool_modes=tuple(m.strip() for m in e.get("SONYA_POOL_MODES", "virality,beep").split(",") if m.strip()),

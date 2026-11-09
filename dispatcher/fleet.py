@@ -27,7 +27,7 @@ from dispatcher import launcher
 from dispatcher.config import FleetConfig
 from dispatcher.queue import QueueSnapshot, QueueView
 from dispatcher.store import FleetStore, Inst
-from dispatcher.vast_api import VastClient, VastError, VastInstance
+from dispatcher.vast_api import VastClient, VastError, VastInstance, is_host_error
 
 log = logging.getLogger("sonya.fleet")
 RUNNING_LIKE = ("running",)
@@ -93,6 +93,17 @@ class FleetManager:
             self.store.cas(inst.id, s, inst.generation, "running", running_since=now)
             self.store.event(now, inst.id, "running", via=s)
             return
+        if s in ("creating", "starting", "running") and vs != "running" and is_host_error(v.status_msg):
+            # run 5 (2026-11-09): Vast showed "running" for seconds, then "created" + "failed to inject CDI devices";
+            # treating that as an ordinary stop meant 2 resumes, a destroy WITHOUT a ban, and a re-create on the
+            # same broken machine. A host that cannot start the container is dropped and banned instead.
+            since = {"creating": inst.created_at, "starting": inst.resume_requested_at}.get(s)
+            if s == "running" or now - (since or now) > self.cfg.host_error_grace_seconds:
+                self.store.event(now, inst.id, "host_error", state=s, msg=v.status_msg[:200])
+                if inst.machine_id:
+                    self.store.ban_machine(inst.machine_id, now + 3600, "host_error")
+                self._destroy(inst, now, actions, reason="host_error")
+                return
         if s == "creating" and now - (inst.created_at or now) > self.cfg.create_timeout_seconds:
             self._destroy(inst, now, actions, reason="create_timeout")
             if inst.machine_id:
@@ -217,6 +228,8 @@ class FleetManager:
         fails = inst.resume_failures + 1
         self.store.event(now, inst.id, "resume_timeout", failures=fails)
         if fails >= self.cfg.max_resume_failures:
+            if inst.machine_id:            # never re-create on the machine that could not resume
+                self.store.ban_machine(inst.machine_id, now + 3600, "resume_failures")
             self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails)
             self._destroy(self.store.get(inst.id), now, actions, reason="resume_failures")
         else:

@@ -40,10 +40,12 @@ class FakeVast:
         self.resume_gets_gpu = True
         self.fail_stop = False
         self.fail_create = False
+        self.host_error = ""            # next create lands on a host that cannot start the container
 
     def list_instances(self):
         return [VastInstance(id=i, label=d["label"], actual_status=d["status"], intended_status=d["intended"], gpu_name="RTX 3090",
-                             dph_total=Decimal("0.19"), disk_gb=Decimal("80")) for i, d in self.inst.items()]
+                             dph_total=Decimal("0.19"), disk_gb=Decimal("80"), status_msg=d.get("msg", ""))
+                for i, d in self.inst.items()]
 
     def search_offers(self, q):
         self.calls.append(("search",))
@@ -54,7 +56,9 @@ class FakeVast:
             raise VastError("boom", 500)
         iid = next(self._ids)
         self.calls.append(("create", iid, payload))
-        self.inst[iid] = {"label": payload["label"], "status": "running", "intended": "running"}
+        self.inst[iid] = {"label": payload["label"], "status": "created" if self.host_error else "running",
+                          "intended": "running", "msg": self.host_error}
+        self.host_error = ""
         return iid
 
     def stop(self, iid):

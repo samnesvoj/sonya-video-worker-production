@@ -62,6 +62,7 @@ class VastInstance:
     storage_cost_gb_month: Decimal = Decimal("0")
     machine_id: Optional[int] = None
     start_date: Optional[float] = None
+    status_msg: str = ""        # Vast's last container message (docker / GPU errors land here)
 
     @classmethod
     def parse(cls, d: Dict[str, Any]) -> "VastInstance":
@@ -73,7 +74,18 @@ class VastInstance:
         return cls(id=int(d["id"]), label=str(d.get("label") or ""), actual_status=str(d.get("actual_status") or d.get("cur_state") or ""),
                    intended_status=str(d.get("intended_status") or d.get("next_state") or ""), gpu_name=str(d.get("gpu_name") or ""),
                    dph_total=dec("dph_total"), disk_gb=dec("disk_space"), storage_cost_gb_month=dec("storage_cost"),
-                   machine_id=d.get("machine_id"), start_date=d.get("start_date"))
+                   machine_id=d.get("machine_id"), start_date=d.get("start_date"),
+                   status_msg=str(d.get("status_msg") or ""))
+
+
+# A container that the host could not start at all (run 5, 2026-11-09: "failed to inject CDI devices:
+# unresolvable CDI devices ...gpu=4"). Vast keeps such a contract in "created" forever.
+HOST_ERROR_MARKERS = ("Error response from daemon", "OCI runtime create failed", "failed to inject CDI devices",
+                      "nvidia-container-cli", "could not select device driver")
+
+
+def is_host_error(status_msg: str) -> bool:
+    return any(m in (status_msg or "") for m in HOST_ERROR_MARKERS)
 
 
 class VastClient:

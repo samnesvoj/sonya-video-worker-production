@@ -157,6 +157,7 @@ def test_job_during_stopping_waits_then_resumes():
 
 def test_resume_stuck_in_scheduling_falls_back_to_create_and_cleans_disk():
     mgr, vast, queue, store, clock = make({"max_resume_failures": 1})
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))   # the failed machine gets banned
     iid, label = boot_one(mgr, vast, queue, clock)
     queue.set("j1", "completed", label, clock())
     clock.advance(61); mgr.tick(); mgr.tick()
@@ -406,3 +407,63 @@ def test_config_stall_bounds():
     assert FleetConfig.from_env({}).stall_seconds == 900
     with pytest.raises(ValueError):
         FleetConfig.from_env({"SONYA_STALL_SECONDS": "10"})
+
+
+CDI_ERROR = ("Error response from daemon: failed to create task for container: failed to create shim task: OCI runtime "
+             "create failed: could not apply required modification to OCI specification: error modifying OCI spec: "
+             "failed to inject CDI devices: unresolvable CDI devices D.98855df9/gpu=4: unknown")
+
+
+def test_host_that_cannot_start_the_container_is_dropped_in_a_minute_not_15():
+    # run 5 (2026-11-09): Vast kept a broken-GPU contract in "created"; only create_timeout (900 s) saved it
+    mgr, vast, queue, store, clock = make()
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))   # pricier, other machine
+    vast.host_error = CDI_ERROR
+    queue.add("j1", ts=clock())
+    mgr.tick()
+    (bad,) = vast.inst
+    run_until(mgr, clock, 50)
+    assert bad in vast.inst and vast.n("destroy") == 0          # a short grace: Vast messages can be transient
+    run_until(mgr, clock, 40)
+    assert bad not in vast.inst and vast.n("destroy") == 1
+    assert any(e["event"] == "host_error" for e in store.events())
+    assert vast.n("create") == 2                                  # a fresh instance elsewhere, within ~90 s
+    assert [c for c in vast.calls if c[0] == "create"][-1][1] != bad
+    (good,) = vast.inst
+    assert vast.inst[good]["status"] == "running"
+
+
+def test_host_error_message_on_a_running_instance_is_ignored():
+    from dispatcher.vast_api import is_host_error
+    assert is_host_error(CDI_ERROR) and not is_host_error("") and not is_host_error("success, running sonya")
+    mgr, vast, queue, store, clock = make()
+    iid, _ = boot_one(mgr, vast, queue, clock)
+    vast.inst[iid]["msg"] = CDI_ERROR                              # stale message, container is up
+    run_until(mgr, clock, 120)
+    assert iid in vast.inst and vast.n("destroy") == 0
+
+
+def test_running_then_created_with_host_error_is_dropped_and_banned_at_once():
+    # the exact run 5 sequence: running for seconds, then "created" + CDI error
+    mgr, vast, queue, store, clock = make()
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))
+    iid, _ = boot_one(mgr, vast, queue, clock)
+    vast.inst[iid].update(status="created", msg=CDI_ERROR)
+    mgr.tick()
+    assert iid not in vast.inst and vast.n("resume") == 0
+    assert 7 in store.banned_machines(clock())
+    run_until(mgr, clock, 30)
+    assert vast.n("create") == 2
+
+
+def test_machine_that_failed_to_resume_twice_is_banned():
+    mgr, vast, queue, store, clock = make({"max_resume_failures": 1})
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61); mgr.tick(); mgr.tick()
+    vast.resume_gets_gpu = False
+    queue.add("j2", ts=clock())
+    mgr.tick()
+    clock.advance(95)
+    mgr.tick()
+    assert 7 in store.banned_machines(clock())
