@@ -49,9 +49,9 @@ def test_consumer_cards():
 
 def test_cgroup_cpu_and_ram(tmp_path):
     (tmp_path / "cpu.max").write_text("800000 100000\n")
-    (tmp_path / "memory.max").write_text(str(16 * 2**30))
+    (tmp_path / "memory.max").write_text(str(2 * 2**30))  # below any runner RAM
     assert gp.cpu_threads(str(tmp_path)) <= 8.0
-    assert gp.ram_mb(str(tmp_path)) == 16 * 1024
+    assert gp.ram_mb(str(tmp_path)) == 2 * 1024
     (tmp_path / "cpu.max").write_text("max 100000\n")
     (tmp_path / "memory.max").write_text("max\n")
     assert gp.cpu_threads(str(tmp_path)) >= 1 and gp.ram_mb(str(tmp_path)) > 0
