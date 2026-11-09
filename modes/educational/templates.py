@@ -431,20 +431,30 @@ def title_image(title: str, tpl: Template, lay: Layout, part: Optional[Tuple[int
     font = None
     lines: List[str] = []
     words = title.split()
-    for k in (1.0, 0.9, 0.8):
+    room = max_w - 2 * pad
+
+    def best_split(f: ImageFont.FreeTypeFont, n: int) -> Optional[List[str]]:
+        """n balanced lines (narrowest widest line) that fit the room, else None."""
+        if n == 1:
+            return [title] if f.getlength(title) <= room else None
+        best = None
+        cuts = [(i,) for i in range(1, len(words))] if n == 2 else \
+               [(i, j) for i in range(1, len(words)) for j in range(i + 1, len(words))]
+        for c in cuts:
+            b = (0,) + c + (len(words),)
+            ls = [" ".join(words[b[q]:b[q + 1]]) for q in range(n)]
+            widest = max(f.getlength(l) for l in ls)
+            if widest <= room and (best is None or widest < best[0]):
+                best = (widest, ls)
+        return best[1] if best else None
+
+    # one line, then two balanced lines (no orphan word), a little smaller, and only then three lines
+    for n, k in ((1, 1.0), (2, 1.0), (2, 0.9), (2, 0.8), (3, 0.8), (3, 0.7)):
         font = _font(tpl.title_font, int(tsize * k))
-        room = max_w - 2 * pad
-        if font.getlength(title) <= room:
-            lines = [title]
+        got = best_split(font, n) if len(words) >= n else None
+        if got:
+            lines = got
             break
-        # two balanced lines: no orphan word on the second line
-        splits = [(max(font.getlength(" ".join(words[:i])), font.getlength(" ".join(words[i:]))), i)
-                  for i in range(1, len(words))]
-        if splits:
-            widest, i = min(splits)
-            if widest <= room:
-                lines = [" ".join(words[:i]), " ".join(words[i:])]
-                break
     else:
         return None
     lab_font = _font(tpl.label_font, int(26 * u))

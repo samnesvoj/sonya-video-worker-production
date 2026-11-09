@@ -237,3 +237,13 @@ def test_cyrillic_complete_fonts():
     for f in files:
         cmap = TTFont(str(tp.FONTS / f)).getBestCmap()
         assert not [c for c in need if ord(c) not in cmap], f
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 4])
+def test_long_titles_always_drawn_inside_frame(k):
+    """Wide fonts (Unbounded, Dela) used to drop a long hook title; now it shrinks / takes three lines."""
+    lay = tp.Layout(1080, 1920, True)
+    for t in ("Почему Россия проиграла битву под Нарвой", "Зачем Петру понадобились мануфактуры",
+              "Почему квантовые протоколы нельзя взломать"):
+        im = tp.title_image(t, tp.get_template(k), lay, (1, 6))
+        assert im is not None and im.width <= lay.width
