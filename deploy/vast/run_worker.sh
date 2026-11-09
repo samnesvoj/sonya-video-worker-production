@@ -24,8 +24,9 @@ export WEBCAM_DETECTOR_ENABLED="${WEBCAM_DETECTOR_ENABLED:-false}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
 CONC="${SONYA_WORKER_CONCURRENCY:-1}"
-# 1..16: production uses <= 4 (dispatcher SONYA_JOBS_PER_INSTANCE is capped at 4); 5..16 only for the big-GPU load test (L40S)
-case "${CONC}" in [1-9]|1[0-6]) ;; *) log "SONYA_WORKER_CONCURRENCY must be 1..16 (got ${CONC})"; exit 3 ;; esac
+# 1..32: production uses <= 4 (dispatcher SONYA_JOBS_PER_INSTANCE is capped at 4); 5..32 only for the big-GPU load tests
+# (L40S, RTX 4090 + EPYC 128 threads: levels 24 / 32)
+case "${CONC}" in [1-9]|[12][0-9]|3[0-2]) ;; *) log "SONYA_WORKER_CONCURRENCY must be 1..32 (got ${CONC})"; exit 3 ;; esac
 mkdir -p "${TMPDIR}" "${MODELS_LOCAL_DIR}"
 rm -f "${SONYA_READY_FILE}" "${SONYA_WORKER_PID_FILE}"
 wipe() { find "${TMPDIR}" -mindepth 1 -maxdepth 1 -name 'sonya_*' -exec rm -rf {} + 2>/dev/null || true; }

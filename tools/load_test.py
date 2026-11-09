@@ -398,8 +398,8 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
                                          fetch_json=lambda k: json.loads(s3.get_object(Bucket=bucket, Key=k)["Body"].read()))
         else:
             scenario(run, stub, manager, vast, key, phases, a.jobs_per_instance, beep_key)
-    except (TimeoutError, VastError) as exc:
-        run.aborted = str(exc)
+    except (TimeoutError, VastError, KeyboardInterrupt) as exc:      # Ctrl-C: teardown AND the report of the finished levels
+        run.aborted = str(exc) or type(exc).__name__
         run.say(f"ABORT: {exc}")
     finally:
         for m in run.managers:                                # ALWAYS: nothing may be left (running or stopped)
