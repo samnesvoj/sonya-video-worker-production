@@ -24,11 +24,44 @@ def _nvml():
         return None, None
 
 
+_CG: Dict[str, float] = {}
+
+
+def cgroup() -> Dict[str, Any]:
+    """The CONTAINER's own memory and CPU (psutil inside Docker reports the whole host): cgroup v2, else v1."""
+    out: Dict[str, Any] = {}
+    root = "/sys/fs/cgroup"
+    try:
+        for f in (f"{root}/memory.current", f"{root}/memory/memory.usage_in_bytes"):
+            if os.path.exists(f):
+                out["cg_mem_mb"] = int(int(open(f).read().strip()) / 2**20)
+                break
+        usec = None
+        if os.path.exists(f"{root}/cpu.stat"):
+            usec = next(int(l.split()[1]) for l in open(f"{root}/cpu.stat") if l.startswith("usage_usec"))
+        elif os.path.exists(f"{root}/cpuacct/cpuacct.usage"):
+            usec = int(open(f"{root}/cpuacct/cpuacct.usage").read()) / 1000
+        if usec is not None:
+            now = time.time()
+            if "u" in _CG:
+                out["cg_cpu_cores"] = round((usec - _CG["u"]) / 1e6 / max(now - _CG["t"], 1e-3), 2)   # cores busy on average
+            _CG.update(u=usec, t=now)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def sample(nv, h) -> Dict[str, Any]:
     import psutil
     s: Dict[str, Any] = {"t": round(time.time(), 1), "cpu_pct": psutil.cpu_percent(interval=None),
                          "ram_used_mb": int((psutil.virtual_memory().total - psutil.virtual_memory().available) / 2**20),
-                         "load1": round(os.getloadavg()[0], 2)}
+                         "load1": round(os.getloadavg()[0], 2), "cpus": os.cpu_count(), **cgroup()}
+    try:                                   # how big the Vast disk must be: image + release + models + temp of parallel jobs
+        s["disk_used_gb"] = round(psutil.disk_usage("/").used / 1e9, 2)
+        s["tmp_gb"] = round(sum(f.stat().st_size for f in __import__("pathlib").Path(os.environ.get("TMPDIR", "/work/tmp")).rglob("*")
+                                if f.is_file()) / 1e9, 2)
+    except Exception:  # noqa: BLE001
+        pass
     if nv and h:
         try:
             m = nv.nvmlDeviceGetMemoryInfo(h)
@@ -45,7 +78,7 @@ def sample(nv, h) -> Dict[str, Any]:
 
 def summary(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
     out: Dict[str, Any] = {"n": len(samples)}
-    for k in ("vram_used_mb", "ram_used_mb", "cpu_pct", "gpu_util", "enc_util", "load1", "ffmpeg"):
+    for k in ("vram_used_mb", "ram_used_mb", "cpu_pct", "gpu_util", "enc_util", "load1", "ffmpeg", "disk_used_gb", "tmp_gb", "cg_mem_mb", "cg_cpu_cores"):
         vals = [x[k] for x in samples if k in x]
         if vals:
             out[k + "_max"] = max(vals)

@@ -57,7 +57,7 @@ class FleetConfig:
                                       "RTX 4070 SUPER", "RTX 3090", "RTX 5060 Ti", "RTX 5070")
     min_cpu_cores: float = 8.0               # effective cores of OUR slice (Vast cpu_cores_effective)
     min_cpu_ram_gb: int = 16
-    max_storage_gb_month: Decimal = Decimal("0.25")  # USD per GB-month: the warm's pause cost = disk_gb x this
+    max_storage_gb_month: Decimal = Decimal("0.20")  # USD per GB-month: pause cost = disk_gb x this (40 x 0.20 = $8 = ~660 RUB/month max)
     min_reliability: float = 0.98
     min_inet_down_mbps: int = 800
     # Release identity (passed to the worker as env; the token is minted per instance)
@@ -89,7 +89,7 @@ class FleetConfig:
             pool_modes=tuple(m.strip() for m in e.get("SONYA_POOL_MODES", "virality,beep").split(",") if m.strip()),
             disk_gb=_int(e, "SONYA_DISK_GB", 40, lo=20, hi=500),
             max_dph=Decimal(e.get("SONYA_MAX_DPH", "0.18")),
-            max_storage_gb_month=Decimal(e.get("SONYA_MAX_STORAGE_GB_MONTH", "0.25")),
+            max_storage_gb_month=Decimal(e.get("SONYA_MAX_STORAGE_GB_MONTH", "0.20")),
             min_inet_down_mbps=_int(e, "SONYA_MIN_INET_DOWN_MBPS", 800, lo=100, hi=100000),
             image=e.get("SONYA_WORKER_IMAGE", ""),
             release_sha=e.get("SONYA_RELEASE_SHA", ""),
