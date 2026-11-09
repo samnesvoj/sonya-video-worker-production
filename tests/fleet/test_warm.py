@@ -173,13 +173,17 @@ def test_rule_default_class_first_fallback_only_without_it():
     assert launcher.pick_offer([XEON, WEAK, B_IE, C_DE, A_UK], CFG, set())["id"] == 1
     assert launcher.pick_offer([XEON, WEAK, B_IE, C_DE], CFG, set())["id"] == 5             # cheaper of B/C
     assert launcher.pick_offer([XEON, WEAK], CFG, set()) is None                            # old / 6-core CPUs never
-    assert launcher.pick_offer([B_IE, US_3060], CFG, set())["id"] == 6                      # a 3060 + modern CPU beats B/C
+    assert launcher.pick_offer([B_IE, US_3060], CFG, set())["id"] == 4                      # Europe first (2.5x faster than Asia/US to RU S3)
+    assert launcher.pick_offer([US_3060], CFG, set())["id"] == 6                            # outside Europe only when nothing in Europe
+    assert not launcher.warm_eligible(US_3060, CFG) and launcher.warm_eligible(A_UK, CFG)  # the warm must be a European 3060
 
 
 def test_rule_europe_cached_host_internet_price_reliability():
     a_us = offer(7, 7, dph=0.080, geo="Texas, US")
+    a_de = offer(12, 12, dph=0.090, geo="Germany, DE")
     assert launcher.pick_offer([a_us, A_UK], CFG, set())["id"] == 1                         # Europe over $0.002/h
-    assert launcher.pick_offer([a_us, A_UK], CFG, set(), known_machines={7})["id"] == 7     # image already cached there
+    assert launcher.pick_offer([a_us, A_UK], CFG, set(), known_machines={7})["id"] == 1     # a cache outside Europe does not win
+    assert launcher.pick_offer([a_de, A_UK], CFG, set(), known_machines={12})["id"] == 12   # image already cached there
     assert launcher.pick_offer([offer(8, 8, down=500)], CFG, set()) is None                 # < 800 Mbit/s
     assert launcher.pick_offer([offer(9, 9, rel=0.95)], CFG, set()) is None
     assert launcher.pick_offer([offer(10, 10, dph=0.25)], CFG, set()) is None               # over the price cap
@@ -199,16 +203,16 @@ def test_cpu_families():
 def test_search_query_and_payload():
     q = launcher.search_query(CFG)
     assert "RTX 3060" in q["gpu_name"]["in"] and q["inet_down"]["gte"] == 800 and q["gpu_ram"]["gte"] <= 12288
-    assert q["disk_space"]["gte"] == 40 and q["dph_total"]["lte"] == 0.18
+    assert q["disk_space"]["gte"] == 30 and q["dph_total"]["lte"] == 0.18 and q["cpu_ram"]["gte"] == 16000
     p = launcher.create_payload(CFG, "sonya-pool-x", "tok", ENV)
-    assert p["disk"] == 40
+    assert p["disk"] == 30
     assert p["env"]["NVIDIA_DRIVER_CAPABILITIES"] == "compute,utility,video"            # NVENC inside the container
     assert p["env"]["SONYA_WORKER_CONCURRENCY"] == str(CFG.jobs_per_instance)
 
 
 def test_production_defaults():
     c = FleetConfig.from_env({})
-    assert (c.warm_instances, c.warm_prime, c.max_instances, c.jobs_per_instance, c.max_resume_failures, c.disk_gb) == (1, True, 3, 2, 1, 40)
+    assert (c.warm_instances, c.warm_prime, c.max_instances, c.jobs_per_instance, c.max_resume_failures, c.disk_gb) == (1, True, 3, 2, 1, 30)
     c = FleetConfig.from_env({"SONYA_WARM_INSTANCES": "0", "SONYA_JOBS_PER_INSTANCE": "3", "SONYA_DISK_GB": "35"})
     assert (c.warm_instances, c.jobs_per_instance, c.disk_gb) == (0, 3, 35)
 
@@ -240,3 +244,11 @@ def test_burst_that_got_no_job_is_destroyed_after_the_idle_timeout_not_the_boot_
     run_until(mgr, clock, 80)
     bursts = [i for i in store.all() if i.id != w.id]
     assert all(store.get(b.id).state == "destroyed" for b in bursts) and store.get(w.id).state == "stopped"
+
+
+def test_warm_fallback_switch():
+    assert not launcher.warm_eligible(C_DE, CFG)
+    on = FleetConfig(image=IMAGE, release_sha=SHA, warm_fallback=True)
+    assert launcher.warm_eligible(C_DE, on) and not launcher.warm_eligible(US_3060, on)
+    assert launcher.pick_offer([C_DE, A_UK], on, set(), warm=True)["id"] == 1          # a European 3060 still wins
+    assert FleetConfig.from_env({"SONYA_WARM_FALLBACK": "true"}).warm_fallback

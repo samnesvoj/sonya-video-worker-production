@@ -35,7 +35,7 @@ def search_query(cfg: FleetConfig) -> dict:
     return {"verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False}, "num_gpus": {"eq": 1},
             "gpu_name": {"in": list(cfg.default_gpus + cfg.fallback_gpus)},
             "gpu_ram": {"gte": cfg.min_vram_gb * 1000 - 500}, "disk_space": {"gte": cfg.disk_gb},
-            "cpu_cores_effective": {"gte": cfg.min_cpu_cores}, "cpu_ram": {"gte": cfg.min_cpu_ram_gb * 1000},
+            "cpu_cores_effective": {"gte": cfg.min_cpu_cores}, "cpu_ram": {"gte": max(cfg.min_cpu_ram_gb, 4 * cfg.jobs_per_instance + 4) * 1000},   # ~3.5 GB RAM per parallel video
             "reliability2": {"gte": cfg.min_reliability}, "inet_down": {"gte": cfg.min_inet_down_mbps},
             "cuda_max_good": {"gte": 12.6}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
             "order": [["dph_total", "asc"]], "limit": 200}
@@ -55,9 +55,10 @@ MODERN_CPU = re.compile(
 EUROPE = {"AL", "AD", "AT", "BA", "BE", "BG", "BY", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB", "UK", "GR", "HR", "HU",
           "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MC", "MD", "ME", "MK", "MT", "NL", "NO", "PL", "PT", "RO", "RS", "SE", "SI", "SK",
           "UA", "XK"}
-# Measured job time (s) for kishlak_15m, virality, per GPU class with a modern CPU (SPEED_REPORT.md); unknown -> 3090 value.
+# Measured job time (s, claim -> done) for kishlak_15m virality in Europe, load test 2026-11-09 (SPEED_REPORT.md):
+# A4000 + i7-14700 (ES) 103-108, 4060 Ti + 5950X (DE) 109; run 4 RTX 3090 (CPU encode) 179. 3060 assumed like the A4000.
 # Only the RATIO matters: score = estimated job time x hourly price ("время обработки × цена").
-JOB_SECONDS = {"RTX 3060": 120.0, "RTX 4060 Ti": 110.0, "RTX 3090": 110.0}
+JOB_SECONDS = {"RTX 3060": 110.0, "RTX A4000": 105.0, "RTX 4060 Ti": 109.0, "RTX 3090": 179.0}
 
 
 def cpu_modern(o: Mapping[str, Any]) -> bool:
@@ -86,15 +87,19 @@ def offer_class(o: Mapping[str, Any], cfg: FleetConfig) -> Optional[int]:
 
 
 def warm_eligible(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
-    """May this host be the warm (paused) server: default class and cheap storage (the pause cost is disk x storage)."""
-    return offer_class(o, cfg) == 0 and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
+    """May this host be the warm (paused) server: default class IN EUROPE and cheap storage (pause cost = disk x storage).
+    Europe is required: the same RTX 3060 in Vietnam took 260 s per video vs ~105 s in Europe (S3 is in Russia)."""
+    cls = offer_class(o, cfg)
+    return (cls == 0 or (cls == 1 and cfg.warm_fallback)) and in_europe(o) and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
 
 
 def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[int] = ()) -> Tuple:
     est = JOB_SECONDS.get(str(o.get("gpu_name")), JOB_SECONDS["RTX 3090"])
-    return (offer_class(o, cfg),
+    # Europe FIRST (load test 2026-11-09): our S3 + API are in Russia; from Vietnam every upload/status call cost seconds
+    # (260 s per video, 2.5x Europe) and the image pull took 289 s vs 117 s in Germany. Then the class, then the cache.
+    return (not in_europe(o),
+            offer_class(o, cfg),
             o.get("machine_id") not in set(known_machines),   # booted there before -> the image layers are likely cached
-            not in_europe(o),                                  # S3 is in Russia: Europe is closer
             Decimal(str(est)) * hourly_cost(o, cfg),
             -float(o.get("inet_down") or 0))
 
