@@ -240,7 +240,15 @@ def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, 
         run.say(f"G{n}: {n} virality job(s) queued for a {gpu} with {n} worker process(es)")
         run.wait(mg, lambda: bool(m.store.all()), 5 * 60, f"G{n}: server created")
         inst = m.store.all()[0]
-        run.wait(mg, lambda: all(stub.jobs[j]["status"] in TERMINAL for j in ids), 20 * 60 + 4 * 60 * n, f"G{n}: all {n} finished")
+        def done() -> bool:
+            # 2026-11-09 Finland L40S (machine 28581): the HOST stopped the container 20 s into the first job ("SIGTERM" from
+            # outside, Vast status exited); the fleet then resumed it 3x and the claimed job hung. A host that stops / loses
+            # our server during a level is unstable: abort at once instead of waiting 20+ min.
+            bad = [e["event"] for e in m.store.events(inst.id) if e["event"] in ("unexpected_stop", "host_error", "lost", "worker_stalled")]
+            if bad:
+                raise TimeoutError(f"G{n}: host unstable ({', '.join(sorted(set(bad)))}) on machine {machine_id}")
+            return all(stub.jobs[j]["status"] in TERMINAL for j in ids)
+        run.wait(mg, done, 20 * 60 + 4 * 60 * n, f"G{n}: all {n} finished")
         t_done = run.clock()
         jobs = [job_times(stub, j) for j in ids]
         claims = [h_t for j in ids for st, h_t in stub.jobs[j]["history"] if st == "claimed"]

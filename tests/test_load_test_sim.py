@@ -132,3 +132,30 @@ def test_phase_g_levels_on_one_pinned_host_each_level_new_server_destroyed():
         assert lv["instance"]["gpu"] == "L40S" and lv["limit"] == []
     assert not vast.list_instances()                                            # every level's server is gone
     assert all(i.state in ("destroyed", "destroying") for m in run.managers for i in m.store.all())
+
+
+def test_phase_g_aborts_at_once_when_the_host_stops_our_server():
+    import pytest
+    from tools.load_test import single_gpu
+    clock = Clock()
+    vast = SimVast(clock)
+    vast.offers.append(offer(9, 28581, gpu="L40S", cpu="AMD EPYC 9334 32-Core Processor", cores=16, dph=0.80, geo="Finland, FI"))
+    stub = StubState(clock)
+    sim = workers(vast, stub, clock)
+
+    def step():
+        sim()
+        for d in vast.inst.values():          # the host stops the container once it is up
+            if d["status"] == "running" and clock() - run.t0 > 300:
+                d["status"] = "exited"
+    run = Run(1.7, 300, clock=clock, sleep=clock.advance, step=step)
+    base = dict(enabled=True, dry_run=False, image=IMAGE, release_sha=SHA, max_creates_per_hour=6, warm_prime=False)
+
+    def manager(prefix, **over):
+        m = FleetManager(FleetConfig(label_prefix=prefix, **{**base, **over}), FleetStore(str(Path(tempfile.mkdtemp()) / "f.db")),
+                         vast, stub, lambda: GH_TOKEN, ENV, clock)
+        run.managers.append(m)
+        return m
+    with pytest.raises(TimeoutError, match="host unstable"):
+        single_gpu(run, stub, manager, vast, "k.mp4", gpu="L40S", machine_id=28581, levels=[1], fetch_res=lambda l: [])
+    assert clock() - run.t0 < 600
