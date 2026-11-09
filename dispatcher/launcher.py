@@ -109,15 +109,15 @@ def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[
             -float(o.get("inet_down") or 0))
 
 
-def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
-               *, warm: bool = False, exclude: Iterable[int] = ()) -> Optional[dict]:
-    """Best acceptable offer: default class first, then (cached image, Europe, time x price, faster internet).
+def rank_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                *, warm: bool = False, exclude: Iterable[int] = ()) -> List[dict]:
+    """Every acceptable offer, best first: Europe, default class, cached image, time x price, faster internet.
     warm=True: only hosts that may hold the paused warm server (default class, storage <= max_storage_gb_month)."""
     skip = set(exclude)
     if cfg.pin_machine_id:      # load tests only: one named host (any GPU/CPU class), still under the price cap
         pinned = [o for o in offers if o.get("machine_id") == cfg.pin_machine_id and o.get("id") not in skip
                   and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph]
-        return min(pinned, key=lambda o: Decimal(str(o.get("dph_total", 99)))) if pinned else None
+        return sorted(pinned, key=lambda o: Decimal(str(o.get("dph_total", 99))))
     ok = [o for o in offers if offer_class(o, cfg) is not None and o.get("machine_id") not in banned_machines
           and o.get("id") not in skip and o.get("machine_id") not in skip
           and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph
@@ -125,7 +125,14 @@ def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known
           and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability
           and (not warm or warm_eligible(o, cfg))]
     known = set(known_machines)
-    return min(ok, key=lambda o: offer_rank(o, cfg, known)) if ok else None
+    return sorted(ok, key=lambda o: offer_rank(o, cfg, known))     # stable: ties keep Vast's order, like min() did
+
+
+def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+               *, warm: bool = False, exclude: Iterable[int] = ()) -> Optional[dict]:
+    """Best acceptable offer (the first of rank_offers)."""
+    ranked = rank_offers(offers, cfg, banned_machines, known_machines, warm=warm, exclude=exclude)
+    return ranked[0] if ranked else None
 
 
 # ── POWER class: several data-center cards on one offer, for a rush (off by default; FleetConfig.power_*) ─────────────────
@@ -179,18 +186,45 @@ def power_ok(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
             and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability)
 
 
-def pick_power_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
-                     *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None) -> Optional[dict]:
-    """Best power offer: Europe first (S3 + API are in Russia), then a host that has our image cached, then the price of ONE
-    video slot per hour (hourly cost / parallel videos), then faster internet."""
+def rank_power_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                      *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None,
+                      reserve: bool = False) -> List[dict]:
+    """Every acceptable power offer, best first: Europe (S3 + API are in Russia), then a host that has our image cached,
+    then the price of ONE video slot per hour (hourly cost / parallel videos), then faster internet.
+    reserve=True: only hosts whose pause (stopped disk) costs <= power_reserve_max_storage_rub per month."""
     skip, known = set(exclude), set(known_machines)
     ok = [o for o in offers if power_ok(o, cfg) and o.get("machine_id") not in banned_machines
-          and o.get("id") not in skip and o.get("machine_id") not in skip]
+          and o.get("id") not in skip and o.get("machine_id") not in skip and (not reserve or reserve_ok(o, cfg))]
 
     def rank(o):
         return (not in_europe(o), o.get("machine_id") not in known,
                 hourly_cost(o, cfg) / max(1, offer_slots(o, cfg, power=True, environ=environ)), -float(o.get("inet_down") or 0))
-    return min(ok, key=rank) if ok else None
+    return sorted(ok, key=rank)
+
+
+def pick_power_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                     *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None) -> Optional[dict]:
+    """Best power offer (the first of rank_power_offers)."""
+    ranked = rank_power_offers(offers, cfg, banned_machines, known_machines, exclude=exclude, environ=environ)
+    return ranked[0] if ranked else None
+
+
+def pause_rub_month(o: Mapping[str, Any], cfg: FleetConfig) -> Decimal:
+    """What this host bills per month for our STOPPED disk (disk_gb x storage price per GB-month), in RUB."""
+    return Decimal(str(o.get("storage_cost") or 0)) * cfg.disk_gb * cfg.usd_rub
+
+
+def reserve_ok(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
+    """May this power host be the paused POWER reserve: its pause costs <= power_reserve_max_storage_rub per month."""
+    return power_ok(o, cfg) and pause_rub_month(o, cfg) <= cfg.power_reserve_max_storage_rub
+
+
+def offer_brief(o: Mapping[str, Any], known_machines: Iterable[int] = ()) -> Dict[str, Any]:
+    """Short, secret-free description of an offer for the spares list (fleet_events / status)."""
+    geo = str(o.get("geolocation") or "")
+    return {"offer": o.get("id"), "machine": o.get("machine_id"), "gpu": o.get("gpu_name"), "num_gpus": num_gpus(o),
+            "dph": str(o.get("dph_total")), "storage": str(o.get("storage_cost")), "geo": geo.rsplit(",", 1)[-1].strip(),
+            "cpu": str(o.get("cpu_name") or "")[:40], "cached": o.get("machine_id") in set(known_machines)}
 
 
 def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str], *,

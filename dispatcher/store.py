@@ -37,6 +37,9 @@ CREATE INDEX IF NOT EXISTS ix_events_inst ON fleet_events(instance_id, ts);
 CREATE TABLE IF NOT EXISTS fleet_creates (ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS bad_machines (machine_id INTEGER PRIMARY KEY, until REAL NOT NULL, reason TEXT);
 CREATE TABLE IF NOT EXISTS good_machines (machine_id INTEGER PRIMARY KEY, last_ok REAL NOT NULL);  -- booted our image there
+CREATE TABLE IF NOT EXISTS fleet_spares (   -- the latest ranked spare offers per class (warm|burst|power|reserve), for status
+  cls TEXT NOT NULL, rank INTEGER NOT NULL, ts REAL NOT NULL, detail TEXT NOT NULL, PRIMARY KEY (cls, rank)
+);
 """
 
 STATES_BILLING_GPU = ("running", "stop_pending")          # GPU is attached and billed per second
@@ -161,6 +164,29 @@ class FleetStore:
     def good_machines(self, since: float = 0.0) -> set:
         with self._lock:
             return {r[0] for r in self._c.execute("SELECT machine_id FROM good_machines WHERE last_ok>=?", (since,))}
+
+    def save_spares(self, cls: str, offers: List[dict], ts: float) -> None:
+        """Replace the spares list of one class (offers = launcher.offer_brief dicts, best first). An empty list is kept
+        as one {"offer": None} row, so the status shows "no acceptable offer" with its time."""
+        offers = offers or [{"offer": None}]
+        with self._lock:
+            self._c.execute("BEGIN IMMEDIATE")
+            try:
+                self._c.execute("DELETE FROM fleet_spares WHERE cls=?", (cls,))
+                self._c.executemany("INSERT INTO fleet_spares VALUES (?,?,?,?)",
+                                    [(cls, k, ts, json.dumps(o, default=str, sort_keys=True)) for k, o in enumerate(offers)])
+                self._c.execute("COMMIT")
+            except Exception:
+                self._c.execute("ROLLBACK")
+                raise
+
+    def spares(self) -> Dict[str, List[dict]]:
+        """{class: [offer brief + 'ts', best first]}."""
+        out: Dict[str, List[dict]] = {}
+        with self._lock:
+            for r in self._c.execute("SELECT cls, ts, detail FROM fleet_spares ORDER BY cls, rank"):
+                out.setdefault(r["cls"], []).append(json.loads(r["detail"]) | {"ts": r["ts"]})
+        return out
 
     def banned_machines(self, now: float) -> set:
         with self._lock:

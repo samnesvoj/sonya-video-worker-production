@@ -48,6 +48,10 @@ class FakeVast:
         self.fail_stop = False
         self.fail_create = False
         self.host_error = ""            # next create lands on a host that cannot start the container
+        self.fail_offers = set()        # create on these offer ids -> VastError (offer rented a second ago)
+        self.fail_resume = False        # resume call -> VastError
+        self.created_offers = []        # offer id of every successful create, in order
+        self.instance_offer = {}        # instance id -> offer id
 
     def list_instances(self):
         return [VastInstance(id=i, label=d["label"], actual_status=d["status"], intended_status=d["intended"], gpu_name="RTX 3060",
@@ -61,7 +65,12 @@ class FakeVast:
     def create(self, offer_id, payload):
         if self.fail_create:
             raise VastError("boom", 500)
+        if offer_id in self.fail_offers:
+            self.calls.append(("create_refused", offer_id))
+            raise VastError("no_such_ask", 400)
         iid = next(self._ids)
+        self.created_offers.append(offer_id)
+        self.instance_offer[iid] = offer_id
         self.calls.append(("create", iid, payload))
         self.inst[iid] = {"label": payload["label"], "status": "created" if self.host_error else "running",
                           "intended": "running", "msg": self.host_error}
@@ -76,6 +85,8 @@ class FakeVast:
 
     def resume(self, iid):
         self.calls.append(("resume", iid))
+        if self.fail_resume:
+            raise VastError("resume refused", 400)
         self.inst[iid].update(intended="running", status="running" if self.resume_gets_gpu else "scheduling")
 
     def destroy(self, iid):

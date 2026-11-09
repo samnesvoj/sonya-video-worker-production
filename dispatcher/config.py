@@ -74,15 +74,37 @@ class FleetConfig:
     power_min_cpu_cores: float = 16.0        # SONYA_POWER_MIN_CPU_CORES (Vast cpu_cores_effective of OUR slice; ~4 per video)
     power_min_cpu_ram_gb: int = 32           # SONYA_POWER_MIN_CPU_RAM_GB (~4 GB per video + 4)
     power_max_dph: Decimal = Decimal("1.00")  # SONYA_POWER_MAX_DPH (USD/h, the whole multi-GPU offer)
-    power_jobs_per_instance: int = 0         # SONYA_POWER_JOBS_PER_INSTANCE: 0 = from the offer (cards x VRAM, CPU threads, RAM;
-                                             # scripts/ops/gpu_plan.capacity), the worker re-checks on its real hardware ("auto")
+    power_jobs_per_instance: int = 8         # SONYA_POWER_JOBS_PER_INSTANCE: videos at once on a POWER server. Safe default 8
+                                             # (owner 2026-11-09; the 2x A40 test gives the final number). 0 = from the offer
+                                             # (cards x VRAM, CPU threads, RAM; scripts/ops/gpu_plan.capacity); the worker
+                                             # re-checks on its real hardware ("auto") and never runs more than this
     power_min_gap: int = 0                   # SONYA_POWER_MIN_GAP: 0 = jobs_per_instance + 1 (more than one default server carries)
+    # SPARES (owner 2026-11-09, off by default = the old one-offer-per-create behaviour): a ranked list of the best
+    # spare_count offers per class (warm = European RTX 3060 class with cheap storage; burst = any default-class offer;
+    # power = multi-GPU), refreshed every spares_refresh_seconds, banned hosts left out, hosts that already booted our image
+    # first within their class. A create that Vast refuses goes straight to the next offer of the list (same tick), a warm
+    # that cannot resume is replaced in the same tick. The list is in fleet_events ("spares") and `dispatcher.main status`.
+    spares_enabled: bool = False             # SONYA_SPARES_ENABLED
+    spares_count: int = 5                    # SONYA_SPARES_COUNT (offers kept per class; also: creates tried per server)
+    spares_refresh_seconds: int = 300        # SONYA_SPARES_REFRESH_SECONDS
+    # POWER RESERVE (owner 2026-11-09, off by default): ONE power server (e.g. 2x A40 Belgium) kept STOPPED like the warm.
+    # Woken when the demand is >= power_reserve_wake_at (more than the warm + the allowed bursts carry), stopped again after
+    # the rush. Not woken in 90 s (resume_timeout_seconds) -> destroyed + host banned, the next power offer is created in
+    # the same tick. Only hosts whose pause costs <= power_reserve_max_storage_rub per month. Outside max_instances.
+    power_reserve: bool = False              # SONYA_POWER_RESERVE
+    power_reserve_wake_at: int = 0           # SONYA_POWER_RESERVE_WAKE_AT: jobs (queued + running); 0 = max_instances x jobs_per_instance + 1
+    power_reserve_max_storage_rub: int = 500  # SONYA_POWER_RESERVE_MAX_STORAGE_RUB: pause cost cap per month (disk_gb x storage price)
+    usd_rub: Decimal = Decimal("82")         # SONYA_USD_RUB: only for that cap (30 GB x $0.20 = $6 = ~492 RUB)
     pin_machine_id: int = 0                  # LOAD TESTS ONLY (tools/load_test.py phase G): rent exactly this Vast machine, class rule
                                              # not applied (e.g. an L40S + EPYC host). Never read from the env: production stays 0
     # Release identity (passed to the worker as env; the token is minted per instance)
     image: str = ""
     release_sha: str = ""
     release_repo: str = "samnesvoj/sonya-video-worker-production"
+
+    def reserve_wake_at(self) -> int:
+        """Demand (queued + running jobs) from which the paused power reserve is woken."""
+        return self.power_reserve_wake_at or self.max_instances * self.jobs_per_instance + 1
 
     def power_gap(self) -> int:
         """Uncovered jobs from which a power server is created instead of a default one."""
@@ -123,15 +145,22 @@ class FleetConfig:
             power_min_cpu_cores=float(_int(e, "SONYA_POWER_MIN_CPU_CORES", 16, lo=4, hi=1024)),
             power_min_cpu_ram_gb=_int(e, "SONYA_POWER_MIN_CPU_RAM_GB", 32, lo=8, hi=4096),
             power_max_dph=Decimal(e.get("SONYA_POWER_MAX_DPH", "1.00")),
-            power_jobs_per_instance=_int(e, "SONYA_POWER_JOBS_PER_INSTANCE", 0, lo=0, hi=16),
+            power_jobs_per_instance=_int(e, "SONYA_POWER_JOBS_PER_INSTANCE", 8, lo=0, hi=64),
             power_min_gap=_int(e, "SONYA_POWER_MIN_GAP", 0, lo=0, hi=1000),
+            spares_enabled=e.get("SONYA_SPARES_ENABLED", "false").lower() in TRUE,
+            spares_count=_int(e, "SONYA_SPARES_COUNT", 5, lo=1, hi=10),
+            spares_refresh_seconds=_int(e, "SONYA_SPARES_REFRESH_SECONDS", 300, lo=30, hi=3600),
+            power_reserve=e.get("SONYA_POWER_RESERVE", "false").lower() in TRUE,
+            power_reserve_wake_at=_int(e, "SONYA_POWER_RESERVE_WAKE_AT", 0, lo=0, hi=1000),
+            power_reserve_max_storage_rub=_int(e, "SONYA_POWER_RESERVE_MAX_STORAGE_RUB", 500, lo=0, hi=100000),
+            usd_rub=Decimal(e.get("SONYA_USD_RUB", "82")),
             image=e.get("SONYA_WORKER_IMAGE", ""),
             release_sha=e.get("SONYA_RELEASE_SHA", ""),
             release_repo=e.get("SONYA_RELEASE_REPO", "samnesvoj/sonya-video-worker-production"),
         )
         if cfg.power_min_gpus > cfg.power_max_gpus:
             raise ValueError("SONYA_POWER_MIN_GPUS must be <= SONYA_POWER_MAX_GPUS")
-        if cfg.power_enabled and not cfg.power_gpus:
+        if (cfg.power_enabled or cfg.power_reserve) and not cfg.power_gpus:
             raise ValueError("SONYA_POWER_GPUS is empty")
         if any(m.startswith("trailer") for m in cfg.pool_modes):
             raise ValueError("SONYA_POOL_MODES must not contain Trailer modes")

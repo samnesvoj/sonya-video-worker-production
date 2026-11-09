@@ -37,6 +37,7 @@ def created(vast):
 def test_power_is_off_by_default_and_env_parsing():
     c = FleetConfig.from_env({})
     assert c.power_enabled is False and c.power_gap() == 3 and c.power_gpus[0] == "A40"
+    assert c.power_jobs_per_instance == 8 == FleetConfig().power_jobs_per_instance      # safe default until the A40 test says more
     c = FleetConfig.from_env({"SONYA_POWER_ENABLED": "true", "SONYA_POWER_GPUS": "A40, L40S", "SONYA_POWER_MIN_GPUS": "2",
                               "SONYA_POWER_MAX_GPUS": "8", "SONYA_POWER_MAX_DPH": "0.9", "SONYA_POWER_MIN_GAP": "5",
                               "SONYA_POWER_JOBS_PER_INSTANCE": "6"})
@@ -45,12 +46,13 @@ def test_power_is_off_by_default_and_env_parsing():
     with pytest.raises(ValueError):
         FleetConfig.from_env({"SONYA_POWER_MIN_GPUS": "4", "SONYA_POWER_MAX_GPUS": "2"})
     with pytest.raises(ValueError):
-        FleetConfig.from_env({"SONYA_POWER_JOBS_PER_INSTANCE": "17"})
+        FleetConfig.from_env({"SONYA_POWER_JOBS_PER_INSTANCE": "65"})
 
 
 # ── offer rules ───────────────────────────────────────────────────────────────────────────────────────────────────
 def test_offer_slots_one_formula_with_the_worker():
-    cfg = FleetConfig()
+    assert launcher.offer_slots(a40x2(cores=64.0), FleetConfig(), power=True) == 8   # default: the fixed safe 8
+    cfg = FleetConfig(power_jobs_per_instance=0)                                     # 0 = from the offer
     assert launcher.offer_slots(offer(1, 7), cfg) == 2                               # default class: jobs_per_instance
     assert launcher.offer_slots(a40x2(), cfg, power=True) == 8                       # CPU: 32 threads / 4
     assert launcher.offer_slots(a40x2(cores=64.0), cfg, power=True) == 16            # VRAM 8/card cap, max 16 processes
@@ -73,7 +75,7 @@ def test_power_ok_rules():
 
 
 def test_power_query_and_pick_prefers_europe_then_price_per_video():
-    cfg = FleetConfig(power_enabled=True)
+    cfg = FleetConfig(power_enabled=True, power_jobs_per_instance=0)
     q = launcher.power_search_query(cfg)
     assert q["num_gpus"] == {"gte": 2, "lte": 4} and "A40" in q["gpu_name"]["in"] and q["dph_total"] == {"lte": 1.0}
     assert launcher.search_query(cfg)["num_gpus"] == {"eq": 1}                       # the default search is untouched
