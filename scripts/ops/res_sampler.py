@@ -1,8 +1,8 @@
 """
 res_sampler.py - resource samples of ONE worker server for load tests (off unless SONYA_RES_SAMPLER=1).
 
-Every SONYA_RES_SAMPLER_SEC (5) seconds: GPU memory used / total, GPU + NVENC utilisation, RAM used, CPU %, load average,
-number of busy worker processes. One JSON object per minute is uploaded to S3 as a NEW key
+Every SONYA_RES_SAMPLER_SEC (5) seconds: GPU memory used / total, GPU + NVENC utilisation (server totals AND, on a multi-GPU
+server, every card: "gpus" -> summary "per_gpu" peaks + average utilisation), RAM used, CPU %, load average, number of ffmpegs. One JSON object per minute is uploaded to S3 as a NEW key
     fast-start-test/res/<WORKER_ID>/<boot-epoch>/<minute-index>.json
 (never overwrites anything; no env values, no file names, no user data). Best-effort: never raises, never blocks the worker.
 """
@@ -16,12 +16,32 @@ from typing import Any, Dict, List
 
 
 def _nvml():
+    """(pynvml, [handle of EVERY card]) or (None, None). NVML indexes cards in PCI order = nvidia-smi index."""
     try:
         import pynvml  # nvidia-ml-py (in the lock)
         pynvml.nvmlInit()
-        return pynvml, pynvml.nvmlDeviceGetHandleByIndex(0)
+        return pynvml, [pynvml.nvmlDeviceGetHandleByIndex(i) for i in range(pynvml.nvmlDeviceGetCount())]
     except Exception:  # noqa: BLE001
         return None, None
+
+
+def gpu_samples(nv, handles) -> List[Dict[str, Any]]:
+    """Per card: VRAM used/total, SM + NVENC utilisation, number of our processes on it (= workers pinned there)."""
+    out: List[Dict[str, Any]] = []
+    for i, h in enumerate(handles if isinstance(handles, (list, tuple)) else [handles] if handles else []):
+        g: Dict[str, Any] = {"i": i}
+        try:
+            m = nv.nvmlDeviceGetMemoryInfo(h)
+            g.update(vram_used_mb=int(m.used / 2**20), vram_total_mb=int(m.total / 2**20),
+                     gpu_util=nv.nvmlDeviceGetUtilizationRates(h).gpu, enc_util=nv.nvmlDeviceGetEncoderUtilization(h)[0])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            g["procs"] = len(nv.nvmlDeviceGetComputeRunningProcesses(h))
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(g)
+    return out
 
 
 _CG: Dict[str, float] = {}
@@ -63,12 +83,13 @@ def sample(nv, h) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         pass
     if nv and h:
-        try:
-            m = nv.nvmlDeviceGetMemoryInfo(h)
-            s.update(vram_used_mb=int(m.used / 2**20), vram_total_mb=int(m.total / 2**20),
-                     gpu_util=nv.nvmlDeviceGetUtilizationRates(h).gpu, enc_util=nv.nvmlDeviceGetEncoderUtilization(h)[0])
-        except Exception:  # noqa: BLE001
-            pass
+        gs = [g for g in gpu_samples(nv, h) if "vram_used_mb" in g]
+        if gs:
+            # server totals (one card: exactly the old fields) + every card on its own (multi-GPU: is any card idle / full?)
+            s.update(vram_used_mb=sum(g["vram_used_mb"] for g in gs), vram_total_mb=sum(g["vram_total_mb"] for g in gs),
+                     gpu_util=max(g["gpu_util"] for g in gs), enc_util=max(g["enc_util"] for g in gs))
+            if len(gs) > 1:
+                s["gpus"] = gs
     try:
         s["ffmpeg"] = sum(1 for p in psutil.process_iter(["name"]) if (p.info.get("name") or "").startswith("ffmpeg"))
     except Exception:  # noqa: BLE001
@@ -82,6 +103,22 @@ def summary(samples: List[Dict[str, Any]]) -> Dict[str, Any]:
         vals = [x[k] for x in samples if k in x]
         if vals:
             out[k + "_max"] = max(vals)
+    per: Dict[str, Dict[str, Any]] = {}
+    for x in samples:
+        for g in x.get("gpus") or []:
+            per.setdefault(str(g.get("i")), {}).setdefault("_rows", []).append(g)
+    for i, d in per.items():
+        rows = d.pop("_rows")
+        for k in ("vram_used_mb", "gpu_util", "enc_util", "procs"):
+            vals = [r[k] for r in rows if k in r]
+            if vals:
+                d[k + "_max"] = max(vals)
+        util = [r["gpu_util"] for r in rows if "gpu_util" in r]
+        if util:
+            d["gpu_util_avg"] = round(sum(util) / len(util), 1)
+        d["vram_total_mb"] = max((r.get("vram_total_mb", 0) for r in rows), default=0)
+    if per:
+        out["per_gpu"] = per
     return out
 
 
