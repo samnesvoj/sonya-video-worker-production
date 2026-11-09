@@ -113,14 +113,24 @@ def _encoder_works(ffmpeg: str, family: str) -> bool:
         return False
 
 
+_FAMILY: Dict[str, str] = {}
+
+
+def encoder_family(ffmpeg: Optional[str] = None) -> str:
+    """"nvenc" when a 0.5 s NVENC smoke encode works (once per process), else "cpu"."""
+    ff = ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg"
+    if ff not in _FAMILY:
+        _FAMILY[ff] = "nvenc" if _encoder_works(ff, "nvenc") else "cpu"
+    return _FAMILY[ff]
+
+
 def ensure_render_args(ffmpeg: Optional[str] = None) -> Optional[str]:
     """Set SONYA_RENDER_ARGS (read by smart_crop_adapter._env_encoder_args) once per process, like the
     Desktop daemon does before every Cut run. An explicit SONYA_RENDER_ARGS wins. -> chosen family."""
     import json
     if os.environ.get("SONYA_RENDER_ARGS"):
         return None
-    ff = ffmpeg or os.environ.get("SONYA_FFMPEG") or "ffmpeg"
-    family = "nvenc" if _encoder_works(ff, "nvenc") else "cpu"
+    family = encoder_family(ffmpeg)
     os.environ["SONYA_RENDER_ARGS"] = json.dumps(encoder_args(family))
     logger.info("[cut_profile] render encoder: %s @ %s", family, RENDER_BITRATE)
     return family

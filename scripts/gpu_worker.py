@@ -719,9 +719,15 @@ def process_job(job: dict, worker_id: str) -> None:
                 )
                 result = {"clips": [out_path], "mode": "streamer", "warnings": []}
             else:
+                # Desktop ingest: VFR / rotated / non-H.264 sources are normalized before the mode
+                # (scripts/shared/source_normalize.py; virality + beep only)
+                from scripts.shared.source_normalize import normalize_source
+                norm = normalize_source(str(input_path), str(output_dir.parent / "ingest"), mode)
+                if norm["normalized"]:
+                    logger.info("[worker] job_id=%s source normalized: %s", job_id, ",".join(norm["reasons"]))
                 runner = get_runner(mode)
                 result = runner(
-                    input_video_path=str(input_path),
+                    input_video_path=norm["path"],
                     output_dir=str(output_dir),
                     params=params,
                     progress_callback=_progress,
