@@ -16,11 +16,6 @@ from scripts.shared import cut_selection as cs
 REPO = Path(__file__).resolve().parents[1]
 
 
-@pytest.fixture(autouse=True)
-def _legacy_virality_path(monkeypatch):
-    """These tests pin the OLD virality path (kept for rollback): production jobs now run the Mac mini
-    recipe (scripts/shared/cut_profile.py, tests/test_cut_profile.py); SONYA_CUT_PROFILE=legacy restores it."""
-    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")
 
 
 def interview(seed=0, n=40):
@@ -141,20 +136,3 @@ def test_metadata_has_rank_source_and_tie_break():
     ranks = [x["rank"] for x in meta["selected"]]
     assert ranks[0] == 1 and ranks == sorted(ranks)
     assert all(x["score_source"] == "local" and "local_score" in x for x in meta["selected"])
-
-
-def test_virality_selected_segments_byte_identical_twice(monkeypatch, tmp_path):
-    from scripts.shared.crop import smart_crop_adapter
-    from scripts.shared.enhancers import sonya_enhancer
-    words = interview(7)
-    monkeypatch.setattr(sonya_enhancer, "enrich_video_for_mode",
-                        lambda **kw: {"warnings": [], "word_timestamps": words, "crop_hints": {}})
-    monkeypatch.setattr(smart_crop_adapter, "compose_vertical_clip", lambda **kw: None)
-    from modes.virality import runner
-    outs = []
-    for run in ("a", "b"):
-        d = tmp_path / run
-        r = runner.run("in.mp4", str(d), {"max_clips": 3, "candidates": {"min_duration": 10, "max_duration": 40,
-                                                                         "target_duration": 20}})
-        outs.append(((d / "selected_segments.json").read_bytes(), json.dumps(stable(r["selection"]), sort_keys=True)))
-    assert outs[0] == outs[1]

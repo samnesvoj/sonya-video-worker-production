@@ -4,9 +4,8 @@ scripts/shared/cut_profile.py
 The Mac mini reference recipe (SONYA Desktop, docs CUT_PLAYBOOK) for production virality jobs.
 
 The production site sends only what the user picked (``clipType``, ``settings.subtitleStyle``…), never the
-Cut settings (``selection`` / ``crop``). Without them the virality runner takes the legacy path: whole-video
-YOLO + gemini_composer crop hints, letterboxed wide shots, no subtitles, hook_mode selection (it picked an ad
-insert). This module turns such a job into the recipe the owner approved on the Mac mini:
+Cut settings (``selection`` / ``crop``). This module turns every such job into the recipe the owner approved
+on the Mac mini (the virality runner runs nothing else):
 
   * selection ``story`` (cut-local-rank-v3: true sentences, question → whole answer, promo never a clip),
     strategy ``qa`` (``hooks`` when the user picked Hooks); the LLM editor (Gemini via Timeweb / OpenRouter)
@@ -18,9 +17,10 @@ insert). This module turns such a job into the recipe the owner approved on the 
     never the old no-words path;
   * render: the Desktop encoder args (NVENC p6 / libx264 slow, 6 Mb/s cap) via SONYA_RENDER_ARGS.
 
-The old virality path (whole-video YOLO + gemini_composer + hook_mode) is OFF for production jobs; its code
-is kept (archive/legacy_virality/README.md) and ``SONYA_CUT_PROFILE=legacy`` turns it back on (rollback without
-a new release). A job that already carries Desktop settings (selection=story / crop.mode=tracked) is left as is.
+The old virality path (whole-video YOLO + gemini_composer + hook_mode) was removed 2026-11-08 (owner:
+«старое это не надо»); full copy: git tag old-worker-way + /Users/agent/SONYA/archive/old-worker-way-2026-11-08.tar.gz
+(archive/legacy_virality/README.md). A job that already carries Desktop settings (selection=story +
+crop.mode=tracked) is left as is.
 """
 from __future__ import annotations
 
@@ -74,11 +74,11 @@ def editor_available(env: Optional[Dict[str, str]] = None) -> bool:
 def applies(mode: str, params: Dict[str, Any]) -> bool:
     """Every production virality job runs the Mac mini recipe (owner 2026-11-08: «старое это не надо»).
     Left untouched only: a job that already carries the Desktop settings itself (selection=story or
-    crop.mode=tracked: tests / manual runs), and the rollback switch SONYA_CUT_PROFILE=legacy."""
-    if mode != "virality" or os.environ.get("SONYA_CUT_PROFILE", "macmini").lower() == "legacy":
+    crop.mode=tracked: tests / manual runs)."""
+    if mode != "virality":
         return False
     crop = params.get("crop") if isinstance(params.get("crop"), dict) else {}
-    if params.get("selection") == "story" or crop.get("mode") == "tracked":
+    if params.get("selection") == "story" and crop.get("mode") == "tracked" and params.get("llm") != "on":
         return False
     if "selection" in params or "crop" in params:
         logger.warning("[cut_profile] legacy Cut settings in the job (selection=%r crop=%r) are ignored: "

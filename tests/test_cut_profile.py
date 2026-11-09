@@ -48,13 +48,15 @@ def test_legacy_settings_in_a_job_no_longer_select_the_old_path(video, tmp_path)
     assert out["crop"]["mode"] == "tracked" and out["selection"] == "story" and "llm" not in out
 
 
-def test_desktop_style_job_and_rollback_switch_are_left_alone(video, tmp_path, monkeypatch):
+def test_desktop_style_job_is_left_alone_and_there_is_no_rollback_switch(video, tmp_path, monkeypatch):
     p = {"selection": "story", "crop": {"mode": "tracked"}}
     assert cp.apply_profile("virality", p, video, str(tmp_path)) is p
     assert cp.apply_profile("beep", {}, video, str(tmp_path)) == {}
-    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")
-    q = dict(SITE_VIRALITY_PARAMS)
-    assert cp.apply_profile("virality", q, video, str(tmp_path)) is q
+    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")      # the old switch does nothing any more
+    out = cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS), video, str(tmp_path))
+    assert out["selection"] == "story" and out["crop"]["mode"] == "tracked"
+    half = {"selection": "story", "crop": {"mode": "legacy"}}  # half-Desktop settings get the full recipe
+    assert cp.apply_profile("virality", half, video, str(tmp_path))["crop"]["mode"] == "tracked"
 
 
 def test_encoder_args_are_the_desktop_quality_preset_at_6mbps():

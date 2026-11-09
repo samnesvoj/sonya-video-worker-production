@@ -1,29 +1,30 @@
-# Old virality path - switched OFF (2026-11-08), kept for rollback
+# Old virality path - REMOVED (2026-11-08)
 
-Owner, 2026-11-08: «ТАК СРОЧНО ПЕРЕНЕСТИ ВЕРСИЮ МАК МИНИ !!!! старое это не надо».
+Owner, 2026-11-08: «ТАК СРОЧНО ПЕРЕНЕСТИ ВЕРСИЮ МАК МИНИ !!!! старое это не надо», and permission to
+delete the old way once the Mac mini version passed the Mac mini check (it did: kishlak_15m 3/3 clips,
+crop, 403/403 subtitle lines; BEEP 19/19 intervals; then the same on Vast, run 4).
 
-Production virality jobs now run the **Mac mini recipe** - exactly what the SONYA Desktop daemon
+Virality now runs only the **Mac mini recipe** - what the SONYA Desktop daemon
 (`sonya-desktop/desktop/sonya_desktop/modes/worker.py`, `mode.run`) passes to the same runner:
-`scripts/shared/cut_profile.py` (selection `story` / `qa`, crop `tracked` per clip with YuNet,
-burned ASS subtitles «highlight» + Dela Gothic One, mandatory ASR, Desktop encoder args at 6 Mb/s).
+`scripts/shared/cut_profile.py` (selection `story`, crop `tracked` per clip with YuNet, burned ASS
+subtitles, mandatory ASR, Desktop encoder args at 6 Mb/s). Anything else is refused by
+`modes/virality/runner.py`; no words → `ASR_FAILED`, no story → `NO_CLIPS` (Desktop fails the same way).
 
-The Cut library itself (`cut_selection`, `boundaries`, `crop/*`, `subtitles`, `subtitle_styles`, fonts,
-`llm_editor`, `beep*`, `profanity`) is byte-identical to `sonya-desktop` (checked 2026-11-08 with `diff -rq`).
+## Removed from virality
 
-## What is OFF for production virality jobs
+| Old step | Was in |
+|---|---|
+| `hook_mode_v1` + visual boosts, 0–30 s fallback without ASR | `modes/virality/runner.py::_legacy_segments` |
+| Gemini / local `select_clips` selection (`llm=on`) | `modes/virality/runner.py::_select_and_compose` |
+| `crop_hints` + `compose_vertical_clip` letterbox composer | `modes/virality/runner.py::_compose` |
+| rollback switch `SONYA_CUT_PROFILE=legacy` | `scripts/shared/cut_profile.py::applies` |
 
-| Old step | Where | Why it is off |
-|---|---|---|
-| whole-video YOLO / pose / webcam / Gemini layout / lip sync | `scripts/shared/enhancers/sonya_enhancer.py` (skipped when `crop.mode=tracked`) | Desktop analyses each clip only; run 2 spent ~6 min of YOLO on a 15 min video |
-| `crop_hints` + `compose_vertical_clip` (gemini_composer, letterbox for wide shots) | `modes/virality/runner.py::_compose` legacy branch | black bars, no subtitles (run 2) |
-| `hook_mode_v1` + visual boosts when there are no ASR words | `modes/virality/runner.py::_legacy_segments` | Desktop never cuts without ASR: the job fails with `ASR_FAILED` |
-| Gemini selection (`llm=on`, `select_clips`) | `scripts/shared/cut_selection.select_clips` | the story selector + LLM editor replaced it on Desktop |
+Shared modules (`cut_selection.select_clips`, `smart_crop_adapter`, `gemini_composer`, `sonya_enhancer`,
+`legacy_gpu/*`) stay: stories, streamer, educational and trailer use them (Trailer is not touched).
 
-The code is NOT deleted: the modules are shared with other modes (stories, streamer, educational, trailer)
-that this change does not touch. Deleting anything only after the owner agrees.
+## Full copy of the old way
 
-## Rollback (no new release)
+* git tag `old-worker-way` (= 02d4cfb, before the Mac mini port), pushed to origin;
+* `/Users/agent/SONYA/archive/old-worker-way-2026-11-08.tar.gz` on the Mac mini.
 
-Set `SONYA_CUT_PROFILE=legacy` in the worker env (Vast template / `run_worker.sh`) and restart the worker:
-every virality job goes through the old path again. Unit tests of the old path run with this switch
-(`tests/test_cut_determinism.py`, `tests/test_mode_fallback_warnings.py`, `tests/test_virality_boundaries.py`).
+Rollback = deploy the previous release SHA (CUTOVER.md), not an env switch.

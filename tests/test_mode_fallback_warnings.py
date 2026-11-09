@@ -1,6 +1,6 @@
 """
-Cut (virality/hooks), Stories and Educational runners import mode classes
-that do not exist in scripts/legacy_gpu (HookMode, StoryMode +
+Stories and Educational runners import mode classes
+that do not exist in scripts/legacy_gpu (StoryMode +
 analyze_segments, EducationalMode), so today they always take their
 fallback path. These tests pin that the fallback is at least reported in
 the result's "warnings" instead of being silent. Heavy calls are
@@ -17,15 +17,9 @@ from scripts.shared.crop import smart_crop_adapter
 from scripts.shared.enhancers import sonya_enhancer
 
 
-@pytest.fixture(autouse=True)
-def _legacy_virality_path(monkeypatch):
-    """These tests pin the OLD virality path (kept for rollback): production jobs now run the Mac mini
-    recipe (scripts/shared/cut_profile.py, tests/test_cut_profile.py); SONYA_CUT_PROFILE=legacy restores it."""
-    monkeypatch.setenv("SONYA_CUT_PROFILE", "legacy")
 
 
 @pytest.mark.parametrize("mode,key", [
-    ("virality", "virality_engine_unavailable"),
     ("stories", "stories_engine_unavailable"),
     ("educational", "educational_engine_unavailable"),
 ])
@@ -40,7 +34,7 @@ def test_engine_fallback_is_reported(monkeypatch, tmp_path, mode, key):
 
 
 @pytest.mark.parametrize("mode,prefix", [
-    ("virality", "viral_clip_"), ("stories", "story_clip_"), ("educational", "edu_clip_"),
+    ("stories", "story_clip_"), ("educational", "edu_clip_"),
     ("trailer_film_breaker", "trailer_clip_"), ("streamer", "stream_clip_"),
 ])
 def test_selected_segments_json_records_intervals(monkeypatch, tmp_path, mode, prefix):
