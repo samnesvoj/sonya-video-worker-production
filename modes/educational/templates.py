@@ -1,12 +1,13 @@
 """
 templates.py — four Educational looks. One template = subtitles + overlay cards + the title, one visual system.
 
-    1 «Белый лист»  light: white plate, graphite ink, the spoken word in SONYA violet          (Onest)
-    2 «Серебро»     light: no plate, white text with a soft shadow; silver cards              (Manrope)
-    3 «Графит»      dark: graphite plate, near-white text, light-violet spoken word            (Golos Text)
-    4 «Фиолет»      bold: Dela Gothic One (owner's subtitle pick), spoken word on a violet pill (Onest cards)
+    1 «Чистый»   light minimal: white plate, near-black ink, the spoken word in clear blue        (Onest)
+    2 «Ночь»     dark contrast: black plate, warm-white ink, lime spoken word, lime label bar     (Golos Text, Unbounded)
+    3 «Яркий»    colour: big white Dela Gothic One, spoken word on a coral pill, cobalt stage      (Dela, Rubik cards)
+    4 «Журнал»   soft editorial: lilac plate, deep-indigo serif, violet spoken word               (Lora, Onest label)
 
-Owner rules (2026-11-09): no glass, no gold/beige/brown; white / silver / black + #877FC7; one dark template at least;
+Owner rules (2026-11-09): four really different looks (colour, font, character), Cyrillic-complete free fonts;
+no glass, no gold/beige/brown, no Montserrat; SONYA violet in one template at most; one dark template at least;
 text never leaves the frame; readable on a phone; no Montserrat. Motion (Emil Kowalski): a cue enters in 200 ms with
 a strong ease-out and a 10 px rise from 96 % scale, leaves faster (120 ms); nothing pops in from zero.
 
@@ -35,6 +36,15 @@ GRAPHITE = (0x17, 0x19, 0x23)
 INK = (0x1B, 0x1C, 0x26)
 SLATE = (0x3A, 0x3A, 0x47)
 MUTED = (0x6E, 0x6C, 0x7C)
+BLUE = (0x0A, 0x6C, 0xFF)          # 1 «Чистый»
+NIGHT = (0x0E, 0x0F, 0x12)         # 2 «Ночь»
+NIGHT_INK = (0xF5, 0xF5, 0xF2)
+LIME = (0xC6, 0xF1, 0x35)
+CORAL = (0xFF, 0x4F, 0x64)         # 3 «Яркий»
+COBALT = (0x24, 0x30, 0xE0)
+LILAC = (0xF1, 0xEF, 0xFA)         # 4 «Журнал»
+INDIGO = (0x22, 0x1D, 0x45)
+VIOLET_DEEP = (0x6A, 0x5F, 0xC8)
 
 ENTER_MS, EXIT_MS, RISE_PX = 200, 120, 10
 
@@ -70,33 +80,43 @@ class Template:
     label_font: str
     stage: RGB = (0xF5, 0xF5, 0xF7)        # background around a slide / board shown whole (fit layout)
     sub_stage: Optional[SubSpec] = None     # subtitles when they sit on the stage, not on the picture
+    title_border: Optional[RGB] = None      # hairline around a light title plate
+    title_radius: int = 26                  # px at 1080
+    title_bar: Optional[RGB] = None         # a short accent bar before the label (template 2)
 
 
 TEMPLATES: Dict[int, Template] = {
-    1: Template(1, "white", "Белый лист", False,
-                SubSpec("Onest-Bold.ttf", "Onest Bold", 76, INK, VIOLET, WHITE, 240),
-                "edu-white", WHITE, INK, VIOLET, "Onest-Bold.ttf", "Onest-Bold.ttf",
-                stage=(0xF2, 0xF2, 0xF5)),
-    2: Template(2, "silver", "Серебро", False,
-                SubSpec("Manrope-ExtraBold.ttf", "Manrope ExtraBold", 74, WHITE, VIOLET_LIGHT, None,
-                        shadow_alpha=150, outline=2.2, outline_color=SLATE),
-                "edu-silver", SILVER, SLATE, VIOLET, "Manrope-ExtraBold.ttf", "Manrope-ExtraBold.ttf",
-                stage=(0xE4, 0xE3, 0xE9),
-                sub_stage=SubSpec("Manrope-ExtraBold.ttf", "Manrope ExtraBold", 74, SLATE, VIOLET, None)),
-    3: Template(3, "graphite", "Графит", True,
-                SubSpec("GolosText-Bold.ttf", "Golos Text Bold", 76, (0xF4, 0xF3, 0xF8), VIOLET_LIGHT, GRAPHITE, 232),
-                "edu-graphite", GRAPHITE, (0xF4, 0xF3, 0xF8), VIOLET_LIGHT, "GolosText-Bold.ttf", "GolosText-Bold.ttf",
-                stage=(0x0E, 0x0F, 0x15),
-                sub_stage=SubSpec("GolosText-Bold.ttf", "Golos Text Bold", 76, (0xF4, 0xF3, 0xF8), VIOLET_LIGHT, None)),
-    4: Template(4, "violet", "Фиолет", False,
+    # 1 «Чистый» — светлый минимал: white plate, near-black ink, the spoken word in clear blue. Onest.
+    1: Template(1, "clean", "Чистый", False,
+                SubSpec("Onest-Bold.ttf", "Onest Bold", 76, INK, BLUE, WHITE, 255),
+                "edu-clean", WHITE, INK, BLUE, "Onest-Bold.ttf", "Onest-Bold.ttf",
+                stage=(0xF2, 0xF3, 0xF5), title_border=SILVER_LINE, title_radius=26),
+    # 2 «Ночь» — тёмный контрастный: black plate, warm-white ink, lime spoken word. Golos Text + Unbounded title.
+    2: Template(2, "night", "Ночь", True,
+                SubSpec("GolosText-Bold.ttf", "Golos Text Bold", 76, NIGHT_INK, LIME, NIGHT, 236),
+                "edu-night", NIGHT, NIGHT_INK, LIME, "Unbounded-SemiBold.ttf", "GolosText-Bold.ttf",
+                stage=(0x0B, 0x0C, 0x0E),
+                sub_stage=SubSpec("GolosText-Bold.ttf", "Golos Text Bold", 76, NIGHT_INK, LIME, None),
+                title_radius=14, title_bar=LIME),
+    # 3 «Яркий» — цветной: big white Dela Gothic One, the spoken word on a coral pill; cobalt stage. Rubik cards.
+    3: Template(3, "bright", "Яркий", False,
                 SubSpec("DelaGothicOne-Regular.ttf", "Dela Gothic One", 70, WHITE, WHITE, None,
-                        shadow_alpha=170, outline=2.0, outline_color=GRAPHITE, pill=VIOLET, pill_ink=WHITE),
-                "edu-violet", VIOLET, WHITE, (0xE9, 0xE7, 0xF8), "Unbounded-SemiBold.ttf", "Onest-Bold.ttf",
-                stage=(0xEE, 0xED, 0xF7),
-                sub_stage=SubSpec("DelaGothicOne-Regular.ttf", "Dela Gothic One", 70, INK, WHITE, None,
-                                  pill=VIOLET, pill_ink=WHITE)),
+                        shadow_alpha=170, outline=2.2, outline_color=(0x10, 0x12, 0x3A), pill=CORAL, pill_ink=WHITE),
+                "edu-bright", CORAL, WHITE, (0xFF, 0xE3, 0xE7), "DelaGothicOne-Regular.ttf", "Rubik-Bold.ttf",
+                stage=COBALT,
+                sub_stage=SubSpec("DelaGothicOne-Regular.ttf", "Dela Gothic One", 70, WHITE, WHITE, None,
+                                  pill=CORAL, pill_ink=WHITE),
+                title_radius=40),
+    # 4 «Журнал» — мягкий редакционный: lilac plate, deep-indigo serif (Lora), violet spoken word.
+    4: Template(4, "editorial", "Журнал", False,
+                SubSpec("Lora-Bold.ttf", "Lora Bold", 74, INDIGO, VIOLET_DEEP, LILAC, 255),
+                "edu-editorial", WHITE, INDIGO, VIOLET, "Lora-Bold.ttf", "Onest-Bold.ttf",
+                stage=(0xF4, 0xF2, 0xFB),
+                sub_stage=SubSpec("Lora-Bold.ttf", "Lora Bold", 74, INDIGO, VIOLET_DEEP, None),
+                title_border=(0xDD, 0xD9, 0xF2), title_radius=18),
 }
 DEFAULT_TEMPLATE = 1
+_OLD_SLUGS = {"white": "clean", "graphite": "night", "violet": "bright", "silver": "editorial"}   # first draft names
 
 
 def get_template(value: Any) -> Template:
@@ -109,8 +129,10 @@ def get_template(value: Any) -> Template:
             return TEMPLATES[n]
     except (TypeError, ValueError):
         pass
+    key = str(value or "").strip().lower()
+    key = _OLD_SLUGS.get(key, key)
     for t in TEMPLATES.values():
-        if str(value or "").strip().lower() in (t.slug, t.name.lower()):
+        if key in (t.slug, t.name.lower()):
             return t
     return TEMPLATES[DEFAULT_TEMPLATE]
 
@@ -326,12 +348,12 @@ def to_ass(cues: Sequence[Cue], tpl: Template, lay: Layout) -> str:
             x0 = (lay.width - pw) / 2
             rise = RISE_PX * u
             # soft shadow first, then the plate; both rise with the text
-            ev.append(f"Dialogue: 0,{t0},{t1},P,,0,0,0,,{{\\an7\\move({x0:.1f},{top + 8 * u + rise:.1f},{x0:.1f},"
-                      f"{top + 8 * u:.1f},0,{ENTER_MS})\\bord0\\shad0\\blur{14 * u:.1f}\\1c{_c((0, 0, 0))}"
-                      f"\\1a&H{255 - (60 if not tpl.dark else 110):02X}&{fade}\\p1}}{_rounded(pw, block_h, 26 * u)}{{\\p0}}")
+            ev.append(f"Dialogue: 0,{t0},{t1},P,,0,0,0,,{{\\an7\\move({x0:.1f},{top + 5 * u + rise:.1f},{x0:.1f},"
+                      f"{top + 5 * u:.1f},0,{ENTER_MS})\\bord0\\shad0\\blur{14 * u:.1f}\\1c{_c((0, 0, 0))}"
+                      f"\\1a&H{255 - (40 if not tpl.dark else 110):02X}&{fade}\\p1}}{_rounded(pw, block_h, tpl.title_radius * u)}{{\\p0}}")
             ev.append(f"Dialogue: 1,{t0},{t1},P,,0,0,0,,{{\\an7\\move({x0:.1f},{top + rise:.1f},{x0:.1f},{top:.1f},0,"
                       f"{ENTER_MS})\\bord0\\shad0\\blur0.6\\1c{_c(sp.plate)}\\1a&H{255 - sp.plate_alpha:02X}&{fade}\\p1}}"
-                      f"{_rounded(pw, block_h, 26 * u)}{{\\p0}}")
+                      f"{_rounded(pw, block_h, tpl.title_radius * u)}{{\\p0}}")
         for li, ln in enumerate(c.lines):
             cy = top + (pad_y if sp.plate else 0) + lh * (li + 0.5)
             parts = []
@@ -429,25 +451,31 @@ def title_image(title: str, tpl: Template, lay: Layout, part: Optional[Tuple[int
     label = f"ЧАСТЬ {part[0]} ИЗ {part[1]}" if part and part[1] > 1 else ""
     lh = int(font.size * 1.16)
     lab_h = int(24 * u * 1.9) if label else 0
-    w = int(max([font.getlength(l) for l in lines] + [lab_font.getlength(label) + 6 * u * len(label) * 0.25]) + 2 * pad)
+    w = int(max([font.getlength(l) for l in lines] + [lab_font.getlength(label) + 6 * u * len(label) * 0.25 + (38 * u if tpl.title_bar else 0)]) + 2 * pad)
     h = pad + lab_h + lh * len(lines) + int(pad * 0.85)
+    R = tpl.title_radius
     im = Image.new("RGBA", (w + 2 * sh, h + 2 * sh), (0, 0, 0, 0))
     shadow = Image.new("RGBA", im.size, (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle((sh, sh + int(8 * u), sh + w, sh + h + int(8 * u)), int(30 * u),
+    ImageDraw.Draw(shadow).rounded_rectangle((sh, sh + int(8 * u), sh + w, sh + h + int(8 * u)), int(R * u),
                                              fill=(0, 0, 0, 70 if not tpl.dark else 120))
     im.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(sh / 2)))
     k = 3
     big = Image.new("RGBA", (im.width * k, im.height * k), (0, 0, 0, 0))
     bd = ImageDraw.Draw(big)
-    bd.rounded_rectangle((sh * k, sh * k, (sh + w) * k, (sh + h) * k), int(30 * u) * k, fill=tpl.title_bg + (250,))
-    if not tpl.dark and tpl.title_bg in (WHITE, SILVER):
-        bd.rounded_rectangle((sh * k, sh * k, (sh + w) * k, (sh + h) * k), int(30 * u) * k, outline=SILVER_LINE + (255,),
+    bd.rounded_rectangle((sh * k, sh * k, (sh + w) * k, (sh + h) * k), int(R * u) * k, fill=tpl.title_bg + (250,))
+    if tpl.title_border:
+        bd.rounded_rectangle((sh * k, sh * k, (sh + w) * k, (sh + h) * k), int(R * u) * k, outline=tpl.title_border + (255,),
                              width=max(1, int(1.5 * u * k)))
     im.alpha_composite(big.resize(im.size, Image.LANCZOS))
     d = ImageDraw.Draw(im)
     y = sh + pad
     if label:
         x = sh + pad
+        if tpl.title_bar:                   # a short accent bar leads the label (template 2)
+            bh = int(lab_font.size * 0.62)
+            d.rounded_rectangle((x, y + int(lab_font.size * 0.22), x + int(26 * u), y + int(lab_font.size * 0.22) + bh),
+                                int(3 * u), fill=tpl.title_bar)
+            x += int(38 * u)
         for ch in label:                    # letter-spaced small caps label
             d.text((x, y), ch, font=lab_font, fill=tpl.title_label)
             x += lab_font.getlength(ch) + 1.5 * u

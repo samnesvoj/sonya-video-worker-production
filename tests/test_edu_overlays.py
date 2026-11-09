@@ -298,7 +298,7 @@ def test_themes_are_readable(name):
 
 def test_three_themes_only_light_and_dark_and_no_gold_or_beige():
     assert set(themes.THEMES) == {"academic-minimal", "modern-tech", "clean-whiteboard",
-                                  "edu-white", "edu-silver", "edu-graphite", "edu-violet"}
+                                  "edu-clean", "edu-night", "edu-bright", "edu-editorial"}
     lums = [themes.luminance(t.panel) for t in themes.THEMES.values()]
     assert max(lums) > 0.7 and min(lums) < 0.1
     for t in themes.THEMES.values():

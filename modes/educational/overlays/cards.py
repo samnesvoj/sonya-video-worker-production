@@ -87,6 +87,10 @@ class _Box:
                 cur = word
         if cur:
             lines.append(cur)
+        if len(lines) >= 2 and " " not in lines[-1] and " " in lines[-2]:
+            head, last = lines[-2].rsplit(" ", 1)          # no orphan word on the last line («…, квантовый / бит»)
+            if font.getlength(f"{last} {lines[-1]}") <= width:
+                lines[-2], lines[-1] = head, f"{last} {lines[-1]}"
         if len(lines) > max_lines:
             raise CardOverflow("too_many_lines")
         return lines

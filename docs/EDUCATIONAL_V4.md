@@ -25,7 +25,7 @@ Branch `feat/educational-v4` (from `origin/release/first-vast-test`, v2 overlays
 
 | param | meaning | default |
 |---|---|---|
-| `settings.edu_template` / `template` | 1 Белый лист, 2 Серебро, 3 Графит (dark), 4 Фиолет | 1 |
+| `settings.edu_template` / `template` | 1 Чистый (light, Onest, blue), 2 Ночь (dark, Golos+Unbounded, lime), 3 Яркий (cobalt+coral, Dela Gothic One), 4 Журнал (lilac, Lora serif) | 1 |
 | `settings.subtitleStyle = "none"` / `subtitles=false` | no burned subtitles | on |
 | `edu_title=false` | no title | on |
 | `llm` = `on`/`off`, `edu.editor` | Gemini editor + card planner | on when a provider is configured (same rule as Cut: `SONYA_LLM_EDITOR`) |

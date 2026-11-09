@@ -35,7 +35,7 @@ def test_four_templates_one_dark_owner_palette():
 
 
 def test_get_template_never_fails():
-    assert tp.get_template(3).id == 3 and tp.get_template("2").id == 2 and tp.get_template("graphite").id == 3
+    assert tp.get_template(3).id == 3 and tp.get_template("2").id == 2 and tp.get_template("night").id == 2 and tp.get_template("graphite").id == 2
     for bad in (None, "", 9, "glass", {"x": 1}):
         assert tp.get_template(bad).id == 1
     assert [c["id"] for c in tp.catalog()] == [1, 2, 3, 4]
@@ -215,3 +215,25 @@ def test_editor_approved_pieces_come_first():
     cfg = sl.EduConfig(max_clips=1, min_duration=15, skip_intro_sec=0, editor=True, editor_pool=10_000)
     segs, meta = sl.select_lesson_clips(words, cfg, None, editor)
     assert segs[0]["candidate_id"] == last["id"] and segs[0]["title"] == "Трение"
+
+
+def test_four_templates_are_really_different():
+    """Owner 2026-11-09: four different looks — own subtitle font, own accent, own stage; violet at most once."""
+    ts = list(tp.TEMPLATES.values())
+    assert len({t.sub.font_file for t in ts}) == 4
+    assert len({t.sub.pill or t.sub.active for t in ts}) == 4
+    assert len({t.stage for t in ts}) == 4
+    assert any(t.dark for t in ts)
+    assert sum(1 for t in ts if t.sub.active in (tp.VIOLET, tp.VIOLET_DEEP, tp.VIOLET_LIGHT)) <= 1
+    for t in ts:
+        assert "Montserrat" not in t.sub.font_file + t.title_font + t.label_font
+        assert (tp.FONTS / t.sub.font_file).exists() and (tp.FONTS / t.title_font).exists()
+
+
+def test_cyrillic_complete_fonts():
+    from fontTools.ttLib import TTFont
+    need = [chr(c) for c in range(0x410, 0x450)] + list("Ёё«»—№…")
+    files = {f for t in tp.TEMPLATES.values() for f in (t.sub.font_file, t.title_font, t.label_font)}
+    for f in files:
+        cmap = TTFont(str(tp.FONTS / f)).getBestCmap()
+        assert not [c for c in need if ord(c) not in cmap], f
