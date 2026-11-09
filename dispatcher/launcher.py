@@ -15,7 +15,7 @@ SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3
                       "TIMEWEB_GEMINI_API_KEY", "TIMEWEB_GEMINI_BASE_URL", "TIMEWEB_GEMINI_MODEL",
                       "SONYA_LLM_TIMEWEB_ENABLED", "OPENROUTER_API_KEY", "SONYA_LLM_OPENROUTER_MODEL",
                       # load tests only (not secrets): resource sampler, clips rendered in parallel inside one job
-                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS")
+                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
@@ -109,6 +109,10 @@ def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known
     """Best acceptable offer: default class first, then (cached image, Europe, time x price, faster internet).
     warm=True: only hosts that may hold the paused warm server (default class, storage <= max_storage_gb_month)."""
     skip = set(exclude)
+    if cfg.pin_machine_id:      # load tests only: one named host (any GPU/CPU class), still under the price cap
+        pinned = [o for o in offers if o.get("machine_id") == cfg.pin_machine_id and o.get("id") not in skip
+                  and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph]
+        return min(pinned, key=lambda o: Decimal(str(o.get("dph_total", 99)))) if pinned else None
     ok = [o for o in offers if offer_class(o, cfg) is not None and o.get("machine_id") not in banned_machines
           and o.get("id") not in skip and o.get("machine_id") not in skip
           and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph

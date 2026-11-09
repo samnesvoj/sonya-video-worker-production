@@ -13,9 +13,13 @@ Phases (one paid run):
   B  autoscaling: jobs_per_instance=J, max_instances=3, 6 jobs at once -> warm resume + burst creates; bursts DESTROYED after,
      warm STOPPED; wait of the last user
   C  (reference only, not for production) one "powerful" server (>=16 CPU cores, <= $0.30/h), 1 job then 3 at once
+  G  ONE named host (--machine-id, e.g. an L40S), levels --levels 1,2,4,6,8 (+ --extra-level 12 if 8 is not saturated and the
+     budget allows): per level a NEW server with jobs_per_instance = SONYA_WORKER_CONCURRENCY = level, N virality jobs at once,
+     NVENC required (readiness refuses to start without a working h264_nvenc), resource peaks from res_sampler, then destroyed.
 
   python tools/load_test.py --release-sha SHA --image IMG@sha256:.. --backend-url http://bore.pub:NNNNN --control-video k15.mp4 \
       --max-usd 1.3 --apply --confirm-spend 1.3 [--phases A,B,C] [--jobs-per-instance 2]
+  phase G:  ... --phases G --gpu L40S --machine-id 28581 --levels 1,2,4,6,8 --extra-level 12 --max-dph 1.0 --max-usd 1.7
 """
 from __future__ import annotations
 
@@ -187,6 +191,90 @@ def scenario(run: Run, stub: StubState, manager, vast, key: str, phases: set, jp
         run.phases["C"] = {"C1": c1, "C3": c3}         # the reference server is destroyed by the teardown in main()
 
 
+# ── phase G: how many videos at once on ONE (big) GPU ─────────────────────────────────────────────────────────────────
+RES_KEYS = ("vram_used_mb", "vram_total_mb", "cg_mem_mb", "ram_used_mb", "cg_cpu_cores", "cpu_pct", "load1", "gpu_util", "enc_util",
+            "ffmpeg", "tmp_gb", "disk_used_gb")
+
+
+def peaks(docs: List[dict], t0: float, t1: float) -> dict:
+    """Per-metric max of the res_sampler samples taken in [t0, t1] (one level's batch)."""
+    out: dict = {}
+    for d in docs:
+        for x in d.get("samples", []):
+            if t0 <= x.get("t", 0) <= t1:
+                out["samples"] = out.get("samples", 0) + 1
+                for k in RES_KEYS:
+                    if k in x:
+                        out[k] = max(out.get(k, x[k]), x[k])
+    return out
+
+
+def saturated(lv: dict, eff_cores: float) -> List[str]:
+    """Why a level counts as 'hit the limit' (then no bigger level is tried)."""
+    p, why = lv.get("peaks", {}), []
+    if lv["failed"]:
+        why.append(f"{lv['failed']} failed")
+    if eff_cores and p.get("cg_cpu_cores", 0) >= 0.9 * eff_cores:
+        why.append(f"CPU {p['cg_cpu_cores']:.1f}/{eff_cores:.0f} cores")
+    if p.get("vram_total_mb") and p.get("vram_used_mb", 0) >= 0.9 * p["vram_total_mb"]:
+        why.append("VRAM >= 90 %")
+    return why
+
+
+def single_gpu(run: Run, stub: StubState, manager, vast, key: str, *, gpu: str, machine_id: int, levels: List[int],
+               extra_level: int = 0, max_dph: Decimal = Decimal("1.0"), fetch_res=lambda label: [], flush_s: int = 65,
+               eff_cores: float = 0.0) -> dict:
+    """Phase G (module doc). Each level gets its OWN fresh server (concurrency = level), so idle worker processes of a bigger
+    level never inflate the peaks of a smaller one. Same host every time (pin_machine_id)."""
+    out: dict = run.phases.setdefault("G", {})     # filled level by level: an abort keeps the finished levels in the report
+    out.update(gpu=gpu, machine_id=machine_id, levels={})
+    todo = list(levels)
+    while todo:
+        n = todo.pop(0)
+        m = manager(f"sonya-g{n}-", max_instances=1, jobs_per_instance=n, warm_instances=0, default_gpus=(gpu,), fallback_gpus=(),
+                    min_vram_gb=24, max_dph=max_dph, pin_machine_id=machine_id, idle_timeout_seconds=3600, max_creates_per_hour=3,
+                    min_cpu_ram_gb=max(16, 4 * n + 4))
+        mg = [m]
+        t = run.clock()
+        ids = [stub.enqueue("virality", key, SITE_VIRALITY_PARAMS) for _ in range(n)]
+        run.say(f"G{n}: {n} virality job(s) queued for a {gpu} with {n} worker process(es)")
+        run.wait(mg, lambda: bool(m.store.all()), 5 * 60, f"G{n}: server created")
+        inst = m.store.all()[0]
+        run.wait(mg, lambda: all(stub.jobs[j]["status"] in TERMINAL for j in ids), 20 * 60 + 4 * 60 * n, f"G{n}: all {n} finished")
+        t_done = run.clock()
+        jobs = [job_times(stub, j) for j in ids]
+        claims = [h_t for j in ids for st, h_t in stub.jobs[j]["history"] if st == "claimed"]
+        ends = [next((h_t for st, h_t in reversed(stub.jobs[j]["history"]) if st in TERMINAL), t_done) for j in ids]
+        lv = {"n": n, "instance": {"id": inst.id, "label": inst.label, "gpu": inst.gpu_name, "dph": str(inst.dph_base),
+                                   "created": next((e["detail"] for e in m.store.events(inst.id) if e["event"] == "created"), {})},
+              "jobs": jobs, "failed": sum(1 for j in jobs if j["status"] != "completed"),
+              "cold_start_s": round(min(claims) - t, 1) if claims else None,          # queue -> first job claimed (boot of a new server)
+              "wall_s": round(max(ends) - min(claims), 1) if claims else None,        # first claim -> last done = the batch itself
+              "start": t, "end": t_done}
+        lv["videos_per_hour"] = round(n * 3600 / lv["wall_s"], 1) if lv["wall_s"] else None
+        run.wait(mg, lambda: run.clock() >= t_done + flush_s, flush_s + 30, f"G{n}: res_sampler flush")
+        lv["peaks"] = peaks(fetch_res(inst.label), min(claims or [t]), max(ends))
+        lv["cost_usd"] = float(sum(usage.cost_between(m.store, run.t0 - 1, run.clock(), run.clock())[k] for k in ("gpu", "disk")))
+        m._destroy(m.store.get(inst.id), run.clock(), [], reason="level_done")
+        run.wait(mg, lambda: inst.id not in {i.id for i in vast.list_instances()}, 4 * 60, f"G{n}: server destroyed")
+        out["levels"][str(n)] = lv
+        lv["limit"] = saturated(lv, eff_cores)
+        run.say(f"G{n}: wall {lv['wall_s']} s, each {[j['process_s'] for j in jobs]}, {lv['videos_per_hour']} videos/h, "
+                f"peaks {lv['peaks']}, limit {lv['limit'] or 'no'}")
+        if not todo and extra_level and n < extra_level:
+            spent = float(run.spent())
+            est = (lv["cold_start_s"] or 300) + (lv["wall_s"] or 0) * extra_level / n * 1.2 + flush_s + 120
+            est_usd = est / 3600 * float(Decimal(str(inst.dph_base)) + Decimal("0.02")) * 1.3
+            if lv["limit"]:
+                out["extra_skipped"] = f"level {n} hit the limit: {', '.join(lv['limit'])}"
+            elif spent + est_usd > run.max_usd * 0.95:
+                out["extra_skipped"] = f"budget: spent {spent:.2f} + est {est_usd:.2f} > {run.max_usd * 0.95:.2f}"
+            else:
+                todo.append(extra_level)
+            run.say(f"G: extra level {extra_level}: {out.get('extra_skipped') or 'yes'}")
+    return out
+
+
 def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--release-sha", required=True); ap.add_argument("--image", required=True); ap.add_argument("--backend-url", required=True)
@@ -194,10 +282,15 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     ap.add_argument("--max-usd", type=float, default=1.3); ap.add_argument("--confirm-spend", type=float); ap.add_argument("--apply", action="store_true")
     ap.add_argument("--max-minutes", type=float, default=150); ap.add_argument("--phases", default="A,B,C")
     ap.add_argument("--jobs-per-instance", type=int, default=0, help="phase B; 0 = the A-phase optimum")
+    ap.add_argument("--gpu", default="L40S"); ap.add_argument("--machine-id", type=int, default=0, help="phase G: the Vast machine to rent")
+    ap.add_argument("--levels", default="1,2,4,6,8"); ap.add_argument("--extra-level", type=int, default=0); ap.add_argument("--max-dph", default="1.0")
     ap.add_argument("--usd-rub", default="82.1386"); ap.add_argument("--out", type=pathlib.Path, default=ROOT / "results" / "load")
     a = ap.parse_args(argv)
-    if not (a.apply and a.confirm_spend == a.max_usd and a.max_usd <= 1.5 and _tunnel_url_ok(a.backend_url)):
-        print("needs --apply --confirm-spend == --max-usd (<= 1.5) and a valid tunnel URL: NOTHING started, NO money spent")
+    phases = set(a.phases.split(","))
+    cap = 2.0 if phases == {"G"} else 1.5           # phase G: owner budget 2026-11-09 = $2 for the whole L40S task
+    if not (a.apply and a.confirm_spend == a.max_usd and a.max_usd <= cap and _tunnel_url_ok(a.backend_url)
+            and ("G" not in phases or a.machine_id)):
+        print(f"needs --apply --confirm-spend == --max-usd (<= {cap}), a valid tunnel URL (+ --machine-id for G): NOTHING started, NO money spent")
         return 3
 
     import boto3
@@ -220,18 +313,27 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
     if a.control_video_beep:
         beep_key = f"fast-start-test/{run_id}/beep{pathlib.Path(a.control_video_beep).suffix}"
         s3.upload_file(a.control_video_beep, bucket, beep_key)
-    environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket, "SONYA_RES_SAMPLER": "1"}
+    environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket, "SONYA_RES_SAMPLER": "1",
+               **({"SONYA_REQUIRE_NVENC": "1"} if "G" in phases else {})}
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     token = static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"])
     base = dict(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_creates_per_hour=6, warm_prime=False)
 
     from dispatcher import launcher
-    probe = FleetConfig(**base)
-    offers = vast.search_offers(launcher.search_query(probe))
-    best = launcher.pick_offer(offers, probe, set(), warm=True)
+    eff_cores = 0.0
+    if "G" in phases:
+        probe = FleetConfig(**base, default_gpus=(a.gpu,), fallback_gpus=(), min_vram_gb=24, max_dph=Decimal(a.max_dph), pin_machine_id=a.machine_id,
+                            jobs_per_instance=max(int(x) for x in a.levels.split(",")))
+        best = launcher.pick_offer(vast.search_offers(launcher.search_query(probe)), probe, set())
+        if best is None:
+            print(f"machine {a.machine_id} ({a.gpu}) is not offered right now: NOTHING started"); srv.shutdown(); return 3
+        eff_cores = float(best.get("cpu_cores_effective") or 0)
+    else:
+        probe = FleetConfig(**base)
+        best = launcher.pick_offer(vast.search_offers(launcher.search_query(probe)), probe, set(), warm=True)
     if best is None:
         print("no warm-eligible RTX 3060 + modern CPU offer right now: NOTHING started"); srv.shutdown(); return 3
-    print(f"default-class offer now: {best.get('gpu_name')} + {best.get('cpu_name')} {best.get('geolocation')} ${best.get('dph_total'):.3f}/h "
+    print(f"offer now: {best.get('gpu_name')} + {best.get('cpu_name')} {best.get('geolocation')} ${best.get('dph_total'):.3f}/h "
           f"inet {best.get('inet_down'):.0f} Mbit/s storage ${best.get('storage_cost'):.3f}/GB-month")
 
     def manager(prefix: str, **over) -> FleetManager:
@@ -240,8 +342,19 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
         run.managers.append(m)
         return m
 
+    def fetch_res(label: str) -> List[dict]:
+        docs = []
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"fast-start-test/res/{label}/"):
+            docs += [json.loads(s3.get_object(Bucket=bucket, Key=o["Key"])["Body"].read()) for o in page.get("Contents", [])]
+        return docs
+
     try:
-        scenario(run, stub, manager, vast, key, set(a.phases.split(",")), a.jobs_per_instance, beep_key)
+        if "G" in phases:
+            single_gpu(run, stub, manager, vast, key, gpu=a.gpu, machine_id=a.machine_id,
+                                         levels=[int(x) for x in a.levels.split(",")], extra_level=a.extra_level,
+                                         max_dph=Decimal(a.max_dph), fetch_res=fetch_res, eff_cores=eff_cores)
+        else:
+            scenario(run, stub, manager, vast, key, phases, a.jobs_per_instance, beep_key)
     except (TimeoutError, VastError) as exc:
         run.aborted = str(exc)
         run.say(f"ABORT: {exc}")
@@ -254,12 +367,12 @@ def main(argv=None) -> int:  # pragma: no cover - needs real Vast / S3 / tunnel
                     except Exception as exc:  # noqa: BLE001
                         run.say(f"destroy failed for {i.id}: {type(exc).__name__}")
         for _ in range(24):
-            left = [i for i in vast.list_instances() if i.label.startswith(("sonya-pool-", "sonya-pwr-"))]
+            left = [i for i in vast.list_instances() if i.label.startswith(("sonya-pool-", "sonya-pwr-", "sonya-g"))]
             if not left:
                 break
             time.sleep(5)
         srv.shutdown()
-    left = [i.id for i in vast.list_instances() if i.label.startswith(("sonya-pool-", "sonya-pwr-"))]
+    left = [i.id for i in vast.list_instances() if i.label.startswith(("sonya-pool-", "sonya-pwr-", "sonya-g"))]
     labels = sorted({i.label for m in run.managers for i in m.store.all()})
     res = {}
     for lab in labels:

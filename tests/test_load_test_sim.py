@@ -91,3 +91,44 @@ def test_all_phases_finish_and_leave_only_what_teardown_removes():
     b_ev = [e for e in B["events"] if e["event"] in ("destroy_requested",)]
     last_done = max(j["total_s"] for j in B["jobs"]) + B["start"] - run.t0
     assert all(e["t"] - last_done <= 75 for e in b_ev), (b_ev, last_done)    # bursts go ~60 s after THEIR last job
+
+
+def test_phase_g_levels_on_one_pinned_host_each_level_new_server_destroyed():
+    """Phase G: one named host (L40S + EPYC, class rule bypassed), a NEW server per level with concurrency = level,
+    destroyed after each level; the extra level runs only when the last one was not saturated and the budget allows."""
+    from tools.load_test import single_gpu
+    clock = Clock()
+    vast = SimVast(clock)
+    vast.offers.append(offer(9, 28581, gpu="L40S", cpu="AMD EPYC 9334 32-Core Processor", cores=16, dph=0.80, geo="Finland, FI"))
+    stub = StubState(clock)
+    run = Run(1.7, 300, clock=clock, sleep=clock.advance, step=workers(vast, stub, clock))
+    base = dict(enabled=True, dry_run=False, image=IMAGE, release_sha=SHA, max_creates_per_hour=6, warm_prime=False)
+    created = []
+
+    def manager(prefix, **over):
+        cfg = FleetConfig(label_prefix=prefix, **{**base, **over})
+        m = FleetManager(cfg, FleetStore(str(Path(tempfile.mkdtemp()) / "f.db")), vast, stub, lambda: GH_TOKEN, ENV, clock)
+        run.managers.append(m)
+        return m
+
+    orig = vast.create
+
+    def create(offer_id, payload):
+        created.append((offer_id, payload["env"]["SONYA_WORKER_CONCURRENCY"]))
+        iid = orig(offer_id, payload)
+        if offer_id == 9:                       # the host is offered again after our destroy
+            vast.offers.append(offer(9, 28581, gpu="L40S", cpu="AMD EPYC 9334 32-Core Processor", cores=16, dph=0.80, geo="Finland, FI"))
+        return iid
+    vast.create = create
+
+    res = lambda label: [{"samples": [{"t": clock(), "cg_cpu_cores": 6.0, "vram_used_mb": 9000, "vram_total_mb": 46068}]}]
+    single_gpu(run, stub, manager, vast, "fast-start-test/x/input.mp4", gpu="L40S", machine_id=28581, levels=[1, 2, 4],
+               extra_level=6, max_dph=__import__("decimal").Decimal("1.0"), fetch_res=res, eff_cores=16.0)
+    G = run.phases["G"]
+    assert list(G["levels"]) == ["1", "2", "4", "6"] and "extra_skipped" not in G
+    assert created == [(9, "1"), (9, "2"), (9, "4"), (9, "6")]               # only the pinned host, concurrency = level
+    for n, lv in G["levels"].items():
+        assert lv["failed"] == 0 and len(lv["jobs"]) == int(n) and lv["wall_s"] > 0 and lv["cold_start_s"] >= BOOT_S
+        assert lv["instance"]["gpu"] == "L40S" and lv["limit"] == []
+    assert not vast.list_instances()                                            # every level's server is gone
+    assert all(i.state in ("destroyed", "destroying") for m in run.managers for i in m.store.all())

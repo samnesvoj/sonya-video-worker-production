@@ -83,5 +83,5 @@ def test_bad_concurrency_is_refused(tmp_path):
     bash = _bash()
     (tmp_path / "state").mkdir()
     rel = _fake_release(tmp_path, WORKER)
-    p = subprocess.run([bash, str(ROOT / "deploy/vast/run_worker.sh")], env=_env(tmp_path, rel, 9), capture_output=True, text=True, timeout=30)
-    assert p.returncode == 3 and "1..4" in p.stderr
+    p = subprocess.run([bash, str(ROOT / "deploy/vast/run_worker.sh")], env=_env(tmp_path, rel, 17), capture_output=True, text=True, timeout=30)
+    assert p.returncode == 3 and "1..16" in p.stderr

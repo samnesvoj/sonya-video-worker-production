@@ -63,6 +63,8 @@ class FleetConfig:
     max_storage_gb_month: Decimal = Decimal("0.20")  # USD per GB-month: pause cost = disk_gb x this (30 x 0.20 = $6 = ~490 RUB/month max)
     min_reliability: float = 0.98
     min_inet_down_mbps: int = 800
+    pin_machine_id: int = 0                  # LOAD TESTS ONLY (tools/load_test.py phase G): rent exactly this Vast machine, class rule
+                                             # not applied (e.g. an L40S + EPYC host). Never read from the env: production stays 0
     # Release identity (passed to the worker as env; the token is minted per instance)
     image: str = ""
     release_sha: str = ""
