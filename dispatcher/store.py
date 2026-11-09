@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS fleet_instances (
   disk_gb TEXT, release_sha TEXT, machine_id INTEGER,
   created_at REAL, running_since REAL, last_work_at REAL,
   stop_requested_at REAL, stopped_at REAL, resume_requested_at REAL, destroyed_at REAL,
-  resume_failures INTEGER NOT NULL DEFAULT 0, note TEXT
+  resume_failures INTEGER NOT NULL DEFAULT 0, note TEXT,
+  role TEXT NOT NULL DEFAULT 'burst'     -- warm: kept STOPPED between jobs | burst: created for the load, destroyed when idle
 );
 CREATE TABLE IF NOT EXISTS fleet_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS fleet_events (
 CREATE INDEX IF NOT EXISTS ix_events_inst ON fleet_events(instance_id, ts);
 CREATE TABLE IF NOT EXISTS fleet_creates (ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS bad_machines (machine_id INTEGER PRIMARY KEY, until REAL NOT NULL, reason TEXT);
+CREATE TABLE IF NOT EXISTS good_machines (machine_id INTEGER PRIMARY KEY, last_ok REAL NOT NULL);  -- booted our image there
 """
 
 STATES_BILLING_GPU = ("running", "stop_pending")          # GPU is attached and billed per second
@@ -57,6 +59,8 @@ class Inst:
     stopped_at: Optional[float]
     resume_requested_at: Optional[float]
     resume_failures: int
+    role: str = "burst"
+    note: str = ""                       # "warm_eligible": default-class host with cheap storage (may become the warm)
 
 
 def _dec(v: Any) -> Decimal:
@@ -69,6 +73,9 @@ class FleetStore:
         self._c.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._c.executescript(SCHEMA)
+        cols = {r[1] for r in self._c.execute("PRAGMA table_info(fleet_instances)")}
+        if "role" not in cols:              # a fleet.db from before the warm/burst split: every old row is burst
+            self._c.execute("ALTER TABLE fleet_instances ADD COLUMN role TEXT NOT NULL DEFAULT 'burst'")
 
     # -- helpers
     def _row_to_inst(self, r: sqlite3.Row) -> Inst:
@@ -76,7 +83,8 @@ class FleetStore:
                     dph_base=_dec(r["dph_base"]), storage_gb_month=_dec(r["storage_gb_month"]), disk_gb=_dec(r["disk_gb"]),
                     release_sha=r["release_sha"] or "", machine_id=r["machine_id"], created_at=r["created_at"],
                     running_since=r["running_since"], last_work_at=r["last_work_at"], stop_requested_at=r["stop_requested_at"],
-                    stopped_at=r["stopped_at"], resume_requested_at=r["resume_requested_at"], resume_failures=r["resume_failures"])
+                    stopped_at=r["stopped_at"], resume_requested_at=r["resume_requested_at"], resume_failures=r["resume_failures"],
+                    role=r["role"] or "burst", note=r["note"] or "")
 
     def event(self, ts: float, instance_id: Optional[int], event: str, **detail: Any) -> None:
         with self._lock:
@@ -134,6 +142,14 @@ class FleetStore:
     def ban_machine(self, machine_id: int, until: float, reason: str) -> None:
         with self._lock:
             self._c.execute("INSERT OR REPLACE INTO bad_machines VALUES (?,?,?)", (machine_id, until, reason))
+
+    def mark_good_machine(self, machine_id: int, ts: float) -> None:
+        with self._lock:
+            self._c.execute("INSERT OR REPLACE INTO good_machines VALUES (?,?)", (machine_id, ts))
+
+    def good_machines(self, since: float = 0.0) -> set:
+        with self._lock:
+            return {r[0] for r in self._c.execute("SELECT machine_id FROM good_machines WHERE last_ok>=?", (since,))}
 
     def banned_machines(self, now: float) -> set:
         with self._lock:

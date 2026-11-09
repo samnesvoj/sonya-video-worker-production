@@ -13,6 +13,13 @@ Rules
   * stopped longer than stopped_retention_seconds, or built from an older release -> DESTROY (stopped disks bill storage).
   * resume stuck in 'scheduling' longer than resume_timeout_seconds -> cancel (stop), count a failure; after
     max_resume_failures -> DESTROY and CREATE a new one.
+  * WARM / BURST (owner decision 2026-11-08): exactly cfg.warm_instances (1) instance has role "warm" - on idle it is
+    STOPPED (disk keeps image + release + models: resume ~10-40 s instead of a ~4-6 min cold start). Every other
+    instance is "burst": created for the extra load and DESTROYED (not stopped) when idle, so its disk never bills.
+    The warm is never removed by retention (only by a stale release / host error / failed resume). A warm that cannot
+    resume (GPU taken by another renter) is destroyed + its machine banned, and the next instance becomes the warm.
+    No warm at all (first start, lost, stale) and no load -> one is PRIMED: created, booted, stopped.
+    Only a default-class host with cheap storage may be the warm (launcher.warm_eligible).
 All Vast calls are no-ops in dry-run. Repeated ticks are idempotent.
 """
 from __future__ import annotations
@@ -59,7 +66,23 @@ class FleetManager:
             self._advance(inst, live.get(inst.id), snap, now, actions)
         self._demand(snap, now, actions)
         self._retention(snap, now, actions)
+        self._prime_warm(snap, now, actions)
         return actions
+
+    # ------------------------------------------------------------------ roles
+    def _warm(self, exclude: Optional[int] = None) -> List[Inst]:
+        """Instances that ARE the warm server (any live state)."""
+        return [i for i in self.store.all(("creating", "running", "stop_pending", "stopping", "stopped", "starting"))
+                if i.role == "warm" and i.id != exclude]
+
+    def _idle_action(self, inst: Inst) -> str:
+        """What an idle instance becomes: 'stop' (it is / becomes the warm) or 'destroy' (burst)."""
+        if inst.role == "warm":
+            return "stop"
+        if self.cfg.warm_instances > 0 and not self._warm(exclude=inst.id) and inst.release_sha == self.cfg.release_sha \
+                and (inst.note or "") == "warm_eligible":
+            return "stop"                                    # promoted below, in _finish_stop, after the fence
+        return "destroy" if self.cfg.warm_instances > 0 else "stop"
 
     # ------------------------------------------------------------ reconcile
     def _reconcile(self, live: Dict[int, VastInstance], now: float, actions: List[str]) -> None:
@@ -92,6 +115,8 @@ class FleetManager:
         if s in ("creating", "starting") and vs == "running":
             self.store.cas(inst.id, s, inst.generation, "running", running_since=now)
             self.store.event(now, inst.id, "running", via=s)
+            if inst.machine_id:
+                self.store.mark_good_machine(inst.machine_id, now)   # our image layers are now in this host's cache
             return
         if s in ("creating", "starting", "running") and vs != "running" and is_host_error(v.status_msg):
             # run 5 (2026-11-09): Vast showed "running" for seconds, then "created" + "failed to inject CDI devices";
@@ -171,7 +196,7 @@ class FleetManager:
             return
         if not self.store.cas(inst.id, "running", inst.generation, "stop_pending", stop_requested_at=now):
             return                                  # somebody else moved it: do nothing
-        self.store.event(now, inst.id, "stop_pending")
+        self.store.event(now, inst.id, "stop_pending", role=inst.role)
         self._finish_stop(self.store.get(inst.id), now, actions)
 
     def _finish_stop(self, inst: Inst, now: float, actions: List[str]) -> None:
@@ -181,6 +206,14 @@ class FleetManager:
             self.store.event(now, inst.id, "stop_cancelled", pending=fresh.pending)
             actions.append(f"stop_cancelled {inst.id}")
             return
+        if self._idle_action(inst) == "destroy":    # burst: never paused, its disk would keep billing
+            if self.store.cas(inst.id, "stop_pending", inst.generation, "destroying", stop_requested_at=now):
+                self._call(lambda: self.vast.destroy(inst.id), inst, now, "destroy_requested", reason="burst_idle")
+                actions.append(f"destroy {inst.id} (burst_idle)")
+            return
+        if inst.role != "warm":
+            self.store.touch(inst.id, role="warm")
+            self.store.event(now, inst.id, "warm_assigned")
         try:
             self.vast.stop(inst.id)
         except VastError as exc:
@@ -198,16 +231,17 @@ class FleetManager:
             return
         need = min(self.cfg.max_instances, math.ceil(demand / self.cfg.jobs_per_instance))
         have = len(self.store.all(("creating", "running", "starting")))
-        if have >= need:
+        waking = len(self.store.all(("stop_pending", "stopping")))   # let a stop finish, then resume the same disk
+        if have + waking >= need:
             return
-        if self.store.all(("stop_pending", "stopping")):
-            return                                  # let the stop finish, then resume the same disk
         stopped = sorted((i for i in self.store.all(("stopped",)) if i.resume_failures < self.cfg.max_resume_failures
-                          and i.release_sha == self.cfg.release_sha), key=lambda i: i.stopped_at or 0, reverse=True)
-        if stopped:
-            self._resume(stopped[0], now, actions)
-        else:
-            self._create(now, actions)
+                          and i.release_sha == self.cfg.release_sha), key=lambda i: (i.role != "warm", -(i.stopped_at or 0)))
+        used: set = set()
+        for _ in range(need - have - waking):         # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates at once
+            if stopped:
+                self._resume(stopped.pop(0), now, actions)
+            elif not self._create(now, actions, exclude=used):
+                break
 
     def _resume(self, inst: Inst, now: float, actions: List[str]) -> None:
         if self._dry_log(inst, "resume", now):
@@ -230,47 +264,77 @@ class FleetManager:
         if fails >= self.cfg.max_resume_failures:
             if inst.machine_id:            # never re-create on the machine that could not resume
                 self.store.ban_machine(inst.machine_id, now + 3600, "resume_failures")
+            if inst.role == "warm":        # host busy: the next instance becomes the warm (owner decision 2026-11-08)
+                self.store.event(now, inst.id, "warm_replaced", reason="resume_failed")
             self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails)
             self._destroy(self.store.get(inst.id), now, actions, reason="resume_failures")
         else:
             self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails, stopped_at=now)
 
-    def _create(self, now: float, actions: List[str]) -> None:
+    def _create(self, now: float, actions: List[str], *, exclude: Optional[set] = None, prime: bool = False) -> bool:
+        """One new instance. The FIRST instance while there is no warm goes to a warm-eligible host if one is offered
+        (it becomes the warm when idle); otherwise any acceptable host, as a burst. prime=True: warm-eligible only."""
         if now < self._create_backoff_until:
-            return
+            return False
         if self.store.creates_since(now - 3600) >= self.cfg.max_creates_per_hour:
             self.store.event(now, None, "create_rate_limited")
             self._create_backoff_until = now + 300
-            return
+            return False
+        exclude = set() if exclude is None else exclude
+        want_warm = self.cfg.warm_instances > 0 and not self._warm() and not any(
+            (i.note or "") == "warm_eligible" for i in self.store.all(("creating", "running", "starting")))
         try:
             launcher.validate_release(self.cfg)
-            offer = launcher.pick_offer(self.vast.search_offers(launcher.search_query(self.cfg)), self.cfg, self.store.banned_machines(now))
+            offers = self.vast.search_offers(launcher.search_query(self.cfg))
+            banned, known = self.store.banned_machines(now), self.store.good_machines(now - 30 * 86400)
+            offer = launcher.pick_offer(offers, self.cfg, banned, known, warm=True, exclude=exclude) if (want_warm or prime) else None
+            if offer is None and not prime:
+                offer = launcher.pick_offer(offers, self.cfg, banned, known, exclude=exclude)
             if offer is None:
-                raise launcher.LaunchError("no suitable offer")
+                raise launcher.LaunchError("no suitable warm-eligible offer" if prime else "no suitable offer")
+            eligible = launcher.warm_eligible(offer, self.cfg)
             label = self.cfg.label_prefix + secrets.token_hex(4)
             if self.dry:
-                if "create" not in self._dry_seen:
-                    self._dry_seen.add("create")
-                    self.store.event(now, None, "dry_run_create", offer=offer.get("id"), dph=str(offer.get("dph_total")))
-                return
+                key = "prime" if prime else "create"
+                if key not in self._dry_seen:
+                    self._dry_seen.add(key)
+                    self.store.event(now, None, f"dry_run_{key}", offer=offer.get("id"), dph=str(offer.get("dph_total")),
+                                     gpu=offer.get("gpu_name"), cpu=offer.get("cpu_name"), geo=offer.get("geolocation"))
+                return False
             payload = launcher.create_payload(self.cfg, label, self._token(), self._env)
             iid = self.vast.create(int(offer["id"]), payload)
         except (launcher.LaunchError, VastError) as exc:
-            self._create_backoff_until = now + 60
-            self.store.event(now, None, "create_failed", reason=str(exc)[:160])
-            return
+            self._create_backoff_until = now + (600 if prime else 60)
+            self.store.event(now, None, "prime_failed" if prime else "create_failed", reason=str(exc)[:160])
+            return False
+        exclude.update({offer.get("id"), offer.get("machine_id")})
         self.store.record_create(now)
         self.store.add(now, id=int(iid), label=label, state="creating", gpu_name=offer.get("gpu_name"), dph_base=offer.get("dph_base", offer.get("dph_total")),
                        storage_gb_month=offer.get("storage_cost"), disk_gb=self.cfg.disk_gb, release_sha=self.cfg.release_sha,
-                       machine_id=offer.get("machine_id"), inet_up_tb=offer.get("internet_up_cost_per_tb"), inet_down_tb=offer.get("internet_down_cost_per_tb"))
-        self.store.event(now, int(iid), "created", offer=offer.get("id"), gpu=offer.get("gpu_name"), dph_base=str(offer.get("dph_base")))
-        actions.append(f"create {iid}")
+                       machine_id=offer.get("machine_id"), inet_up_tb=offer.get("internet_up_cost_per_tb"), inet_down_tb=offer.get("internet_down_cost_per_tb"),
+                       role="warm" if prime else "burst", note="warm_eligible" if eligible else "")
+        self.store.event(now, int(iid), "created", offer=offer.get("id"), gpu=offer.get("gpu_name"), dph_base=str(offer.get("dph_base")),
+                         cpu=offer.get("cpu_name"), geo=offer.get("geolocation"), inet_down=offer.get("inet_down"),
+                         machine=offer.get("machine_id"), cached=offer.get("machine_id") in known, prime=prime, warm_eligible=eligible)
+        actions.append(f"{'prime' if prime else 'create'} {iid}")
+        return True
+
+    def _prime_warm(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
+        """No warm server at all and nothing happening -> create one; it boots (image, release, models) and is stopped
+        by the normal idle rule after boot_grace. Bounded by max_creates_per_hour and a 10 min back-off on failure."""
+        if not (self.cfg.warm_instances > 0 and self.cfg.warm_prime) or snap.pending + snap.active_total > 0:
+            return
+        if self._warm() or self.store.all(("creating", "running", "starting", "stop_pending", "stopping", "destroying")):
+            return
+        self._create(now, actions, prime=True)
 
     # ------------------------------------------------------------ retention
     def _retention(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         for inst in self.store.all(("stopped",)):
             stale = inst.release_sha != self.cfg.release_sha
-            expired = now - (inst.stopped_at or now) > self.cfg.stopped_retention_seconds
+            warm = inst.role == "warm" and self.cfg.warm_instances > 0 and not any(
+                w.stopped_at and (w.stopped_at > (inst.stopped_at or 0)) for w in self._warm(exclude=inst.id) if w.state == "stopped")
+            expired = not warm and now - (inst.stopped_at or now) > self.cfg.stopped_retention_seconds
             if (expired or stale) and snap.pending == 0:
                 self._destroy(inst, now, actions, reason="stale_release" if stale else "retention")
 

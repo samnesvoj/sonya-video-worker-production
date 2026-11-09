@@ -4,7 +4,7 @@ import pytest
 
 from dispatcher import launcher
 from dispatcher.config import FleetConfig
-from tests.fleet.fakes import ENV, GH_TOKEN, IMAGE, SHA, make
+from tests.fleet.fakes import ENV, GH_TOKEN, IMAGE, SHA, make, offer
 
 
 def run_until(mgr, clock, secs, step=10):
@@ -157,7 +157,7 @@ def test_job_during_stopping_waits_then_resumes():
 
 def test_resume_stuck_in_scheduling_falls_back_to_create_and_cleans_disk():
     mgr, vast, queue, store, clock = make({"max_resume_failures": 1})
-    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))   # the failed machine gets banned
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.12))   # the failed machine gets banned
     iid, label = boot_one(mgr, vast, queue, clock)
     queue.set("j1", "completed", label, clock())
     clock.advance(61); mgr.tick(); mgr.tick()
@@ -173,13 +173,25 @@ def test_resume_stuck_in_scheduling_falls_back_to_create_and_cleans_disk():
 
 
 def test_retention_destroys_old_stopped_instance_when_idle():
-    mgr, vast, queue, store, clock = make({"stopped_retention_seconds": 3600})
+    # warm_instances=0: the pre-warm behaviour (every stopped instance is destroyed after the retention)
+    mgr, vast, queue, store, clock = make({"stopped_retention_seconds": 3600, "warm_instances": 0})
     iid, label = boot_one(mgr, vast, queue, clock)
     queue.set("j1", "completed", label, clock())
     clock.advance(61); mgr.tick(); mgr.tick()
     clock.advance(3601)
     mgr.tick(); mgr.tick()
     assert vast.n("destroy") == 1 and store.get(iid).state == "destroyed"
+
+
+def test_retention_never_destroys_the_warm_server():
+    mgr, vast, queue, store, clock = make({"stopped_retention_seconds": 3600})
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "completed", label, clock())
+    clock.advance(61); mgr.tick(); mgr.tick()
+    assert store.get(iid).state == "stopped" and store.get(iid).role == "warm"
+    clock.advance(30 * 86400)
+    mgr.tick(); mgr.tick()
+    assert vast.n("destroy") == 0 and store.get(iid).state == "stopped"
 
 
 def test_stale_release_is_never_resumed():
@@ -247,14 +259,18 @@ def test_max_instances_cap():
     assert vast.n("create") == 1
 
 
-def test_orphan_labelled_instance_is_adopted_and_eventually_stopped():
+def test_orphan_labelled_instance_is_adopted_and_eventually_removed():
     mgr, vast, queue, store, clock = make()
     vast.inst[777] = {"label": "sonya-pool-orphan", "status": "running", "intended": "running"}
     mgr.tick()
     assert store.get(777).state == "running"
     clock.advance(700)
-    mgr.tick()
-    assert vast.n("stop") == 1
+    mgr.tick()                                     # unknown host -> burst: destroyed, never paused (its disk would bill)
+    assert vast.n("destroy") == 1 and vast.n("stop") == 0
+    mgr2, vast2, _, store2, clock2 = make({"warm_instances": 0})
+    vast2.inst[777] = {"label": "sonya-pool-orphan", "status": "running", "intended": "running"}
+    mgr2.tick(); clock2.advance(700); mgr2.tick()
+    assert vast2.n("stop") == 1
 
 
 def test_foreign_instances_are_never_touched():
@@ -292,8 +308,8 @@ def test_crash_between_cas_and_vast_call_recovers():
 
 def test_offer_choice_ranks_by_full_cost_including_disk():
     cfg = FleetConfig(image=IMAGE, release_sha=SHA, disk_gb=80)
-    cheap_gpu_dear_disk = {"id": 1, "gpu_name": "RTX 3090", "dph_total": 0.189, "dph_base": 0.18667, "storage_cost": 0.36667, "machine_id": 1}
-    dearer_gpu_cheap_disk = {"id": 2, "gpu_name": "RTX 3090", "dph_total": 0.201, "dph_base": 0.2, "storage_cost": 0.2, "machine_id": 2}
+    cheap_gpu_dear_disk = offer(1, 1, dph=0.090, storage=1.5)        # 0.087 + 1.5*80/720 = 0.254 $/h
+    dearer_gpu_cheap_disk = offer(2, 2, dph=0.110, storage=0.1)      # 0.107 + 0.011 = 0.118 $/h
     assert launcher.pick_offer([cheap_gpu_dear_disk, dearer_gpu_cheap_disk], cfg, set())["id"] == 2
     assert launcher.pick_offer([cheap_gpu_dear_disk], cfg, {1}) is None
     over = {**cheap_gpu_dear_disk, "dph_total": 0.99}
@@ -335,7 +351,7 @@ def test_two_dispatcher_processes_on_same_state_stop_once():
 
 def test_hung_worker_idle_while_jobs_wait_is_replaced_but_active_jobs_are_never_killed():
     mgr, vast, queue, store, clock = make()
-    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.25, "dph_base": 0.25})   # the stalled host gets banned
+    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.12, "dph_base": 0.12})   # the stalled host gets banned
     iid, label = boot_one(mgr, vast, queue, clock)         # j1 queued, worker never claims it
     clock.advance(600 + 400)                               # boot grace + part of stall window
     mgr.tick()
@@ -417,7 +433,7 @@ CDI_ERROR = ("Error response from daemon: failed to create task for container: f
 def test_host_that_cannot_start_the_container_is_dropped_in_a_minute_not_15():
     # run 5 (2026-11-09): Vast kept a broken-GPU contract in "created"; only create_timeout (900 s) saved it
     mgr, vast, queue, store, clock = make()
-    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))   # pricier, other machine
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.12))   # pricier, other machine
     vast.host_error = CDI_ERROR
     queue.add("j1", ts=clock())
     mgr.tick()
@@ -446,7 +462,7 @@ def test_host_error_message_on_a_running_instance_is_ignored():
 def test_running_then_created_with_host_error_is_dropped_and_banned_at_once():
     # the exact run 5 sequence: running for seconds, then "created" + CDI error
     mgr, vast, queue, store, clock = make()
-    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.21))
+    vast.offers.append(dict(vast.offers[0], id=2, machine_id=8, dph_total=0.12))
     iid, _ = boot_one(mgr, vast, queue, clock)
     vast.inst[iid].update(status="created", msg=CDI_ERROR)
     mgr.tick()
