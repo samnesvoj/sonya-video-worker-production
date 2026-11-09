@@ -196,3 +196,9 @@ def test_a_clip_never_opens_on_a_continuation():
     assert not sl._opens_cleanly("...за доходами Церкви, контроля за политикой.")
     assert not sl._opens_cleanly("и поэтому так вышло.")
     assert sl._opens_cleanly("Что же это были за реформы?") and sl._opens_cleanly("«Квант» — это порция.")
+
+
+def test_filler_openers_are_penalised():
+    a, _ = sl.completeness("Ой, ребята, да тут, а, нет, тут есть вариация. Поэтому так.")
+    b, _ = sl.completeness("Тут есть вариация начального состояния. Поэтому так.")
+    assert a < b

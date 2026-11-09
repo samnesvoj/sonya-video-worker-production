@@ -34,6 +34,7 @@ _CONCLUSION = re.compile(r"(?i)(таким образом|поэтому|зна�
                          r"то есть|в результате|именно поэтому|вот почему|это и есть|так что)")
 _NEEDS_CONTEXT = {"он", "она", "оно", "они", "его", "её", "ее", "их", "этот", "эта", "это", "эти", "этого", "такой",
                   "такая", "такие", "там", "тут", "здесь", "тогда", "тоже", "также", "кроме"}
+_FILLER = {"ой", "ну", "короче", "э", "эм", "ммм", "блин", "ладно"}
 _ALSO = {"тоже", "также", "ещё", "еще", "опять", "снова", "остальные", "второе", "второй", "третье", "третий"}
 _NO_TITLE = {"первое", "второе", "третье", "это", "он", "она", "оно", "они", "который", "которая", "так", "вот"}
 _BACK_REF = re.compile(r"(?i)(как я уже (говорил|сказал)|как мы уже|в прошлый раз|в прошлой лекции|выше мы|"
@@ -76,6 +77,9 @@ def completeness(text: str) -> Tuple[float, List[str]]:
     if _CONCLUSION.search(last_two):
         score += 0.4
         why.append("ends with a conclusion")
+    if _first_word(first) in _FILLER or len(re.findall(r"(?i)\b(ой|а|нет|ну|э|эм)\b", first[:40])) >= 3:
+        score -= 0.6
+        why.append("opens with filler / a self-correction")
     if _first_word(first) in _NEEDS_CONTEXT:
         score -= 0.5
         why.append(f"opens leaning on context «{_first_word(first)}»")
