@@ -24,7 +24,10 @@ CREATE TABLE IF NOT EXISTS fleet_instances (
   created_at REAL, running_since REAL, last_work_at REAL,
   stop_requested_at REAL, stopped_at REAL, resume_requested_at REAL, destroyed_at REAL,
   resume_failures INTEGER NOT NULL DEFAULT 0, note TEXT,
-  role TEXT NOT NULL DEFAULT 'burst'     -- warm: kept STOPPED between jobs | burst: created for the load, destroyed when idle
+  role TEXT NOT NULL DEFAULT 'burst',    -- warm: kept STOPPED between jobs | burst: created for the load, destroyed when idle
+  slots INTEGER,                         -- power servers: parallel videos counted (NULL = jobs_per_instance, default class)
+  num_gpus INTEGER NOT NULL DEFAULT 1,
+  gpu_class TEXT NOT NULL DEFAULT 'standard'   -- standard: RTX 3060 class | power: multi-GPU rush server (never the warm)
 );
 CREATE TABLE IF NOT EXISTS fleet_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,6 +64,9 @@ class Inst:
     resume_failures: int
     role: str = "burst"
     note: str = ""                       # "warm_eligible": default-class host with cheap storage (may become the warm)
+    slots: int = 0                       # parallel videos counted for it; 0 = cfg.jobs_per_instance (rows from before multi-GPU)
+    num_gpus: int = 1
+    gpu_class: str = "standard"          # "power": multi-GPU rush server, always burst
 
 
 def _dec(v: Any) -> Decimal:
@@ -76,6 +82,10 @@ class FleetStore:
         cols = {r[1] for r in self._c.execute("PRAGMA table_info(fleet_instances)")}
         if "role" not in cols:              # a fleet.db from before the warm/burst split: every old row is burst
             self._c.execute("ALTER TABLE fleet_instances ADD COLUMN role TEXT NOT NULL DEFAULT 'burst'")
+        for col, ddl in (("slots", "INTEGER"), ("num_gpus", "INTEGER NOT NULL DEFAULT 1"),   # before multi-GPU: 1 card, standard
+                         ("gpu_class", "TEXT NOT NULL DEFAULT 'standard'")):
+            if col not in cols:
+                self._c.execute(f"ALTER TABLE fleet_instances ADD COLUMN {col} {ddl}")
 
     # -- helpers
     def _row_to_inst(self, r: sqlite3.Row) -> Inst:
@@ -84,7 +94,8 @@ class FleetStore:
                     release_sha=r["release_sha"] or "", machine_id=r["machine_id"], created_at=r["created_at"],
                     running_since=r["running_since"], last_work_at=r["last_work_at"], stop_requested_at=r["stop_requested_at"],
                     stopped_at=r["stopped_at"], resume_requested_at=r["resume_requested_at"], resume_failures=r["resume_failures"],
-                    role=r["role"] or "burst", note=r["note"] or "")
+                    role=r["role"] or "burst", note=r["note"] or "", slots=r["slots"] or 0, num_gpus=r["num_gpus"] or 1,
+                    gpu_class=r["gpu_class"] or "standard")
 
     def event(self, ts: float, instance_id: Optional[int], event: str, **detail: Any) -> None:
         with self._lock:

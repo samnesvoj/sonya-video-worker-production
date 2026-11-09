@@ -20,12 +20,15 @@ Rules
     resume (GPU taken by another renter) is destroyed + its machine banned, and the next instance becomes the warm.
     No warm at all (first start, lost, stale) and no load -> one is PRIMED: created, booted, stopped.
     Only a default-class host with cheap storage may be the warm (launcher.warm_eligible).
+  * CAPACITY in video slots: demand is covered by the slots of running / booting servers (default class: jobs_per_instance
+    each, so the count is the same as before). POWER class (cfg.power_enabled, off by default): when the jobs not yet
+    covered are >= cfg.power_gap(), the next create is ONE multi-GPU server (e.g. 2x A40) with slots from its cards, CPU and
+    RAM (launcher.offer_slots); it is always a burst (destroyed when idle), never the warm. No power offer -> default class.
 All Vast calls are no-ops in dry-run. Repeated ticks are idempotent.
 """
 from __future__ import annotations
 
 import logging
-import math
 import secrets
 import time
 from typing import Callable, Dict, List, Mapping, Optional
@@ -77,8 +80,10 @@ class FleetManager:
 
     def _idle_action(self, inst: Inst) -> str:
         """What an idle instance becomes: 'stop' (it is / becomes the warm) or 'destroy' (burst)."""
-        if inst.role == "warm":
+        if inst.role == "warm" and inst.gpu_class != "power":
             return "stop"
+        if inst.gpu_class == "power":                        # a rush server never becomes the warm (pause cost, owner scheme)
+            return "destroy" if self.cfg.warm_instances > 0 else "stop"
         if self.cfg.warm_instances > 0 and not self._warm(exclude=inst.id) and inst.release_sha == self.cfg.release_sha \
                 and (inst.note or "") == "warm_eligible":
             return "stop"                                    # promoted below, in _finish_stop, after the fence
@@ -228,23 +233,33 @@ class FleetManager:
         actions.append(f"stop {inst.id}")
 
     # --------------------------------------------------------------- demand
+    def slots(self, inst: Inst) -> int:
+        """Parallel videos counted for this server (a multi-GPU power server carries more than one RTX 3060)."""
+        return inst.slots or self.cfg.jobs_per_instance
+
     def _demand(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
+        """Cover demand with SLOTS, not servers. With every server at jobs_per_instance slots this is exactly the old rule
+        need = min(max_instances, ceil(demand / jobs_per_instance)); a power server counts with its own slots."""
         demand = snap.pending + snap.active_total
         if demand <= 0:
             return
-        need = min(self.cfg.max_instances, math.ceil(demand / self.cfg.jobs_per_instance))
-        have = len(self.store.all(("creating", "running", "starting")))
-        waking = len(self.store.all(("stop_pending", "stopping")))   # let a stop finish, then resume the same disk
-        if have + waking >= need:
+        up = self.store.all(("creating", "running", "starting", "stop_pending", "stopping"))   # waking: let a stop finish,
+        count, cap = len(up), sum(self.slots(i) for i in up)                                   # then resume the same disk
+        if cap >= demand or count >= self.cfg.max_instances:
             return
         stopped = sorted((i for i in self.store.all(("stopped",)) if i.resume_failures < self.cfg.max_resume_failures
                           and i.release_sha == self.cfg.release_sha), key=lambda i: (i.role != "warm", -(i.stopped_at or 0)))
         used: set = set()
-        for _ in range(need - have - waking):         # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates at once
+        while cap < demand and count < self.cfg.max_instances:   # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates
             if stopped:
-                self._resume(stopped.pop(0), now, actions)
-            elif not self._create(now, actions, exclude=used):
-                break
+                inst = stopped.pop(0)
+                self._resume(inst, now, actions)
+                got = self.slots(inst)
+            else:
+                got = self._create(now, actions, exclude=used, gap=demand - cap)
+                if not got:
+                    break
+            cap, count = cap + got, count + 1
 
     def _resume(self, inst: Inst, now: float, actions: List[str]) -> None:
         if self._dry_log(inst, "resume", now):
@@ -274,15 +289,18 @@ class FleetManager:
         else:
             self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails, stopped_at=now)
 
-    def _create(self, now: float, actions: List[str], *, exclude: Optional[set] = None, prime: bool = False) -> bool:
-        """One new instance. The FIRST instance while there is no warm goes to a warm-eligible host if one is offered
-        (it becomes the warm when idle); otherwise any acceptable host, as a burst. prime=True: warm-eligible only."""
+    def _create(self, now: float, actions: List[str], *, exclude: Optional[set] = None, prime: bool = False,
+                gap: int = 0) -> int:
+        """One new instance -> its slots (0 = nothing created). The FIRST instance while there is no warm goes to a
+        warm-eligible host if one is offered (it becomes the warm when idle); otherwise, when the power class is on and
+        gap (jobs not covered yet) >= power_gap, a multi-GPU POWER server; otherwise any acceptable host, as a burst.
+        prime=True: warm-eligible only."""
         if now < self._create_backoff_until:
-            return False
+            return 0
         if self.store.creates_since(now - 3600) >= self.cfg.max_creates_per_hour:
             self.store.event(now, None, "create_rate_limited")
             self._create_backoff_until = now + 300
-            return False
+            return 0
         exclude = set() if exclude is None else exclude
         want_warm = self.cfg.warm_instances > 0 and not self._warm() and not any(
             (i.note or "") == "warm_eligible" for i in self.store.all(("creating", "running", "starting")))
@@ -291,36 +309,46 @@ class FleetManager:
             offers = self.vast.search_offers(launcher.search_query(self.cfg))
             banned, known = self.store.banned_machines(now), self.store.good_machines(now - 30 * 86400)
             offer = launcher.pick_offer(offers, self.cfg, banned, known, warm=True, exclude=exclude) if (want_warm or prime) else None
+            power = False
+            if offer is None and not prime and self.cfg.power_enabled and gap >= self.cfg.power_gap():
+                offer = launcher.pick_power_offer(self.vast.search_offers(launcher.power_search_query(self.cfg)), self.cfg,
+                                                  banned, known, exclude=exclude, environ=self._env)
+                power = offer is not None
             if offer is None and not prime:
                 offer = launcher.pick_offer(offers, self.cfg, banned, known, exclude=exclude)
             if offer is None:
                 raise launcher.LaunchError("no suitable warm-eligible offer" if prime else "no suitable offer")
-            eligible = launcher.warm_eligible(offer, self.cfg)
+            eligible = not power and launcher.warm_eligible(offer, self.cfg)
+            slots = launcher.offer_slots(offer, self.cfg, power=power, environ=self._env)
             label = self.cfg.label_prefix + secrets.token_hex(4)
             if self.dry:
-                key = "prime" if prime else "create"
+                key = "prime" if prime else "create_power" if power else "create"
                 if key not in self._dry_seen:
                     self._dry_seen.add(key)
                     self.store.event(now, None, f"dry_run_{key}", offer=offer.get("id"), dph=str(offer.get("dph_total")),
-                                     gpu=offer.get("gpu_name"), cpu=offer.get("cpu_name"), geo=offer.get("geolocation"))
-                return False
-            payload = launcher.create_payload(self.cfg, label, self._token(), self._env)
+                                     gpu=offer.get("gpu_name"), cpu=offer.get("cpu_name"), geo=offer.get("geolocation"),
+                                     num_gpus=launcher.num_gpus(offer), slots=slots)
+                return 0
+            payload = launcher.create_payload(self.cfg, label, self._token(), self._env, power_slots=slots if power else 0)
             iid = self.vast.create(int(offer["id"]), payload)
         except (launcher.LaunchError, VastError) as exc:
             self._create_backoff_until = now + (600 if prime else 60)
             self.store.event(now, None, "prime_failed" if prime else "create_failed", reason=str(exc)[:160])
-            return False
+            return 0
         exclude.update({offer.get("id"), offer.get("machine_id")})
         self.store.record_create(now)
         self.store.add(now, id=int(iid), label=label, state="creating", gpu_name=offer.get("gpu_name"), dph_base=offer.get("dph_base", offer.get("dph_total")),
                        storage_gb_month=offer.get("storage_cost"), disk_gb=self.cfg.disk_gb, release_sha=self.cfg.release_sha,
                        machine_id=offer.get("machine_id"), inet_up_tb=offer.get("internet_up_cost_per_tb"), inet_down_tb=offer.get("internet_down_cost_per_tb"),
-                       role="warm" if prime else "burst", note="warm_eligible" if eligible else "")
+                       role="warm" if prime else "burst", note="warm_eligible" if eligible else "",
+                       # default class: NULL = cfg.jobs_per_instance at every tick, exactly the old count
+                       slots=slots if power else None, num_gpus=launcher.num_gpus(offer), gpu_class="power" if power else "standard")
         self.store.event(now, int(iid), "created", offer=offer.get("id"), gpu=offer.get("gpu_name"), dph_base=str(offer.get("dph_base")),
                          cpu=offer.get("cpu_name"), geo=offer.get("geolocation"), inet_down=offer.get("inet_down"),
-                         machine=offer.get("machine_id"), cached=offer.get("machine_id") in known, prime=prime, warm_eligible=eligible)
-        actions.append(f"{'prime' if prime else 'create'} {iid}")
-        return True
+                         machine=offer.get("machine_id"), cached=offer.get("machine_id") in known, prime=prime, warm_eligible=eligible,
+                         num_gpus=launcher.num_gpus(offer), slots=slots, gpu_class="power" if power else "standard")
+        actions.append(f"{'prime' if prime else 'create_power' if power else 'create'} {iid}")
+        return slots
 
     def _prime_warm(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         """No warm server at all and nothing happening -> create one; it boots (image, release, models) and is stopped
