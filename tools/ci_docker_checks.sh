@@ -14,11 +14,20 @@ print("python", sys.version.split()[0], "| numpy", np.__version__, "| torch", to
 assert cv2.__version__.startswith("4."), "OpenCV must stay 4.x (Haar cascades)"
 assert hasattr(cv2, "CascadeClassifier") and cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml").empty() is False
 t = torch.from_numpy(np.ones((2, 3), dtype="float32")); assert t.sum().item() == 6 and t.numpy().shape == (2, 3)   # torch<->numpy interop
-for m in ("mediapipe", "ultralytics", "faster_whisper", "ctranslate2", "scenedetect", "boto3", "fastapi", "yaml", "openai", "google.genai", "elevenlabs", "torchaudio", "onnx", "onnxruntime", "hydra", "omegaconf", "sentencepiece", "soundfile"):
+# mediapipe + triton files are removed from the base image (tools/slim_site_packages.py; only dist-info stays): never needed
+import importlib.util as iu
+assert iu.find_spec("mediapipe") is None and iu.find_spec("triton") is None, "slimmed packages are back in the image"
+try:
+    from torch.utils._triton import has_triton
+    assert not has_triton()
+except ImportError:
+    pass
+from cv2 import FaceDetectorYN  # noqa: F401  - the Mac mini crop (YuNet) needs it
+for m in ("ultralytics", "faster_whisper", "ctranslate2", "scenedetect", "boto3", "fastapi", "yaml", "openai", "google.genai", "elevenlabs", "torchaudio", "onnx", "onnxruntime", "hydra", "omegaconf", "sentencepiece", "soundfile"):
     importlib.import_module(m)
 print("imports ok")
 PY
-ok "dependencies import together (torch/numpy/opencv/mediapipe/ultralytics/faster-whisper)"
+ok "dependencies import together (torch/numpy/opencv/ultralytics/faster-whisper); mediapipe/triton slimmed out"
 if python3 -m pip --version >/dev/null 2>&1; then CHK="python3 -m pip check"; else CHK="uv pip check"; fi   # uv venvs have no pip
 # The nvidia/cuda variant deliberately omits the pip nvidia-* wheels (the base image provides those libraries), so torch's declared
 # "requires nvidia-..." is expected there; any OTHER unmet requirement is a real conflict.
