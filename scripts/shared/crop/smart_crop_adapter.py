@@ -494,9 +494,27 @@ def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width:
                 shot["target"] = "closeup"
             shots.append(shot)
             continue
+        # two faces close together (both fit in ONE 9:16 window): a split would show the same
+        # pair twice (owner 2026-11-09: «почему в кадре два одинаковых фрагмента») → one window
+        # following the middle of the pair.
+        pair_people = sorted((main, others[0]), key=lambda c: c["cx"])
+        gap0 = abs(pair_people[1]["cx"] - pair_people[0]["cx"])
+        half_w = min(int(0.5 * H) * 9 // 8, W)   # smallest split half: 9:8 at half the source height (no face zoom)
+        if gap0 < 0.5 * half_w + 0.5 * max(pair_people[0]["w"], pair_people[1]["w"]):
+            other = others[0]
+            oxs = sorted(other["xs"])
+            def mid(t: float, cx: float, w: float) -> Tuple[float, float, float]:
+                near_o = min(oxs, key=lambda o: abs(o[0] - t)) if oxs else None
+                if near_o is None or abs(near_o[0] - t) > 1.0:
+                    return (t, cx, w)
+                return (t, (cx + near_o[1]) / 2.0, w)
+            shot["target"] = "pair"
+            keys += _follow([mid(*x) for x in main["xs"]], s0, s1, cw, max_x, dead_zone=dead_zone,
+                            hold_sec=hold_sec, move_sec=move_sec, median_window=median_window)
+            shots.append(shot)
+            continue
         # two faces: decide per moment (not per shot) — split while both are visible,
         # single while only one is, switching fast but never for a flicker < min_seg
-        pair_people = sorted((main, others[0]), key=lambda c: c["cx"])
         times = sorted({x["t"] for x in in_shot})
         seen = [{t for t, _, _ in c["xs"]} for c in pair_people]
         def near(st, t):
