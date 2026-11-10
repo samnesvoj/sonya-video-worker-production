@@ -29,13 +29,13 @@ def _signals(n, peak_at=300):
     return {"loud": loud, "pitch": [0.0] * n, "react": [0.0] * n}
 
 
-def test_candidates_start_and_end_on_sentences_within_25_60():
+def test_candidates_start_and_end_on_sentences_within_20_45():
     from scripts.shared.boundaries import normalize_words
     words, _ = normalize_words(_words())
     cands = sm.build_candidates(words, sm.MomentConfig())
     assert cands
     for c in cands:
-        assert 25.0 - 1e-6 <= c["end"] - c["start"] <= 60.0 + 1e-6
+        assert 20.0 - 1e-6 <= c["tight"] <= 45.0 + 1e-6      # length after the jump cuts
         assert c["start"] >= 120.0                       # intro skipped
         assert words[c["last"]].text.endswith((".", "!", "?", "?!")) or c["next_gap"] >= 1.2
 
@@ -46,7 +46,7 @@ def test_selection_finds_the_peak_with_room_for_the_reaction():
     assert segs and meta["selection_method"] == "local"
     best = segs[0]
     assert best["start"] < 300 < best["start"] + best["duration"] - sm.MomentConfig().tail_sec
-    assert 25 <= best["duration"] <= 60
+    assert 20 <= best["duration"] <= 60
     # the selected clips never overlap
     iv = sorted((s["start"], s["start"] + s["duration"]) for s in segs)
     assert all(a[1] <= b[0] for a, b in zip(iv, iv[1:]))
@@ -85,8 +85,10 @@ def test_editor_reorders_and_reports_cost():
         seen["n"] = len(items)
         assert all("signals" in it for it in items)
         # the editor likes the LAST candidate best
-        clips = [{"id": it["id"], "score": 90 if k == len(items) - 1 else 50, "self_contained": True,
-                  "hook": "Хук", "keywords": ["точку"], "reason": "ок"} for k, it in enumerate(items)]
+        assert all(it["phrases"] and it["phrases"][0].startswith("0) +0s") for it in items)
+        clips = [{"id": it["id"], "score": 90 if k == len(items) - 1 else 70, "clear_3s": True, "type": "эмоция",
+                  "start": 0, "end": len(it["phrases"]) - 1,
+                  "title": "Хук", "keywords": ["точку"], "why": "ок"} for k, it in enumerate(items)]
         return _Res(json.dumps({"clips": clips}))
 
     segs, meta = sm.select_moments(words, n, sig, 3, sm.MomentConfig(editor=True), chat=chat)
@@ -119,3 +121,46 @@ def test_forecast_is_far_below_cap_for_a_full_pool():
             for i in range(30)]
     msgs = sm.editor_messages(pool, 8)
     assert sm.forecast_rub(msgs, 30, sm.MomentConfig()) < 10.0
+
+
+def _strict_chat(boring_ids=(), trim_first=0):
+    def chat(msgs, **kw):
+        items = json.loads(msgs[1]["content"].split("Фрагменты:\n", 1)[1].split("\n\nВерни", 1)[0])
+        clips = []
+        for k, it in enumerate(items):
+            boring = k in boring_ids
+            clips.append({"id": it["id"], "score": 20 if boring else 80 - k, "clear_3s": not boring,
+                          "type": "скучно" if boring else "смешное", "start": trim_first,
+                          "end": len(it["phrases"]) - 1, "title": "Т", "why": "w"})
+        return _Res(json.dumps({"clips": clips}))
+    return chat
+
+
+def test_editor_drops_boring_but_keeps_min_keep():
+    n = 900
+    words = _words(n)
+    cfg = sm.MomentConfig(editor=True, min_keep=2)
+    # every candidate is «скучно» → only min_keep clips survive, the rest are rejected
+    chat = _strict_chat(boring_ids=range(100))
+    segs, meta = sm.select_moments(words, n, _signals(n), 5, cfg, chat=chat)
+    assert len(segs) == 2 and meta["editor_rejected"] >= 1
+
+
+def test_editor_trim_moves_the_start_to_a_later_phrase_and_keeps_length():
+    n = 900
+    words = _words(n)
+    cfg = sm.MomentConfig(editor=True)
+    base, _ = sm.select_moments(words, n, _signals(n), 1, cfg, chat=_strict_chat())
+    trimmed, _ = sm.select_moments(words, n, _signals(n), 1, cfg, chat=_strict_chat(trim_first=2))
+    assert trimmed[0]["start"] > base[0]["start"]
+    assert 18.0 <= trimmed[0]["tight_sec"] <= 48.0
+    assert "editor trim" in trimmed[0]["selection_reason"]
+
+
+def test_parse_editor_is_fail_closed():
+    pool = {"a": {"text": "привет мир", "sentences": [(0, 1), (2, 3)]}}
+    v = sm.parse_editor(json.dumps({"clips": [{"id": "a", "score": "x"}, {"id": "zz", "score": 99},
+                                              {"id": "a", "score": 77, "start": 9, "end": -3,
+                                               "keywords": ["мир", "чужое"], "clear_3s": "true"}]}), pool)
+    assert len(v) == 1 and v[0]["start"] == 1 and v[0]["end"] == 0 or v[0]["start"] <= v[0]["end"]
+    assert v[0]["keywords"] == ["мир"] and v[0]["clear_3s"] is False

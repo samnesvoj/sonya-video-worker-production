@@ -35,7 +35,9 @@ def test_engine_fallback_is_reported(monkeypatch, tmp_path, mode, key):
 
 @pytest.mark.parametrize("mode,prefix", [
     ("stories", "story_clip_"), ("educational", "edu_clip_"),
-    ("trailer_film_breaker", "trailer_clip_"), ("streamer", "stream_clip_"),
+    ("trailer_film_breaker", "trailer_clip_"),
+    # streamer v2 renders without compose_vertical_clip: its selected_segments.json is covered by
+    # tests/test_streamer_runner_split.py
 ])
 def test_selected_segments_json_records_intervals(monkeypatch, tmp_path, mode, prefix):
     import json

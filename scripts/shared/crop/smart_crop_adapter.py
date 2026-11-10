@@ -719,12 +719,8 @@ def _glass_graph(vf: str, mask_name: str) -> str:
             f"[gbl][gmask]alphamerge[gp];[gbase][gp]overlay=0:0:format=yuv420")
 
 
-def render_tracked(input_video_path: str, output_path: str, start_time: float, duration: float,
-                   track: Dict[str, Any], encoder_args: Optional[List[str]] = None,
-                   subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None) -> str:
-    """Single ffmpeg pass: accurate seek → crop along the track → 1080x1920
-    [→ burn-in ASS subtitles, same pass]. A failed / hung NVENC encode is re-run on libx264 (cut_profile.run_encode);
-    ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s."""
+def track_graph(track: Dict[str, Any]) -> str:
+    """The crop part of the -vf (layout → 1080x1920), without subtitles."""
     if track.get("layout") == "game":
         cx, cy, cw_, ch_ = track["cam"]
         gx, gy, gw, gh = track["game"]
@@ -769,6 +765,16 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
         parts.append(f"[top][bottom]vstack=inputs=2,drawbox=x=0:y={half_h - 3}:w=iw:h=6:color=black:t=fill[pair]")
         parts.append(f"[single][pair]overlay=0:0:enable='{enable}'")
         vf = ";".join(parts)
+    return vf
+
+
+def render_tracked(input_video_path: str, output_path: str, start_time: float, duration: float,
+                   track: Dict[str, Any], encoder_args: Optional[List[str]] = None,
+                   subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None) -> str:
+    """Single ffmpeg pass: accurate seek → crop along the track → 1080x1920
+    [→ burn-in ASS subtitles, same pass]. A failed / hung NVENC encode is re-run on libx264 (cut_profile.run_encode);
+    ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s."""
+    vf = track_graph(track)
     cwd = None
     # ffmpeg runs from the subtitle directory (below): relative source / output paths would point there
     input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
@@ -800,4 +806,155 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
         report.update(render_encoder=used, render_s=secs)
     if result.returncode != 0:
         raise RuntimeError(f"tracked crop failed: {result.stderr[-500:]}")
+    return output_path
+
+
+# ── streamer v2: jump cuts + a short ad insert, still ONE encode ────────────────────────────────────
+
+def _suffix_labels(graph: str, tag: str) -> str:
+    """Make a -vf graph's internal [labels] unique so it can be used twice in one filter_complex."""
+    return re.sub(r"\[([A-Za-z0-9_]+)\]", lambda m: f"[{m.group(1)}_{tag}]", graph)
+
+
+def _shift_keyframes(track: Dict[str, Any], pieces: List[Tuple[float, float]], clip_start: float) -> Dict[str, Any]:
+    """A moving crop (person layout) after jump cuts: keyframes / intervals from clip time to the cut timeline."""
+    from scripts.shared.jumpcut import to_output
+    src = [(a - clip_start, d) for a, d in pieces]
+
+    def kf(k):
+        out = []
+        for t, x in k:
+            o = to_output(float(t), src)
+            if o is not None:
+                out.append([o, x])
+        return out or [[0.0, k[0][1]]]
+
+    def iv(lst):
+        out = []
+        for a, b in lst:
+            oa, ob = to_output(float(a), src), to_output(float(b), src)
+            if oa is not None and ob is not None and ob > oa:
+                out.append([oa, ob])
+        return out
+    t = dict(track)
+    if t.get("keyframes"):
+        t["keyframes"] = kf(t["keyframes"])
+    if t.get("closeup"):
+        cu = dict(t["closeup"]); cu["x"] = kf(cu["x"]); cu["intervals"] = iv(cu["intervals"])
+        t["closeup"] = cu if cu["intervals"] else None
+    if t.get("split"):
+        sp = dict(t["split"]); sp["intervals"] = iv(sp["intervals"])
+        for k in ("top", "bottom"):
+            sp[k] = dict(sp[k], x=kf(sp[k]["x"]), y=kf(sp[k]["y"]))
+        t["split"] = sp if sp["intervals"] else None
+    return t
+
+
+def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[float, float]],
+                  track: Dict[str, Any], clip_start: float, *, fps: float = 30.0, has_audio: bool = True,
+                  insert: Optional[Dict[str, Any]] = None, subtitle_path: Optional[str] = None,
+                  encoder_args: Optional[List[str]] = None, report: Optional[Dict[str, Any]] = None) -> str:
+    """ONE ffmpeg pass from the original source: every piece is its own accurately seeked input (a jump cut
+    costs no re-encode), the pieces are concatenated, cropped by the track (render_tracked's graph), an optional
+    short full-screen insert (``insert`` = {"path", "at" (cut-timeline s), "dur", "gain_db", "has_audio"}) is
+    spliced in between two pieces, then subtitles (ASS on the final timeline) are burned.
+    Audio: 15 ms fades at every jump (no clicks), the insert gets ``gain_db`` (loudness-matched by the caller)
+    and 60 ms fades in / out."""
+    from scripts.shared.jumpcut import total
+    input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
+    ps = [(float(a), float(d)) for a, d in pieces if d > 0]
+    if not ps:
+        raise ValueError("no pieces to render")
+    moving = track.get("layout") not in ("game", "fit")
+    trk = _shift_keyframes(track, ps, clip_start) if moving else track
+    # split the pieces at the insert point: group A plays before the insert, group B after it
+    groups: List[List[Tuple[float, float]]] = [ps]
+    at = None
+    if insert:
+        at = float(insert["at"])
+        acc, A, B = 0.0, [], []
+        for a, d in ps:
+            if acc + d <= at + 1e-6:
+                A.append((a, d))
+            elif acc >= at - 1e-6:
+                B.append((a, d))
+            else:
+                cut = round(round((at - acc) * fps) / fps, 4)
+                if cut > 0:
+                    A.append((a, cut))
+                if d - cut > 0:
+                    B.append((a + cut, d - cut))
+            acc += d
+        if not A or not B:
+            raise ValueError("insert point outside the clip")
+        groups = [A, B]
+        at = total(A)
+    inputs: List[str] = []
+    fc: List[str] = []
+    n_in = 0
+    outs: List[str] = []
+    base_vf = track_graph(trk)
+    for gi, grp in enumerate(groups):
+        labels = []
+        for a, d in grp:
+            inputs += ["-ss", f"{a:.4f}", "-t", f"{d:.4f}", "-i", input_video_path]
+            i = n_in
+            n_in += 1
+            fc.append(f"[{i}:v]trim=duration={d:.4f},setpts=PTS-STARTPTS,fps={fps:g},format=yuv420p[pv{i}]")
+            fade = f"afade=t=in:d=0.015,afade=t=out:st={max(0.0, d - 0.015):.4f}:d=0.015"
+            src_a = f"[{i}:a]" if has_audio else f"anullsrc=r=48000:cl=stereo,"
+            fc.append(f"{src_a}atrim=duration={d:.4f},asetpts=PTS-STARTPTS,aresample=48000,"
+                      f"aformat=sample_fmts=fltp:channel_layouts=stereo,apad=whole_dur={d:.4f},{fade}[pa{i}]")
+            labels.append(f"[pv{i}][pa{i}]")
+        g = f"g{gi}"
+        fc.append(f"{''.join(labels)}concat=n={len(grp)}:v=1:a=1[cv{g}][ca{g}]")
+        off = at if (gi == 1 and moving) else 0.0
+        pre = f"setpts=PTS+{off:.4f}/TB," if off else ""
+        fc.append(f"[cv{g}]{pre}{_suffix_labels(base_vf, g)},setpts=PTS-STARTPTS,format=yuv420p,setsar=1[ov{g}]")
+        outs.append(g)
+    if insert:
+        j = n_in
+        inputs += ["-i", os.path.abspath(insert["path"])]
+        idur = float(insert["dur"])
+        fc.append(f"[{j}:v]trim=duration={idur:.4f},setpts=PTS-STARTPTS,fps={fps:g},"
+                  f"scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                  f"pad={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:(ow-iw)/2:(oh-ih)/2:color=black,format=yuv420p,setsar=1[iv]")
+        ia = f"[{j}:a]" if insert.get("has_audio", True) else "anullsrc=r=48000:cl=stereo,"
+        fc.append(f"{ia}atrim=duration={idur:.4f},asetpts=PTS-STARTPTS,aresample=48000,"
+                  f"aformat=sample_fmts=fltp:channel_layouts=stereo,volume={float(insert.get('gain_db', 0.0)):.2f}dB,"
+                  f"apad=whole_dur={idur:.4f},alimiter=limit=0.84:level=false,"          # gain up never clips (-1.5 dBFS)
+                  f"afade=t=in:d=0.06,afade=t=out:st={max(0.0, idur - 0.06):.4f}:d=0.06[ia]")
+        fc.append(f"[ovg0][cag0][iv][ia][ovg1][cag1]concat=n=3:v=1:a=1[vcat][acat]")
+    else:
+        fc.append("[ovg0]null[vcat];[cag0]anull[acat]")
+    cwd = None
+    tail = "null"
+    if subtitle_path:
+        sub = Path(subtitle_path).resolve()
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", sub.name):
+            raise ValueError(f"unsafe subtitle file name: {sub.name}")
+        cwd = str(sub.parent)
+        from scripts.shared.subtitle_styles import FONTS_DIR
+        fd = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:").replace("'", "")
+        glass = sub.with_suffix(".glass.json")
+        if glass.is_file():
+            from scripts.shared.subtitle_styles import glass_mask_ass
+            mask = sub.with_suffix(".glassmask.ass")
+            mask.write_text(glass_mask_ass(json.loads(glass.read_text(encoding="utf-8"))), encoding="utf-8")
+            tail = _glass_graph(tail, mask.name)
+        tail += f",ass=filename={sub.name}:fontsdir='{fd}'"
+    fc.append(f"[vcat]{tail},format=yuv420p[vout]")
+    graph = ";".join(fc)
+    out_dur = total(ps) + (float(insert["dur"]) if insert else 0.0)
+    from scripts.shared.cut_profile import encode_timeout, run_encode
+    make = lambda enc: [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin", *inputs,   # noqa: E731
+                        "-filter_complex", graph, "-map", "[vout]", "-map", "[acat]", *enc,
+                        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
+    enc = encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
+    result, used, secs = run_encode(make, enc, timeout=encode_timeout(out_dur), cwd=cwd, what=Path(output_path).name)
+    if report is not None:
+        report.update(render_encoder=used, render_s=secs, render_pieces=sum(len(g) for g in groups), render_inputs=n_in + (1 if insert else 0),
+                      output_duration=round(out_dur, 3))
+    if result.returncode != 0:
+        raise RuntimeError(f"pieces render failed: {result.stderr[-600:]}")
     return output_path

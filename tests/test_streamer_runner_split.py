@@ -47,14 +47,16 @@ def patched(monkeypatch, tmp_path):
     monkeypatch.setattr(ss, "audio_signals", lambda *a, **k: {"loud": loud, "pitch": [0.0] * n})
     monkeypatch.setattr(ss, "visual_signals", lambda *a, **k: {"flash": [0.0] * n, "cut": [0.0] * n})
 
-    def render(src, out, start, dur, track, subtitle_path=None, report=None):
+    def render(src, out, pieces, track, clip_start, subtitle_path=None, report=None, **kw):
+        start = pieces[0][0]
+        dur = round(pieces[-1][0] + pieces[-1][1] - start, 3)
         calls["render"].append({"start": start, "dur": dur, "layout": track.get("layout")})
         if report is not None:
             report.update(render_encoder="cpu", render_s=0.1)
         open(out, "wb").write(b"x")
         return out
 
-    monkeypatch.setattr("scripts.shared.crop.smart_crop_adapter.render_tracked", render)
+    monkeypatch.setattr("scripts.shared.crop.smart_crop_adapter.render_pieces", render)
 
     def clip_an(crop, src, start, dur):
         calls["analysis"] += 1

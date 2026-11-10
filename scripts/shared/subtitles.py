@@ -191,7 +191,8 @@ def subtitles_for_clip(raw_words: Optional[Iterable[Dict[str, Any]]], clip_start
                        centered: Optional[List[Tuple[float, float]]] = None,
                        avoid: Optional[List[List[float]]] = None, preset: Optional[str] = None,
                        keywords: Optional[List[str]] = None, hook: Optional[str] = None,
-                       font: Optional[str] = None, promo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       font: Optional[str] = None, promo: Optional[Dict[str, Any]] = None,
+                       hook_top: Optional[int] = None) -> Dict[str, Any]:
     """Write <clip>.ass for one render interval. Returns metadata; no file
     when there are no words (status says why)."""
     style = style or SubtitleStyle()
@@ -211,7 +212,8 @@ def subtitles_for_clip(raw_words: Optional[Iterable[Dict[str, Any]]], clip_start
     if preset and preset != "classic":   # trendy word-level styles (scripts/shared/subtitle_styles.py)
         from .subtitle_styles import PRESETS, to_ass as preset_ass
         ass_text = preset_ass(words, preset, clip_duration, centered=centered, avoid=avoid, base=style,
-                              keywords=keywords, hook=hook, font=font, promo=promo)
+                              keywords=keywords, hook=hook, font=font, promo=promo,
+                              **({"hook_top": hook_top} if hook_top is not None else {}))
         if promo:
             meta["promo_version"] = "promo-v1"
         if hook:

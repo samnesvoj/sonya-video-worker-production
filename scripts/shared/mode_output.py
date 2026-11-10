@@ -32,7 +32,13 @@ _BOUNDARY_KEYS = ("semantic_start", "semantic_end", "render_start", "render_end"
                   "subtitle_words", "subtitle_first_word", "subtitle_last_word", "subtitle_burn",
                   "subtitle_centered_cues", "subtitle_moved_for_text", "crop_text_zones",
                   "hook", "keywords", "editor_score", "subtitle_hook", "ad_check", "promo_version",
-                  "promo_integration", "promo_insert_at", "promo_asset_sec", "promo_asset_audio")
+                  "promo_integration", "promo_insert_at", "promo_asset_sec", "promo_asset_audio",
+                  # streamer v2 layout: where the webcam / chat / game windows are (source px)
+                  "crop_layout", "crop_cam", "crop_game", "webcam_rect", "webcam_source", "layout_chat",
+                  "game_chat_overlap", "webcam_detector_box",
+                  # streamer v2 dynamics: jump cuts, hook title, SONYA's own ad
+                  "tight_sec", "jump_cuts", "body_sec", "cut_sec", "output_duration", "render_pieces",
+                  "sonya_ad", "sonya_ad_gain_db", "clip_lufs", "ad_lufs")
 SCHEMA_VERSION = 1
 
 

@@ -54,6 +54,13 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
                             "webcam_detector": bool(params.get("webcam_detector",
                                                                _flag("STREAMER_WEBCAM_DETECTOR", "false")))}
     crop.update({k: v for k, v in (params.get("crop") or {}).items() if k in ("layout", "webcam_detector")})
+    # owner 2026-11-10: dynamic clips — pauses > 0.7 s cut out, a hook title for the first ~3 s
+    crop["jump_cuts"] = bool(params.get("jump_cuts", settings.get("jumpCuts", _flag("STREAMER_JUMP_CUTS", "true"))))
+    crop["jump_gap"] = float(params.get("jump_gap", 0.7))
+    crop["hook_title"] = bool(params.get("hook_title", settings.get("hookTitle", _flag("STREAMER_HOOK_TITLE", "true"))))
+    ad = sonya_ad_settings(params, settings)
+    if ad:
+        crop["sonya_ad"] = ad
     style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
@@ -62,15 +69,69 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
     return crop
 
 
+SONYA_AD_ASSET = "sonya_ad_streamer.mp4"        # models dir: common/sonya_ad_streamer.mp4 (mode.yaml, optional)
+
+
+def sonya_ad_settings(params: Dict[str, Any], settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """SONYA's own short ad inside each clip (owner 2026-11-10: «вставляй между делом рекламу SONYA», at ~40 %
+    of the clip on a pause between phrases). On / off: params["sonya_ad"] > settings["sonyaAd"] (site toggle) >
+    STREAMER_SONYA_AD (default off). Asset: params["sonya_ad_asset"] > STREAMER_SONYA_AD_ASSET > models dir.
+    -> {"path", "at"} or None (off, or the file is missing: the clip is rendered without it, with a warning)."""
+    on = params.get("sonya_ad", settings.get("sonyaAd"))
+    if on is None:
+        on = _flag("STREAMER_SONYA_AD", "false")
+    if isinstance(on, dict):
+        cfg, on = dict(on), on.get("enabled", True)
+    else:
+        cfg = {}
+    if not on:
+        return None
+    path = cfg.get("asset") or params.get("sonya_ad_asset") or os.environ.get("STREAMER_SONYA_AD_ASSET")
+    if not path:
+        from scripts.shared.model_paths import model_file
+        path = str(model_file("common", SONYA_AD_ASSET))
+    try:
+        at = min(0.6, max(0.25, float(cfg.get("at", params.get("sonya_ad_at", 0.4)))))
+    except (TypeError, ValueError):
+        at = 0.4
+    return {"path": str(path), "at": at}
+
+
+def _loudness(path: str, pieces: List[Any], ff: str) -> Optional[float]:
+    """Integrated loudness (LUFS) of the clip's audio pieces (ebur128), None when unknown."""
+    import re
+    import subprocess
+    vals = []
+    for a, d in pieces[:6]:
+        r = subprocess.run([ff, "-hide_banner", "-nostdin", "-ss", f"{a:.3f}", "-t", f"{d:.3f}", "-i", path, "-vn",
+                            "-af", "ebur128", "-f", "null", "-"], capture_output=True, text=True, timeout=120)
+        m = re.findall(r"I:\s+(-?[0-9.]+) LUFS", r.stderr or "")
+        if m and float(m[-1]) > -70:
+            vals.append((float(m[-1]), d))
+    if not vals:
+        return None
+    import math
+    tot = sum(d for _, d in vals)
+    return round(10 * math.log10(sum(10 ** (v / 10) * d for v, d in vals) / tot), 2)
+
+
 def _source_info(path: str) -> Dict[str, Any]:
     import subprocess
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height:format=duration", "-of", "json", path],
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                          "stream=codec_type,width,height,avg_frame_rate:format=duration", "-of", "json", path],
                          capture_output=True, text=True)
     d = json.loads(out.stdout or "{}")
-    st = (d.get("streams") or [{}])[0]
+    sts = d.get("streams") or []
+    st = next((x for x in sts if x.get("codec_type") == "video"), sts[0] if sts else {})
+    try:
+        n, _, dd = str(st.get("avg_frame_rate") or "30/1").partition("/")
+        fps = float(n) / float(dd or 1)
+    except (ValueError, ZeroDivisionError):
+        fps = 30.0
+    fps = 30.0 if not 10 <= fps <= 61 else (60.0 if fps > 45 else (30.0 if fps > 27 else fps))
     return {"width": int(st.get("width") or 0), "height": int(st.get("height") or 0),
-            "duration": float((d.get("format") or {}).get("duration") or 0.0)}
+            "duration": float((d.get("format") or {}).get("duration") or 0.0), "fps": fps,
+            "has_audio": any(x.get("codec_type") == "audio" for x in sts)}
 
 
 def _chat_path(params: Dict[str, Any], input_video_path: str) -> Optional[str]:
@@ -148,6 +209,8 @@ def analyze(
     from scripts.shared.cut_profile import editor_available
     mc = dict(params.get("moments") or {})
     mc.setdefault("editor", bool(params.get("editor", editor_available())))
+    mc.setdefault("context", str(params.get("stream_title") or params.get("title") or "")[:200])
+    mc.setdefault("jump_gap", crop["jump_gap"])
     want = int(params.get("max_clips", 5))
     pool_n = int(params.get("pool_clips", max(want, 12)))
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
@@ -168,10 +231,12 @@ def analyze(
         segments.append({"start_sec": st, "duration_sec": du, "score": float(s.get("score", 0.0)),
                          "source": s.get("source", "stream_moment"),
                          **{k: s[k] for k in ("candidate_id", "selection_reason", "hook", "keywords", "editor_score",
-                                              "peak_t", "boundary_status") if k in s},
+                                              "peak_t", "boundary_status", "tight_sec") if k in s},
+                         "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
                          "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
                                    for w in clip_words]})
     crop_hints = {"version": STREAMER_VERSION, "crop": crop, "width": info["width"], "height": info["height"],
+                  "fps": info.get("fps", 30.0), "has_audio": info.get("has_audio", True),
                   "survey": _layout_survey(input_video_path, info["duration"], work, warnings)}
     return {"segments": segments, "crop_hints": crop_hints, "warnings": warnings, "selection": selection,
             "webcam_boxes_found": 0, "active_speaker_segs": 0}
@@ -246,7 +311,7 @@ def compose_one(
     """Render ONE clip (no ASR, no whole-video analysis). Raises on failure. Updates ``segment`` in place
     with the crop / subtitle / render report (layout, webcam source, encoder, seconds)."""
     from modes.virality.runner import _clip_analysis
-    from scripts.shared.crop.smart_crop_adapter import crop_track_v2, render_tracked, text_zones
+    from scripts.shared.crop.smart_crop_adapter import crop_track_v2, text_zones
     from scripts.shared.cut_profile import ensure_render_args
     from scripts.shared.subtitles import subtitles_for_clip
 
@@ -296,20 +361,88 @@ def compose_one(
                     "crop_game": track.get("game"), "webcam_rect": track.get("webcam_rect"),
                     "game_chat_overlap": track.get("game_overlap"),
                     "crop_cache": cache, "source_width": W, "source_height": H})
+    # jump cuts: pauses > jump_gap s inside the clip are cut (a loud gap — a game event — stays)
+    from scripts.shared import jumpcut as jc
+    fps = float(hints.get("fps") or 30.0)
+    words = segment.get("words") or []
+    loud = [0.0] * int(start) + list(segment.get("loud") or [])
+    if crop.get("jump_cuts", True) and words:
+        pieces = jc.pieces(words, start, start + dur, max_gap=float(crop.get("jump_gap", 0.7)), loud=loud or None,
+                           fps=fps)
+    else:
+        pieces = [(start, dur)]
+    words_out = jc.remap_words(words, pieces)
+    body = jc.total(pieces)
+    segment.update(jump_cuts=len(pieces) - 1, body_sec=round(body, 3), cut_sec=round(dur - body, 3))
+    insert = None
+    ad = crop.get("sonya_ad")
+    if ad:
+        insert = _plan_ad(input_video_path, ad, words_out, pieces, segment)
+    if insert:                                         # words after the ad move by its length
+        words_out = [dict(w, start=w["start"] + (insert["dur"] if w["start"] >= insert["at"] else 0.0),
+                          end=w["end"] + (insert["dur"] if w["start"] >= insert["at"] else 0.0)) for w in words_out]
+    out_dur = body + (insert["dur"] if insert else 0.0)
     sub_path = None
     subs = crop.get("subtitles") or {}
     if subs.get("mode") == "burn":
         ass = Path(output_path).with_suffix(".ass")
-        sm = subtitles_for_clip(segment.get("words") or [], start, dur, ass,
-                                centered=(track.get("split") or {}).get("intervals") or track.get("seam"),
-                                avoid=zones, preset=subs.get("style"), keywords=segment.get("keywords"),
-                                hook=None, font=subs.get("font"))
+        game = track.get("layout") == "game"
+        centered = [[0.0, round(out_dur, 3)]] if game else None
+        if not game:
+            t2 = track if not crop.get("jump_cuts", True) else None
+            centered = (((t2 or {}).get("split") or {}).get("intervals") or (t2 or {}).get("seam")) if t2 else None
+        hook = (segment.get("hook") or None) if crop.get("hook_title", True) else None
+        sm = subtitles_for_clip(words_out, 0.0, out_dur, ass, centered=centered, avoid=zones,
+                                preset=subs.get("style"), keywords=segment.get("keywords"), hook=hook,
+                                font=subs.get("font"), hook_top=70 if game else None)
         burn = sm.get("subtitle_status") == "ok" and bool(subs.get("burn_supported"))
         segment["subtitle_status"] = sm.get("subtitle_status")
         segment["subtitle_burn"] = "burned" if burn else "none"
+        segment["subtitle_hook"] = sm.get("subtitle_hook")
         sub_path = str(ass) if burn else None
-    render_tracked(input_video_path, output_path, start, dur, track, subtitle_path=sub_path, report=segment)
+    from scripts.shared.crop.smart_crop_adapter import render_pieces
+    render_pieces(input_video_path, output_path, pieces, track, start, fps=fps,
+                  has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=sub_path, report=segment)
     return output_path
+
+
+def _plan_ad(video: str, ad: Dict[str, Any], words_out: List[Dict[str, Any]], pieces, segment: Dict[str, Any]
+             ) -> Optional[Dict[str, Any]]:
+    """Where and how loud the SONYA ad goes; None (with segment["sonya_ad"] = reason) when it cannot be clean."""
+    from scripts.shared import jumpcut as jc
+    from scripts.shared.promo import media_info
+    from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
+    path = ad.get("path") or ""
+    if not os.path.isfile(path):
+        segment["sonya_ad"] = "asset_missing"
+        logger.warning("[streamer] SONYA ad asset not found: %s", path)
+        return None
+    ff = ffmpeg_bin()
+    probe = os.path.join(os.path.dirname(ff), "ffprobe") if os.path.dirname(ff) else "ffprobe"
+    try:
+        info = media_info(path, probe)
+    except ValueError as exc:
+        segment["sonya_ad"] = f"asset_bad: {exc}"
+        return None
+    at = jc.pick_insert(words_out, pieces, at=float(ad.get("at", 0.4)))
+    if at is None:
+        segment["sonya_ad"] = "no_pause"
+        return None
+    clip_lufs = _loudness(video, list(pieces), ff)
+    ad_lufs = _AD_LUFS.get(path)
+    if ad_lufs is None:
+        ad_lufs = _loudness(path, [(0.0, info["duration"])], ff)
+        _AD_LUFS[path] = ad_lufs
+    # the ad plays at the clip's own loudness (never louder than -14, never more than 6 dB quieter than itself)
+    gain = 0.0
+    if clip_lufs is not None and ad_lufs is not None:
+        gain = max(-6.0, min(3.0, min(clip_lufs, -14.0) - ad_lufs))
+    segment.update(sonya_ad="inserted", promo_insert_at=round(at, 3), promo_asset_sec=round(info["duration"], 3),
+                   promo_integration="midroll", sonya_ad_gain_db=round(gain, 2), clip_lufs=clip_lufs, ad_lufs=ad_lufs)
+    return {"path": path, "at": at, "dur": round(info["duration"], 3), "gain_db": gain, "has_audio": info["has_audio"]}
+
+
+_AD_LUFS: Dict[str, Optional[float]] = {}
 
 
 def run(
@@ -347,7 +480,7 @@ def run(
             if p.exists():
                 p.unlink()
     from scripts.shared.mode_output import write_selected_segments
-    report = [{k: v for k, v in s.items() if k != "words"} for s in top]
+    report = [{k: v for k, v in s.items() if k not in ("words", "loud")} for s in top]
     write_selected_segments(output_dir, "streamer", report, done)
     if progress_callback:
         progress_callback("done", 1.0)
