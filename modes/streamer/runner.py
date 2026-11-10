@@ -63,7 +63,7 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
         crop["sonya_ad"] = ad
     # layout_template 1..5 (site choice; default 1 = webcam on top / game below), nick for template 5's caption
     from scripts.shared.crop.stream_templates import normalize_template
-    crop["layout_template"] = normalize_template(params.get("layout_template", settings.get("layoutTemplate")))
+    crop["layout_template"] = normalize_template(params.get("layout_template", settings.get("streamer_layout", settings.get("layoutTemplate"))))
     nick = params.get("streamer_name") or settings.get("streamerName")
     if nick:
         crop["streamer_name"] = str(nick)[:60]
@@ -221,7 +221,7 @@ def analyze(
     mc.setdefault("context", str(params.get("stream_title") or params.get("title") or "")[:200])
     mc.setdefault("jump_gap", crop["jump_gap"])
     _set = params.get("settings") if isinstance(params.get("settings"), dict) else {}
-    mc.setdefault("moment_types", params.get("moment_types") or _set.get("momentTypes") or [])
+    mc.setdefault("moment_types", params.get("moment_types") or _set.get("moment_types") or _set.get("momentTypes") or [])
     want = int(params.get("max_clips", 5))
     pool_n = int(params.get("pool_clips", max(want, 12)))
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
