@@ -719,9 +719,54 @@ def _glass_graph(vf: str, mask_name: str) -> str:
             f"[gbl][gmask]alphamerge[gp];[gbase][gp]overlay=0:0:format=yuv420")
 
 
+# webcam polish (owner 2026-11-10 «качество вебки плохое»): lanczos + a light luma-only unsharp after an upscale
+# (no chroma sharpening, small amount: no ringing); a light denoise first only when upscaling ≥ 1.5x (hides the
+# source's compression blocks that an upscale would magnify).
+CAM_SHARPEN = os.environ.get("STREAMER_CAM_SHARPEN", "unsharp=5:5:0.55:5:5:0")
+CAM_DENOISE = os.environ.get("STREAMER_CAM_DENOISE", "hqdn3d=1.2:1.2:3:3")
+
+
+def full_game_graph(track: Dict[str, Any]) -> str:
+    """game-v3: [top: blurred webcam backdrop + the sharp webcam, centred] over [bottom: the whole game, masks
+    blurred]. 1080 wide; the game takes game_h px at the bottom, the webcam area the rest (top_h)."""
+    cx, cy, cw_, ch_ = track["cam"]
+    sw, sh = track["cam_size"]
+    px, py = track["cam_pos"]
+    gx, gy, gw, gh = track["game"]
+    game_h, top_h = int(track["game_h"]), int(track["top_h"])
+    up = sw / float(cw_)
+    polish = []
+    if up >= 1.5 and CAM_DENOISE:
+        polish.append(CAM_DENOISE)
+    polish.append(f"scale={sw}:{sh}:flags=lanczos")
+    if up > 1.05 and CAM_SHARPEN:
+        polish.append(CAM_SHARPEN)
+    masks = track.get("game_masks") or []
+    parts = [f"split=3[fa][fb][fc]",
+             f"[fa]crop={cw_}:{ch_}:{cx}:{cy},{','.join(polish)},setsar=1[camf]",
+             # backdrop: the whole frame, blurred and dimmed (a small webcam blown up 5x as a backdrop looked odd)
+             f"[fb]scale=-2:{top_h},crop={OUTPUT_WIDTH}:{top_h},gblur=sigma=30,eq=brightness=-0.2:saturation=0.75,"
+             f"setsar=1[cbg]",
+             f"[cbg][camf]overlay={px}:{py}[top]"]
+    g = f"[fc]crop={gw}:{gh}:{gx}:{gy}"
+    if masks:
+        parts.append(f"{g},split={len(masks) + 1}[gm0]" + "".join(f"[gm{i + 1}]" for i in range(len(masks))))
+        cur = "gm0"
+        for i, (mx, my, mw, mh) in enumerate(masks):
+            parts.append(f"[gm{i + 1}]crop={mw}:{mh}:{mx}:{my},gblur=sigma=18,eq=brightness=-0.08[mb{i}]")
+            parts.append(f"[{cur}][mb{i}]overlay={mx}:{my}[go{i}]")
+            cur = f"go{i}"
+        g = f"[{cur}]null"
+    parts.append(f"{g},scale={OUTPUT_WIDTH}:{game_h}:flags=lanczos,setsar=1[gbot]")
+    parts.append(f"[top][gbot]vstack=inputs=2")
+    return ";".join(parts)
+
+
 def track_graph(track: Dict[str, Any]) -> str:
     """The crop part of the -vf (layout → 1080x1920), without subtitles."""
-    if track.get("layout") == "game":
+    if track.get("layout") == "game" and track.get("game_h"):
+        vf = full_game_graph(track)
+    elif track.get("layout") == "game":
         cx, cy, cw_, ch_ = track["cam"]
         gx, gy, gw, gh = track["game"]
         vf = (f"split=2[gc][gg];[gc]crop={cw_}:{ch_}:{cx}:{cy},scale={OUTPUT_WIDTH}:960:flags=lanczos,setsar=1[gtop];"

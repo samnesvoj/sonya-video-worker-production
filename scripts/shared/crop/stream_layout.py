@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
-VERSION = "stream-layout-v1"
+VERSION = "stream-layout-v2"
 WORK_W = 960                   # analysis width
 CELL = 24                      # chat grid cell (analysis px)
 PRESENT_MIN = 0.06             # mean share of the cell covered by small text lines
@@ -118,6 +118,11 @@ def segments(m: np.ndarray, vertical: bool, min_len: int, thr: float = 0.6, gap:
     return [tuple(o) for o in out]
 
 
+def _span_cover(seg, a: int, b: int) -> float:
+    """Share of [a, b] covered by the segment (pos, s0, s1) — ±8 px tolerance at both ends."""
+    return max(0.0, min(seg[2] + 8, b) - max(seg[1] - 8, a)) / float(max(1, b - a))
+
+
 def find_rects(maps, *, min_side: int = 40, min_cover: float = 0.55) -> List[Dict[str, Any]]:
     """Rectangles whose 4 sides are persistent lines (or the frame edge), work px. Each:
     {"rect": [x, y, w, h], "cover": min side coverage, "edges": number of sides on the frame edge}."""
@@ -137,12 +142,12 @@ def find_rects(maps, *, min_side: int = 40, min_cover: float = 0.55) -> List[Dic
             for t in hs:
                 if not (abs(t[0] - y0) <= 8 or (t[0] > y0 and t[0] < y1 - min_side)):
                     continue
-                if t[1] > l[0] + 8 or t[2] < r[0] - 8:
+                if _span_cover(t, l[0], r[0]) < 0.75:   # a chat icon / alert may break the line's end
                     continue
                 for b in hs:
                     if b[0] - t[0] < min_side or b[0] > y1 + 8:
                         continue
-                    if b[1] > l[0] + 8 or b[2] < r[0] - 8:
+                    if _span_cover(b, l[0], r[0]) < 0.75:   # a chat icon / alert may break the line's end
                         continue
                     key = (l[0] // 4, t[0] // 4, r[0] // 4, b[0] // 4)
                     if key in seen:
@@ -461,12 +466,112 @@ def _grow(b: Sequence[int], m: int, W: int, H: int) -> List[int]:
     return [x0, y0, min(W, x + w + m) - x0, min(H, y + h + m) - y0]
 
 
+# ── full-game layout (owner 2026-11-10 ~05:40 / 05:45) ──────────────────────
+# «надо чтоб ВСЮ игру было видно»: the bottom is the WHOLE game frame fit to 1080 wide (16:9 → 1080x608), only chat /
+# overlay columns at the frame edges are trimmed off; what lies ON the game (the webcam overlay, a chat box in a
+# corner) is blurred over instead of cropping half the game away. «качество вебки плохое»: the webcam is never
+# upscaled more than MAX_UPSCALE; a small camera is shown smaller, centred, on a blurred copy of itself.
+
+OUT_W, OUT_H = 1080, 1920
+MAX_UPSCALE = 2.0              # owner: «не растягивать вебку сильнее ×1.5–2»
+EDGE_TRIM_MAX = 0.17           # a chat column at the frame edge narrower than this share of the width is cut off
+MIN_TOP_H = 560                # the webcam area never gets less than this (a very tall trimmed game is capped)
+
+
+def _even(v: float) -> int:
+    return int(round(v / 2.0)) * 2
+
+
+def game_region(W: int, H: int, avoid: Sequence[Sequence[float]], *,
+                edge_trim_max: float = EDGE_TRIM_MAX) -> Tuple[List[int], List[List[int]]]:
+    """The whole game frame minus edge columns / rows that are chat or overlays.
+    -> (game box [x, y, w, h] source px, masks [[x, y, w, h]] in GAME-box px: boxes to blur over).
+    A box touching the left / right (top / bottom) edge whose width (height) is ≤ edge_trim_max of the frame is
+    trimmed off with its whole column (row); anything else (a webcam in a corner, a chat box on the game) is masked."""
+    x0, y0, x1, y1 = 0, 0, W, H
+    rest: List[Sequence[float]] = []
+    for b in avoid:
+        bx, by, bw, bh = (float(v) for v in b)
+        if bw <= 0 or bh <= 0:
+            continue
+        cuts = []
+        if bx <= 0.03 * W and bx + bw <= edge_trim_max * W:
+            cuts.append(("l", bx + bw, (bx + bw) / W))
+        if bx + bw >= 0.97 * W and W - bx <= edge_trim_max * W:
+            cuts.append(("r", bx, (W - bx) / W))
+        if by <= 0.03 * H and by + bh <= edge_trim_max * H and bw >= 0.5 * W:
+            cuts.append(("t", by + bh, (by + bh) / H))
+        if by + bh >= 0.97 * H and H - by <= edge_trim_max * H and bw >= 0.5 * W:
+            cuts.append(("b", by, (H - by) / H))
+        if not cuts:
+            rest.append(b)
+            continue
+        side, pos, _ = min(cuts, key=lambda c: c[2])
+        if side == "l":
+            x0 = max(x0, int(np.ceil(pos)))
+        elif side == "r":
+            x1 = min(x1, int(pos))
+        elif side == "t":
+            y0 = max(y0, int(np.ceil(pos)))
+        else:
+            y1 = min(y1, int(pos))
+    x0, y0 = _even(x0 + 1) if x0 else 0, _even(y0 + 1) if y0 else 0
+    gw, gh = (x1 - x0) // 2 * 2, (y1 - y0) // 2 * 2
+    masks: List[List[int]] = []
+    for b in rest:
+        bx, by, bw, bh = (float(v) for v in b)
+        mx0, my0 = max(x0, int(bx) - 4), max(y0, int(by) - 4)            # 4 px: the overlay's own frame line
+        mx1, my1 = min(x0 + gw, int(np.ceil(bx + bw)) + 4), min(y0 + gh, int(np.ceil(by + bh)) + 4)
+        if mx1 - mx0 >= 8 and my1 - my0 >= 8:
+            masks.append([(mx0 - x0) // 2 * 2, (my0 - y0) // 2 * 2, (mx1 - mx0) // 2 * 2, (my1 - my0) // 2 * 2])
+    return [x0, y0, gw, gh], masks
+
+
+def cam_fit(rect: Sequence[float], face_cx: float, top_h: int, *, out_w: int = OUT_W,
+            max_up: float = MAX_UPSCALE, min_keep: float = 0.55) -> Tuple[List[int], List[int]]:
+    """Webcam crop + its on-screen size. The crop keeps the full camera height and min_keep..100 % of its width
+    (centred on the face); its scale is ≤ max_up, ≤ out_w / crop width and ≤ top_h / crop height; the variant
+    that shows the most screen area wins (a big camera may be cropped to fill the top, a small one is never
+    stretched — it stays smaller). -> (crop [x, y, w, h] source px, size [w, h] output px)."""
+    x, y, w, h = (float(v) for v in rect)
+    best = None
+    for f in np.linspace(1.0, min_keep, 10):
+        cw = w * f
+        s = min(max_up, out_w / cw, top_h / h)
+        area = s * s * cw * h
+        if best is None or area > best[0] * 1.02:
+            best = (area, f, s)
+    _, f, s = best
+    cw = max(16, int(w * f) // 2 * 2)
+    ch = max(16, int(h) // 2 * 2)
+    cx = min(max(x, face_cx - cw / 2.0), x + w - cw)
+    crop = [int(np.ceil(cx / 2.0)) * 2, int(np.ceil(y / 2.0)) * 2, cw, ch]
+    crop[0] = min(crop[0], int(x + w - cw) // 2 * 2)
+    crop[1] = min(crop[1], int(y + h - ch) // 2 * 2)
+    size = [min(out_w, _even(cw * s)), min(top_h, _even(ch * s))]
+    return crop, size
+
+
+def full_game_geometry(W: int, H: int, cam_rect: Sequence[float], face_cx: float,
+                       avoid: Sequence[Sequence[float]], *, max_up: float = MAX_UPSCALE) -> Dict[str, Any]:
+    """Output geometry of the full-game layout: game box + masks, game height on screen, webcam crop / size /
+    position (centred in the area above the game)."""
+    game, masks = game_region(W, H, avoid)
+    game_h = min(OUT_H - MIN_TOP_H, _even(OUT_W * game[3] / float(game[2])))
+    top_h = OUT_H - game_h
+    crop, size = cam_fit(cam_rect, face_cx, top_h, max_up=max_up)
+    pos = [(OUT_W - size[0]) // 2 // 2 * 2, (top_h - size[1]) // 2 // 2 * 2]
+    return {"game": game, "game_masks": masks, "game_h": game_h, "top_h": top_h, "cam": crop, "cam_size": size,
+            "cam_pos": pos, "cam_upscale": round(size[0] / float(crop[2]), 3)}
+
+
 def stream_game_track(analysis: Optional[Dict[str, Any]], layout: Dict[str, Any], duration: float, *,
-                      width: int, height: int, survey_rects: Sequence[Dict[str, Any]] = ()) -> Optional[Dict[str, Any]]:
-    """Game layout track (same keys as smart_crop_adapter.game_track: cam / game boxes, seam) with
-    top = ONLY the webcam (the largest 1080:960 window inside its rectangle) and bottom = the game centre,
-    moved / shrunk away from chat columns and the webcam itself. None → no webcam: the caller uses the
-    person / centre crop."""
+                      width: int, height: int, survey_rects: Sequence[Dict[str, Any]] = (),
+                      max_up: float = MAX_UPSCALE) -> Optional[Dict[str, Any]]:
+    """Full-game layout track (game-v3): top = ONLY the webcam (inside its rectangle, never upscaled more than
+    max_up, on a blurred copy of itself), bottom = the WHOLE game fit to 1080 wide, edge chat columns trimmed,
+    the webcam / chat boxes on the game blurred over. Subtitles go right above the game (the seam).
+    None → no webcam: the caller uses the person / centre crop."""
     W, H = int(width), int(height)
     face = webcam_face(analysis, W, H)
     cam = layout.get("webcam")
@@ -485,19 +590,19 @@ def stream_game_track(analysis: Optional[Dict[str, Any]], layout: Dict[str, Any]
     if rect is None and face is None:
         return None
     if rect is not None:
-        fc = (face[0] + face[2] / 2, face[1] + face[3] / 2) if face is not None else \
-            (rect[0] + rect[2] / 2, rect[1] + rect[3] * 0.45)
         # a 2 px inset: the overlay's own border line stays out of the picture
-        inset = [rect[0] + 2, rect[1] + 2, rect[2] - 4, rect[3] - 4]
-        cam_box = cam_window(inset, *fc)
+        cam_rect = [rect[0] + 2, rect[1] + 2, rect[2] - 4, rect[3] - 4]
     else:
-        cam_box = fallback_cam(face, W, H, chat)
+        cam_rect = fallback_cam(face, W, H, chat, aspect=16 / 9.0)
         source = "face_window"
-    avoid = chat + [rect if rect is not None else cam_box]
-    game, cov = game_window(W, H, avoid)
-    return {"crop_version": "game-v2", "layout": "game", "crop_status": "tracked", "fallback_reason": None,
+    face_cx = face[0] + face[2] / 2 if face is not None else cam_rect[0] + cam_rect[2] / 2
+    geo = full_game_geometry(W, H, cam_rect, face_cx, chat + [rect if rect is not None else cam_rect], max_up=max_up)
+    game = geo["game"]
+    cov = sum(_overlap(game, a) for a in chat) / float(game[2] * game[3])
+    return {"crop_version": "game-v3", "layout": "game", "crop_status": "tracked", "fallback_reason": None,
             "detector": ((analysis or {}).get("meta") or {}).get("detector"), "source_width": W, "source_height": H,
-            "output_aspect": "9:16", "cam": cam_box, "game": game, "webcam_rect": rect, "webcam_source": source,
+            "output_aspect": "9:16", **geo, "webcam_rect": rect, "webcam_source": source,
             "chat_zones": layout.get("chat") or [], "game_overlap": round(cov, 3),
+            "seam_y": geo["top_h"],
             "seam": [[0.0, round(duration, 3)]], "keyframes": [[0.0, game[0]], [round(duration, 3), game[0]]],
             "cuts": (analysis or {}).get("cuts", []), "shots": [], "layout_version": VERSION}

@@ -113,7 +113,10 @@ def test_stream_game_track_uses_survey_rect_when_border_not_seen():
     assert tr["webcam_source"] == "rect:survey"
     x, y, w, h = tr["cam"]
     assert x >= 0 and y >= 0 and x + w <= 560 and y + h <= 320
-    assert sl._overlap(tr["game"], [0, 400, 300, 600]) == 0
+    # game-v3: the whole game stays; the chat box on the game (not an edge column ≤17 %) and the webcam are masked
+    assert tr["game"] == [0, 0, 1920, 1080]
+    assert any(sl._overlap(m, [0, 400, 300, 600]) > 0 for m in tr["game_masks"])
+    assert any(sl._overlap(m, [0, 0, 560, 320]) > 0 for m in tr["game_masks"])
 
 
 def test_stream_game_track_none_without_webcam():
@@ -167,3 +170,32 @@ def test_game_window_shows_less_of_a_big_top_left_webcam_than_the_centred_window
     assert cov < sl._overlap(centred, cam) / float(gw * gh)
     gx, gy, w, h = box
     assert gx + 0.2 * w <= 960 <= gx + 0.8 * w and gy + 0.2 * h <= 540 <= gy + 0.8 * h
+
+
+def test_full_game_layout_whole_game_fit_to_width():
+    """Owner 2026-11-10: «ВСЮ игру было видно» — 16:9 game → 1080x608 at the bottom, no zoom."""
+    geo = sl.full_game_geometry(1920, 1080, [1500, 700, 400, 360], 1700, [[1500, 700, 400, 360]])
+    assert geo["game"] == [0, 0, 1920, 1080] and geo["game_h"] == 608 and geo["top_h"] == 1920 - 608
+    assert geo["game_masks"]                                   # the webcam on the game is blurred, not cropped
+
+
+def test_full_game_layout_trims_edge_chat_column():
+    geo = sl.full_game_geometry(1920, 1080, [0, 0, 400, 300], 200, [[1620, 0, 300, 1080], [0, 0, 400, 300]])
+    gx, gy, gw, gh = geo["game"]
+    assert gx + gw <= 1620 and gw >= 1600                     # only the chat column went
+    assert geo["game_h"] == round(1080 * gh / gw / 2) * 2
+
+
+def test_small_webcam_is_never_stretched_over_2x():
+    """«качество вебки плохое»: a 320x180 camera is shown ≤ 2x (640 px wide), not blown up to 1080."""
+    geo = sl.full_game_geometry(1920, 1080, [0, 0, 320, 180], 160, [[0, 0, 320, 180]])
+    assert geo["cam_upscale"] <= 2.0 + 1e-6
+    assert geo["cam_size"][0] <= 2 * 320 and geo["cam_size"][0] < 1080
+    px, py = geo["cam_pos"]
+    assert abs(px + geo["cam_size"][0] / 2 - 540) <= 2         # centred
+
+
+def test_big_webcam_fills_the_top():
+    geo = sl.full_game_geometry(1920, 1080, [0, 0, 1092, 604], 546, [[0, 0, 1092, 604]])
+    assert geo["cam_size"][0] >= 1070 or geo["cam_size"][1] >= geo["top_h"] - 10
+    assert geo["cam_upscale"] <= 2.0

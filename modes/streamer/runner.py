@@ -359,6 +359,7 @@ def compose_one(
                     "crop_status": track["crop_status"], "crop_fallback_reason": track.get("fallback_reason"),
                     "webcam_source": track.get("webcam_source"), "crop_cam": track.get("cam"),
                     "crop_game": track.get("game"), "webcam_rect": track.get("webcam_rect"),
+                    "cam_upscale": track.get("cam_upscale"), "game_masks": track.get("game_masks"),
                     "game_chat_overlap": track.get("game_overlap"),
                     "crop_cache": cache, "source_width": W, "source_height": H})
     # jump cuts: pauses > jump_gap s inside the clip are cut (a loud gap — a game event — stays)
@@ -387,7 +388,9 @@ def compose_one(
     if subs.get("mode") == "burn":
         ass = Path(output_path).with_suffix(".ass")
         game = track.get("layout") == "game"
-        centered = [[0.0, round(out_dur, 3)]] if game else None
+        centered = None
+        if game:                                       # full-game layout: right above the game; old one: the seam
+            centered = [[0.0, round(out_dur, 3), track["seam_y"]]] if track.get("seam_y") else [[0.0, round(out_dur, 3)]]
         if not game:
             t2 = track if not crop.get("jump_cuts", True) else None
             centered = (((t2 or {}).get("split") or {}).get("intervals") or (t2 or {}).get("seam")) if t2 else None

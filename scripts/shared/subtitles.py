@@ -130,7 +130,17 @@ def ass_escape(text: str) -> str:
 
 def _in_any(c: Cue, intervals) -> bool:
     """Most of the cue falls inside one of the intervals."""
-    return any(min(c.end, b) - max(c.start, a) >= 0.5 * (c.end - c.start) for a, b in intervals or [])
+    return _seam_of(c, intervals) is not False
+
+
+def _seam_of(c: Cue, intervals):
+    """The interval the cue falls in (most of it): its seam y (3rd item, e.g. the top of the game in the full-game
+    streamer layout) or None (frame centre); False = in none."""
+    for iv in intervals or []:
+        a, b = iv[0], iv[1]
+        if min(c.end, b) - max(c.start, a) >= 0.5 * (c.end - c.start):
+            return iv[2] if len(iv) > 2 else None
+    return False
 
 
 def placement(c: Cue, style: SubtitleStyle, play_res: Tuple[int, int], centered, avoid) -> str:
@@ -139,7 +149,11 @@ def placement(c: Cue, style: SubtitleStyle, play_res: Tuple[int, int], centered,
     w, h = play_res
     lines = max(1, len(c.lines))
     band_h = lines * style.size * 1.25
-    if _in_any(c, centered):
+    seam = _seam_of(c, centered)
+    if seam is not False and seam is not None:      # just above the seam: the whole game stays uncovered
+        bottom = float(seam) - 22
+        top, tag = bottom - band_h, "{\\an2\\pos(%d,%d)}" % (w // 2, int(bottom))
+    elif seam is None:
         top, bottom, tag = h / 2 - band_h / 2, h / 2 + band_h / 2, "{\\an5\\pos(%d,%d)}" % (w // 2, h // 2)
     else:
         bottom = h - style.margin_v

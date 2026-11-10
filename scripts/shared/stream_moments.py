@@ -26,7 +26,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 VERSION = "stream-moments-v2"
-PROMPT_VERSION = "stream-editor-v2"
+PROMPT_VERSION = "stream-editor-v3"
 
 # signal weights for the excitement curve (all inputs are robust z-scores, clipped below)
 WEIGHTS = {"loud": 0.30, "pitch": 0.25, "rate": 0.10, "react": 0.45, "flash": 0.10, "cut": 0.10, "chat": 0.35}
@@ -252,7 +252,9 @@ def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "") ->
             "\n\nВерни JSON: {\"clips\": [{\"id\": str, \"score\": 0-100, "
             "\"type\": \"эмоция|конфликт|смешное|неожиданное|фейл|клатч|история|скучно\", "
             "\"clear_3s\": bool (понятно ли по первой фразе, что происходит и почему интересно), "
-            "\"start\": int, \"end\": int, \"title\": \"крючок-заголовок 3–6 слов по-русски, только то, что "
+            "\"start\": int, \"end\": int, "
+            "\"payoff\": int (номер фразы, где РАЗВЯЗКА/кульминация: исход, ответ, результат, главная реакция), "
+            "\"punchline\": int (номер последней ударной фразы-панчлайна, обычно ближе к концу), \"title\": \"крючок-заголовок 3–6 слов по-русски, только то, что "
             "правда есть в клипе\", \"why\": \"почему интересно, до 12 слов\", "
             "\"keywords\": [до 3 слов ИЗ ТЕКСТА]}]} — для КАЖДОГО фрагмента, по убыванию score.")
     return [{"role": "system", "content": EDITOR_SYSTEM}, {"role": "user", "content": user}]
@@ -284,10 +286,18 @@ def parse_editor(text: str, pool: Dict[str, Dict[str, Any]]) -> List[Dict[str, A
         kws = [k for k in (x.get("keywords") or [])[:3]
                if isinstance(k, str) and re.sub(r"[^\w-]", "", k).lower() in said]
         typ = str(x.get("type") or "").strip().lower()[:20]
+
+        def _idx(k):
+            try:
+                i = int(x.get(k))
+            except (TypeError, ValueError):
+                return None
+            return i if st <= i <= en else None
         out.append({"id": x["id"], "score": score, "type": typ, "clear_3s": x.get("clear_3s") is True,
                     "start": st, "end": en, "hook": str(x.get("title") or "").strip()[:60],
                     "reason": str(x.get("why") or "").strip()[:160], "keywords": kws,
-                    "self_contained": x.get("clear_3s") is True})
+                    "self_contained": x.get("clear_3s") is True,
+                    "payoff": _idx("payoff"), "punchline": _idx("punchline")})
     return out
 
 
@@ -342,6 +352,17 @@ def _editor_view(c: Dict[str, Any], words, all_sents: List[Tuple[int, int]], cfg
     while k > 0 and words[k - 1].start > c["start"] - 15.0:
         k -= 1
     c["before"] = " ".join(w.text.strip() for w in words[k:c["first"]])
+
+
+def _marks(c0: Optional[Dict[str, Any]], v: Dict[str, Any], words) -> Dict[str, Any]:
+    """Editor's payoff / punchline phrase numbers → source seconds (phrase start), for the ad-slot presets."""
+    out: Dict[str, Any] = {}
+    sents = (c0 or {}).get("sentences") or []
+    for k in ("payoff", "punchline"):
+        i = v.get(k)
+        if i is not None and 0 <= i < len(sents):
+            out[f"{k}_t"] = round(float(words[sents[i][0]].start), 3)
+    return out
 
 
 def _apply_trim(c: Dict[str, Any], v: Dict[str, Any], words, cfg: MomentConfig) -> Dict[str, Any]:
@@ -443,12 +464,14 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
                 selected=[{"id": c["id"], "start": round(c["start"], 3), "end": round(c["end"], 3),
                            "score": round(sc, 4), "reason": "; ".join(why), "text": c["text"][:300]}
                           for c, sc, why in chosen])
+    c0_by = {p["id"]: p for p, _, _ in pool}
     segs = [{"start": c["start"], "duration": c["end"] - c["start"], "score": sc,
              "source": "stream_moment:" + ("editor" if c["id"] in extras else "local"),
              "candidate_id": c["id"], "selection_reason": "; ".join(why), "peak_t": c.get("peak_t"),
              "tight_sec": c.get("tight"),
              **({"hook": extras[c["id"]]["hook"], "keywords": extras[c["id"]]["keywords"],
-                 "editor_score": extras[c["id"]]["score"]} if c["id"] in extras else {})}
+                 "editor_score": extras[c["id"]]["score"], **_marks(c0_by.get(c["id"]), extras[c["id"]], words)}
+                if c["id"] in extras else {})}
             for c, sc, why in chosen]
     return segs, meta
 
