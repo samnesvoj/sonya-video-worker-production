@@ -99,7 +99,72 @@ def test_sonya_ad_settings(monkeypatch, tmp_path):
     assert sonya_ad_settings({}, {}) is None                           # off by default in production
     assert sonya_ad_settings({}, {"sonyaAd": False}) is None
     ad = sonya_ad_settings({"sonya_ad_asset": "/x/ad.mp4"}, {"sonyaAd": True})
-    assert ad == {"path": "/x/ad.mp4", "at": 0.4}
+    assert ad == {"path": "/x/ad.mp4", "at": 0.4, "slot": "suspense"}
     assert sonya_ad_settings({"sonya_ad": {"asset": "/y.mp4", "at": 0.9}}, {})["at"] == 0.6   # clamped
     monkeypatch.setenv("STREAMER_SONYA_AD", "true")
     assert sonya_ad_settings({"sonya_ad_asset": "/x/ad.mp4"}, {})["path"] == "/x/ad.mp4"
+
+
+def test_site_never_inserts_sonya_ad_without_explicit_param(monkeypatch, tmp_path):
+    """Owner 2026-11-10 ~05:35: users in production never get the SONYA ad unless a parameter turns it on."""
+    from modes.streamer.runner import streamer_crop
+    monkeypatch.delenv("STREAMER_SONYA_AD", raising=False)
+    src = tmp_path / "s.mp4"
+    src.write_bytes(b"x")
+    for params in ({}, {"settings": {}}, {"settings": {"subtitleStyle": "classic", "jumpCuts": True}},
+                   {"settings": {"sonyaAd": None}}, {"ad_slot": "suspense"}):
+        assert "sonya_ad" not in streamer_crop(dict(params, source_sha256="0"), str(src), str(tmp_path))
+    on = streamer_crop({"source_sha256": "0", "sonya_ad": True, "sonya_ad_asset": "/a.mp4", "ad_slot": "after_hook"},
+                       str(src), str(tmp_path))
+    assert on["sonya_ad"]["slot"] == "after_hook"
+    assert streamer_crop({"source_sha256": "0", "sonya_ad": True, "sonya_ad_asset": "/a.mp4", "ad_slot": "bogus"},
+                         str(src), str(tmp_path))["sonya_ad"]["slot"] == "suspense"
+
+
+def _ws(spec):
+    """[(text, start, end)] -> words"""
+    return [{"word": t, "start": a, "end": b} for t, a, b in spec]
+
+
+SUSP = _ws([("Короче.", 0.0, 0.5), ("Смотри", 0.6, 1.0), ("что", 1.0, 1.3), ("будет.", 1.3, 1.8),
+           ("Так,", 3.2, 3.6), ("сейчас,", 3.7, 4.2), ("ну", 4.4, 4.6), ("давай,", 4.6, 5.2), ("давай.", 5.3, 6.0),
+           ("Есть!", 7.0, 7.6), ("Ахаха", 7.7, 8.6), ("убил!", 8.7, 9.4), ("Красиво.", 10.0, 10.8),
+           ("Вот", 11.5, 11.8), ("так", 11.8, 12.1), ("надо.", 12.1, 12.8), ("Учитесь.", 13.2, 14.0),
+           ("Всё.", 16.0, 16.5)])
+PS = [(0.0, 20.0)]
+
+
+def test_ad_slot_suspense_goes_right_before_the_payoff():
+    from scripts.shared import jumpcut as jc
+    t, slot, how = jc.pick_slot(SUSP, PS, slot="suspense", payoff=7.0)
+    assert slot == "suspense" and how == "editor payoff"
+    assert 6.0 <= t <= 7.0                                    # after «давай.», before «Есть!» — payoff not eaten
+    # no editor mark: the build-up words lead to the same spot
+    t2, slot2, how2 = jc.pick_slot(SUSP, PS, slot="suspense")
+    assert slot2 == "suspense" and 6.0 <= t2 <= 7.0, (t2, how2)
+
+
+def test_ad_slot_never_inside_a_word_nor_in_the_hook():
+    from scripts.shared import jumpcut as jc
+    for slot in jc.AD_SLOTS:
+        for kw in ({}, {"payoff": 1.0}, {"punchline": 19.0}, {"payoff": 7.0, "punchline": 13.2}):
+            t, _, _ = jc.pick_slot(SUSP, PS, slot=slot, **kw)
+            assert t is not None and 3.0 <= t <= 17.0
+            assert not any(w["start"] < t < w["end"] for w in SUSP), (slot, kw, t)
+
+
+def test_ad_slot_after_hook_and_before_punchline():
+    from scripts.shared import jumpcut as jc
+    t, slot, _ = jc.pick_slot(SUSP, PS, slot="after_hook")
+    assert slot == "after_hook" and 3.0 <= t <= 6.5
+    t, slot, how = jc.pick_slot(SUSP, PS, slot="before_punchline", punchline=13.2)
+    assert slot == "before_punchline" and 12.8 <= t <= 13.2
+    t, slot, how = jc.pick_slot(SUSP, PS, slot="before_punchline")
+    assert slot == "before_punchline" and how == "last phrase" and t >= 10.0
+
+
+def test_ad_slot_falls_back_to_mid_pause():
+    from scripts.shared import jumpcut as jc
+    flat = _ws([(f"слово{i}.", i * 1.0, i * 1.0 + 0.6) for i in range(20)])
+    t, slot, how = jc.pick_slot(flat, PS, slot="suspense")
+    assert slot == "mid_pause" and "fallback" in how and t is not None

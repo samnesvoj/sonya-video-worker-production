@@ -94,7 +94,10 @@ def sonya_ad_settings(params: Dict[str, Any], settings: Dict[str, Any]) -> Optio
         at = min(0.6, max(0.25, float(cfg.get("at", params.get("sonya_ad_at", 0.4)))))
     except (TypeError, ValueError):
         at = 0.4
-    return {"path": str(path), "at": at}
+    from scripts.shared.jumpcut import AD_SLOTS, DEFAULT_AD_SLOT
+    slot = str(cfg.get("slot") or params.get("ad_slot") or settings.get("adSlot")
+               or os.environ.get("STREAMER_AD_SLOT") or DEFAULT_AD_SLOT).strip().lower()
+    return {"path": str(path), "at": at, "slot": slot if slot in AD_SLOTS else DEFAULT_AD_SLOT}
 
 
 def _loudness(path: str, pieces: List[Any], ff: str) -> Optional[float]:
@@ -227,11 +230,14 @@ def analyze(
         if s.get("boundary_status") == "dropped_overlap":
             continue
         st, du = float(s["start"]), float(s["duration"])
-        clip_words = [w for w in words if float(w.get("end", 0)) > st - 0.5 and float(w.get("start", 0)) < st + du + 0.5]
+        li = s.get("lead_in")
+        clip_words = [w for w in words if (float(w.get("end", 0)) > st - 0.5 and float(w.get("start", 0)) < st + du + 0.5)
+                      or (li and float(w.get("end", 0)) > li[0] - 0.3 and float(w.get("start", 0)) < li[1] + 0.3)]
         segments.append({"start_sec": st, "duration_sec": du, "score": float(s.get("score", 0.0)),
                          "source": s.get("source", "stream_moment"),
                          **{k: s[k] for k in ("candidate_id", "selection_reason", "hook", "keywords", "editor_score",
-                                              "peak_t", "boundary_status", "tight_sec") if k in s},
+                                              "peak_t", "boundary_status", "tight_sec", "payoff_t", "punchline_t",
+                                              "category", "moment_type", "lead_in") if k in s},
                          "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
                          "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
                                    for w in clip_words]})
@@ -372,6 +378,14 @@ def compose_one(
                            fps=fps)
     else:
         pieces = [(start, dur)]
+    li = segment.get("lead_in")
+    if li and track.get("layout") == "game" and float(li[1]) < start - 0.5:
+        # guest lead-in («сейчас к нам зайдёт…») said earlier: it plays first, the waiting in between is cut
+        a0, b0 = max(0.0, float(li[0]) - 0.1), float(li[1]) + 0.15
+        lead = (jc.pieces(words, a0, b0, max_gap=float(crop.get("jump_gap", 0.7)), fps=fps)
+                if crop.get("jump_cuts", True) and words else [(round(a0, 4), round(b0 - a0, 4))])
+        pieces = lead + pieces
+        segment["lead_in_sec"] = round(jc.total(lead), 3)
     words_out = jc.remap_words(words, pieces)
     body = jc.total(pieces)
     segment.update(jump_cuts=len(pieces) - 1, body_sec=round(body, 3), cut_sec=round(dur - body, 3))
@@ -427,7 +441,13 @@ def _plan_ad(video: str, ad: Dict[str, Any], words_out: List[Dict[str, Any]], pi
     except ValueError as exc:
         segment["sonya_ad"] = f"asset_bad: {exc}"
         return None
-    at = jc.pick_insert(words_out, pieces, at=float(ad.get("at", 0.4)))
+    def out_t(k):
+        v = segment.get(k)
+        return jc.to_output(float(v), pieces) if v is not None else None
+    at, slot, how = jc.pick_slot(words_out, pieces, slot=str(ad.get("slot") or jc.DEFAULT_AD_SLOT),
+                                 payoff=out_t("payoff_t"), punchline=out_t("punchline_t"), peak=out_t("peak_t"),
+                                 at=float(ad.get("at", 0.4)))
+    segment.update(ad_slot_requested=ad.get("slot"), ad_slot=slot, ad_slot_how=how)
     if at is None:
         segment["sonya_ad"] = "no_pause"
         return None

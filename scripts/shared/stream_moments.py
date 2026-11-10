@@ -89,12 +89,14 @@ def _sentences(words) -> List[Tuple[int, int]]:
     return group_sentences(words, pause_sec=1.2)
 
 
-def build_candidates(words, cfg: MomentConfig) -> List[Dict[str, Any]]:
+def build_candidates(words, cfg: MomentConfig, hits=None) -> List[Dict[str, Any]]:
     from .cut_selection import _STATEMENT_END, _TRAILING, _first_word, candidate_id
     sents = _sentences(words)
     out: List[Dict[str, Any]] = []
+    # the stream's opening is skipped (intro screens) — except a «wow» entrance (owner: «начало стрима с вау-выходом»)
+    reveals = [t for t, kind, _w in (hits or []) if kind in ("reveal", "laugh", "joke") and t < cfg.skip_intro_sec]
     for i, (s0, _) in enumerate(sents):
-        if words[s0].start < cfg.skip_intro_sec:
+        if words[s0].start < cfg.skip_intro_sec and not any(-2.0 <= t - words[s0].start <= 8.0 for t in reveals):
             continue
         for j in range(i, len(sents)):
             e = sents[j][1]
@@ -180,6 +182,11 @@ def score_candidate(c: Dict[str, Any], e: np.ndarray, speech: np.ndarray, words,
     elif after > 25.0:
         score -= min(0.6, (after - 25.0) / 20.0)
         why.append("long tail after the peak")
+    cat_bonus, cat = _category(c, words, hits, cfg)
+    c["category"] = cat
+    if cat:
+        score += cat_bonus
+        why.append(f"category {cat}")
     fs = c["first_sentence"].split()
     if 1 <= len(fs) <= 9 and fs[-1][-1:] in "!?":
         score += 0.35
@@ -207,6 +214,44 @@ def score_candidate(c: Dict[str, Any], e: np.ndarray, speech: np.ndarray, words,
     return round(score, 4), why + [f"{dur:.0f} s"]
 
 
+# owner 2026-11-10 ~06:00: «подводка → событие → реакция» — explicit categories
+CATEGORIES = {"guest": "приход гостя", "entrance": "эффектный выход", "joke": "жёсткая шутка"}
+
+
+def _category(c: Dict[str, Any], words, hits, cfg: MomentConfig) -> Tuple[float, Optional[str]]:
+    """Category hint from the reaction hits (the editor has the last word). A guest entrance with its lead-in
+    («сейчас к нам зайдёт…») said 8–150 s before gets the lead-in sentence attached (c["lead_in"] = word span):
+    the clip plays lead-in → entrance → reaction, the waiting in between is cut."""
+    hs = hits or []
+    a, b = c["start"], c["end"]
+    head = [h for h in hs if a - 0.5 <= h[0] <= a + 10.0]
+    inside = [h for h in hs if a <= h[0] <= b]
+    if any(h[1] == "guest_in" for h in head):
+        g = min(h[0] for h in head if h[1] == "guest_in")
+        leads = [h for h in hs if h[1] == "guest_lead" and 0.0 < g - h[0] <= 150.0]
+        if leads:
+            lt = leads[-1][0]
+            if lt < a - 4.0:                             # outside the clip: attach its sentence
+                span = _sentence_at(words, lt)
+                if span and words[span[1]].end - words[span[0]].start <= 9.0 and words[span[1]].end < a - 1.0:
+                    c["lead_in"] = span
+            return 0.9, "guest"
+        if sum(1 for h in head if h[1] == "guest_in") >= 2 and any(h[1] in ("laugh", "react", "shout") for h in inside):
+            return 0.4, "guest"
+    if any(h[1] == "reveal" for h in head) and any(h[1] in ("laugh", "react", "shout", "phrase") for h in inside):
+        return (0.9 if a < cfg.skip_intro_sec + 600 else 0.6), "entrance"
+    if any(h[1] == "joke" for h in inside):
+        return 0.6, "joke"
+    return 0.0, None
+
+
+def _sentence_at(words, t: float) -> Optional[Tuple[int, int]]:
+    for s0, e0 in _sentences(words):
+        if words[s0].start - 0.3 <= t <= words[e0].end + 0.3:
+            return s0, e0
+    return None
+
+
 def _overlaps(c, picked, gap):
     return any(c["start"] < k["end"] + gap and c["end"] > k["start"] - gap for k in picked)
 
@@ -221,7 +266,11 @@ EDITOR_SYSTEM = (
     "Ты — строгий редактор вирусных вертикальных видео (Shorts/Reels/TikTok) из записей русскоязычных игровых "
     "стримов. Зритель листает ленту и видит ТОЛЬКО этот фрагмент (вебка стримера сверху, игра снизу), паузы "
     "вырезаны. Интересно ТОЛЬКО: сильная эмоция (ярость, шок, истерический смех), конфликт или перепалка, смешное "
-    "(шутка, абсурд, нелепость), неожиданный поворот, эпичный провал или клатч, короткая яркая история с развязкой. "
+    "(шутка, абсурд, нелепость), неожиданный поворот, эпичный провал или клатч, короткая яркая история с развязкой, "
+    "приход гостя С ПОДВОДКОЙ («сейчас к нам зайдёт…» → гость заходит → первая реакция), эффектный выход или "
+    "сюрприз стримера (в образе/костюме, вау-начало стрима, все в шоке и смеются), пошлая или жёсткая шутка и "
+    "реакция на неё (смех в комнате, «ты чё», «ахаха»). Схема сильного клипа: подводка → событие → реакция, без "
+    "мёртвой тишины. "
     "Главное правило: по первым 2–3 секундам (первой фразе) уже понятно, что происходит и почему стоит смотреть — "
     "клип начинается с события или реакции, а не с разгона. Скучно (отбрасывай, score < 40): обсуждение настроек, "
     "железа, расписания, чтение доната/рекламы, спокойная болтовня, комментирование без события, обрыв мысли, "
@@ -241,6 +290,7 @@ def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "") ->
     for c in pool:
         sents = c.get("sentences_txt") or [(0.0, c["text"])]
         items.append({"id": c["id"], "signals": c.get("tags", ""),
+                      **({"lead_in": c["lead_in_txt"]} if c.get("lead_in_txt") else {}),
                       "before": c.get("before", "")[-220:],
                       "phrases": [f"{i}) +{t:.0f}s {txt[:260]}" for i, (t, txt) in enumerate(sents)]})
     head = f"Стрим: {context[:200]}\n" if context else ""
@@ -250,7 +300,8 @@ def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "") ->
             "без разгона) и end (номер фразы, на которой он заканчивается — после развязки), чтобы вышло 20–45 с.\n"
             "Фрагменты:\n" + json.dumps(items, ensure_ascii=False) +
             "\n\nВерни JSON: {\"clips\": [{\"id\": str, \"score\": 0-100, "
-            "\"type\": \"эмоция|конфликт|смешное|неожиданное|фейл|клатч|история|скучно\", "
+            "\"type\": \"эмоция|конфликт|смешное|неожиданное|фейл|клатч|история|гость|выход|шутка|скучно\", "
+            "\"use_lead_in\": bool (только если у фрагмента есть lead_in — подводка к гостю: ставить её в начало), "
             "\"clear_3s\": bool (понятно ли по первой фразе, что происходит и почему интересно), "
             "\"start\": int, \"end\": int, "
             "\"payoff\": int (номер фразы, где РАЗВЯЗКА/кульминация: исход, ответ, результат, главная реакция), "
@@ -297,7 +348,8 @@ def parse_editor(text: str, pool: Dict[str, Dict[str, Any]]) -> List[Dict[str, A
                     "start": st, "end": en, "hook": str(x.get("title") or "").strip()[:60],
                     "reason": str(x.get("why") or "").strip()[:160], "keywords": kws,
                     "self_contained": x.get("clear_3s") is True,
-                    "payoff": _idx("payoff"), "punchline": _idx("punchline")})
+                    "payoff": _idx("payoff"), "punchline": _idx("punchline"),
+                    "use_lead_in": x.get("use_lead_in") is True})
     return out
 
 
@@ -320,7 +372,9 @@ def _tags(c: Dict[str, Any], sig: Dict[str, Sequence[float]], hits) -> str:
     for t, kind, _w in hits:
         if a <= t < b:
             kinds[kind] = kinds.get(kind, 0) + 1
-    names = {"laugh": "смех", "mat": "мат", "react": "реакция", "shout": "крик-слово", "phrase": "«да ладно»-фраза"}
+    names = {"laugh": "смех", "mat": "мат", "react": "реакция", "shout": "крик-слово", "phrase": "«да ладно»-фраза",
+             "guest_lead": "подводка к гостю", "guest_in": "приветствие гостя", "reveal": "«смотрите/как я вам»",
+             "joke": "мат+смех"}
     tags += [f"{names[k]}×{n}" for k, n in sorted(kinds.items())]
     for k, label in (("loud", "громко"), ("pitch", "высокий голос"), ("chat", "чат"), ("flash", "вспышка")):
         v = sig.get(k)
@@ -329,6 +383,8 @@ def _tags(c: Dict[str, Any], sig: Dict[str, Sequence[float]], hits) -> str:
             if m >= 2.5:
                 tags.append(f"{label} z{m:.0f}")
     tags.append(f"пик на {c['peak_t'] - c['start']:.0f} с")
+    if c.get("category"):
+        tags.append("похоже на: " + CATEGORIES.get(c["category"], c["category"]))
     return ", ".join(tags)
 
 
@@ -352,6 +408,24 @@ def _editor_view(c: Dict[str, Any], words, all_sents: List[Tuple[int, int]], cfg
     while k > 0 and words[k - 1].start > c["start"] - 15.0:
         k -= 1
     c["before"] = " ".join(w.text.strip() for w in words[k:c["first"]])
+
+
+_TYPE_TO_CAT = {"гость": "guest", "выход": "entrance", "шутка": "joke"}
+
+
+def _lead_and_category(c: Dict[str, Any], v: Optional[Dict[str, Any]], words) -> Dict[str, Any]:
+    """category (editor type, else the local hint) and the guest lead-in [start, end] s when it is used."""
+    out: Dict[str, Any] = {}
+    typ = (v or {}).get("type") or ""
+    cat = _TYPE_TO_CAT.get(typ) or c.get("category")
+    if typ:
+        out["moment_type"] = typ
+    if cat:
+        out["category"] = cat
+    li = c.get("lead_in")
+    if li and (v.get("use_lead_in") if v else cat == "guest") and words[li[1]].end < c["start"] - 1.0:
+        out["lead_in"] = [round(float(words[li[0]].start), 3), round(float(words[li[1]].end), 3)]
+    return out
 
 
 def _marks(c0: Optional[Dict[str, Any]], v: Dict[str, Any], words) -> Dict[str, Any]:
@@ -407,7 +481,7 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
         return [], meta
     e = excitement(signals, n_sec, cfg.weights)
     speech = _speech_mask(words, n_sec)
-    cands = build_candidates(words, cfg)
+    cands = build_candidates(words, cfg, hits)
     meta["candidates"] = len(cands)
     scored = []
     for c in cands:
@@ -433,6 +507,10 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
         for c, _, _ in pool:
             _editor_view(c, words, all_sents, cfg)
             c["tags"] = _tags(c, signals, hits or [])
+            if c.get("lead_in"):
+                a0, b0 = c["lead_in"]
+                c["lead_in_txt"] = (f"за {c['start'] - words[a0].start:.0f} с до фрагмента: "
+                                    + " ".join(w.text.strip() for w in words[a0:b0 + 1])[:200])
         verdicts, emeta = _run_editor([c for c, _, _ in pool], max_clips, cfg, chat)
         meta["llm"] = emeta
         if verdicts:
@@ -468,7 +546,7 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
     segs = [{"start": c["start"], "duration": c["end"] - c["start"], "score": sc,
              "source": "stream_moment:" + ("editor" if c["id"] in extras else "local"),
              "candidate_id": c["id"], "selection_reason": "; ".join(why), "peak_t": c.get("peak_t"),
-             "tight_sec": c.get("tight"),
+             "tight_sec": c.get("tight"), **_lead_and_category(c, extras.get(c["id"]), words),
              **({"hook": extras[c["id"]]["hook"], "keywords": extras[c["id"]]["keywords"],
                  "editor_score": extras[c["id"]]["score"], **_marks(c0_by.get(c["id"]), extras[c["id"]], words)}
                 if c["id"] in extras else {})}

@@ -140,6 +140,17 @@ _REACT_PHRASES = re.compile(r"(?i)\b(да ладно|не может быть|т
                             r"какого|что за)\b")
 
 
+# owner 2026-11-10 ~06:00 (Buster examples): guests with a lead-in, a surprise entrance / costume, crude jokes
+_GUEST_LEAD = re.compile(r"(сейчас|щас|скоро|сегодня|ща)\s+(к нам\s+)?(зайдет|зайдут|придет|придут|приедет|"
+                         r"приедут|подключится|присоединится|будет гость|позвоню|позвоним|наберу|наберем)|"
+                         r"\b(у нас|к нам)\s+(сегодня\s+)?(гост|зайдет|придет|приехал|пришел)|\bвстречайте\b|"
+                         r"\bждем\s+(гост|его|ее)|\bкто\s+к\s+нам\b")
+_GUEST_IN = re.compile(r"^(привет|приветик|здарова|здорово|здравствуй|здравствуйте|хай|салам|салют|заходи|"
+                       r"заходите|проходи|проходите|присаживайся|садись|добропожаловать)$")
+_REVEAL = re.compile(r"\b(смотрите|зацените|оцените|как я вам|что это|кто это|что на мне|мой образ|в образе|"
+                     r"костюм|сюрприз|не узнали|узнаете|переоделся|переоделась|нарядился)\b")
+
+
 def _norm(w: str) -> str:
     return re.sub(r"[^\w-]", "", w.lower().replace("ё", "е"))
 
@@ -166,7 +177,8 @@ def speech_signals(words: Sequence[Dict[str, Any]], n_sec: int) -> Dict[str, Any
     count = np.zeros(n_sec)
     react = np.zeros(n_sec)
     hits: List[Any] = []
-    weights = {"laugh": 1.5, "mat": 0.8, "react": 0.7, "shout": 1.0, "phrase": 1.0, "excl": 0.4}
+    weights = {"laugh": 1.5, "mat": 0.8, "react": 0.7, "shout": 1.0, "phrase": 1.0, "excl": 0.4,
+               "guest_lead": 0.6, "guest_in": 0.5, "reveal": 0.8, "joke": 1.2}
     seq = [w for w in words if w.get("start") is not None]
     for i, w in enumerate(seq):
         s = int(float(w["start"]))
@@ -185,6 +197,24 @@ def speech_signals(words: Sequence[Dict[str, Any]], n_sec: int) -> Dict[str, Any
             if _REACT_PHRASES.search(pair):
                 react[s] += weights["phrase"]
                 hits.append((round(float(w["start"]), 2), "phrase", pair))
+        win2 = " ".join(_norm(str(x.get("word", x.get("text", "")))) for x in seq[i:i + 3])
+        if _GUEST_LEAD.search(win2) and not any(h[1] == "guest_lead" and float(w["start"]) - h[0] < 8 for h in hits):
+            react[s] += weights["guest_lead"]
+            hits.append((round(float(w["start"]), 2), "guest_lead", win2))
+        if _GUEST_IN.match(_norm(txt).replace("-", "")):
+            react[s] += weights["guest_in"]
+            hits.append((round(float(w["start"]), 2), "guest_in", txt.strip()))
+        if _REVEAL.search(win2) and not any(h[1] == "reveal" and float(w["start"]) - h[0] < 5 for h in hits):
+            react[s] += weights["reveal"]
+            hits.append((round(float(w["start"]), 2), "reveal", win2))
+    # a crude joke: mat / a vulgar line followed by laughter within 4 s
+    mats = [h for h in hits if h[1] == "mat"]
+    for t, kind, txt in [h for h in hits if h[1] == "laugh"]:
+        if any(0.0 <= t - m[0] <= 4.0 for m in mats) and not any(h[1] == "joke" and abs(h[0] - t) < 6 for h in hits):
+            s = int(t)
+            if 0 <= s < n_sec:
+                react[s] += weights["joke"]
+            hits.append((t, "joke", txt))
     k = np.ones(3) / 3.0
     rate = np.convolve(count, k, mode="same")
     return {"rate": robust_z(rate, rate > 0.3), "react": [round(float(v), 2) for v in react], "hits": hits}

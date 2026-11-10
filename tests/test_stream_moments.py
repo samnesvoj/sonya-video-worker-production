@@ -164,3 +164,73 @@ def test_parse_editor_is_fail_closed():
                                                "keywords": ["мир", "чужое"], "clear_3s": "true"}]}), pool)
     assert len(v) == 1 and v[0]["start"] == 1 and v[0]["end"] == 0 or v[0]["start"] <= v[0]["end"]
     assert v[0]["keywords"] == ["мир"] and v[0]["clear_3s"] is False
+
+
+# ── owner 2026-11-10 ~06:00: guest with a lead-in, wow entrance, crude joke ──
+
+def test_signals_find_guest_lead_in_entrance_and_joke():
+    from scripts.shared import stream_signals as ss
+    ws = [{"word": w, "start": float(i), "end": i + 0.5} for i, w in enumerate(
+        "так сейчас к нам зайдет Эвелон ждем".split())]
+    ws += [{"word": w, "start": 60.0 + i, "end": 60.5 + i} for i, w in enumerate("о привет заходи ахахаха".split())]
+    ws += [{"word": w, "start": 100.0 + i, "end": 100.5 + i} for i, w in enumerate("ну как я вам".split())]
+    ws += [{"word": w, "start": 120.0 + i * 0.5, "end": 120.4 + i * 0.5} for i, w in enumerate("бля ахаха".split())]
+    kinds = {k for _t, k, _w in ss.speech_signals(ws, 200)["hits"]}
+    assert {"guest_lead", "guest_in", "reveal", "joke"} <= kinds
+
+
+def _guest_stream():
+    """Waiting 300..380 s, the lead-in at 300 s, the guest greets at 400 s, laughter after."""
+    out = []
+    t = 0.0
+    while t < 900:
+        txt = ["Я", "иду", "на", "точку", "сейчас."]
+        if abs(t - 300) < 1.5:
+            txt = ["Сейчас", "к", "нам", "зайдет", "гость."]
+        if abs(t - 402) < 1.5:
+            txt = ["О,", "привет,", "заходи,", "ахахаха", "здарова!"]
+        if 300 < t < 400 and abs(t - 300) >= 1.5:
+            t += 3.0
+            continue                                              # waiting: no speech
+        for k, w in enumerate(txt):
+            out.append({"word": w, "start": round(t + k * 0.4, 2), "end": round(t + k * 0.4 + 0.35, 2)})
+        t += 3.0
+    return out
+
+
+def test_guest_entrance_gets_the_lead_in_attached():
+    from scripts.shared import stream_signals as ss
+    ws = _guest_stream()
+    sp = ss.speech_signals(ws, 900)
+    sig = {"loud": [0.0] * 900, "pitch": [0.0] * 900, "react": sp["react"]}
+    segs, meta = sm.select_moments(ws, 900, sig, 3, sm.MomentConfig(), hits=sp["hits"])
+    g = [s for s in segs if s.get("category") == "guest"]
+    assert g, meta["selected"]
+    assert g[0]["start"] <= 402.5 <= g[0]["start"] + g[0]["duration"]
+    assert g[0]["lead_in"][0] >= 299.0 and g[0]["lead_in"][1] <= 302.5
+
+
+def test_entrance_at_stream_start_is_not_skipped_as_intro():
+    from scripts.shared.boundaries import normalize_words
+    from scripts.shared import stream_signals as ss
+    ws = []
+    t = 0.0
+    while t < 600:
+        txt = ["Я", "иду", "на", "точку", "сейчас."]
+        if abs(t - 30) < 1.5:
+            txt = ["Смотрите,", "как", "я", "вам?", "ахахаха!"]
+        for k, w in enumerate(txt):
+            ws.append({"word": w, "start": round(t + k * 0.4, 2), "end": round(t + k * 0.4 + 0.35, 2)})
+        t += 3.0
+    sp = ss.speech_signals(ws, 600)
+    words, _ = normalize_words(ws)
+    cands = sm.build_candidates(words, sm.MomentConfig(), sp["hits"])
+    assert any(c["start"] < 40 for c in cands)
+    assert all(c["start"] >= 21 for c in cands if c["start"] < 120)   # only around the entrance
+
+
+def test_editor_types_map_to_categories_and_lead_in():
+    pool = {"c1": {"id": "c1", "sentences": [(0, 1), (2, 3)], "text": "a b"}}
+    out = sm.parse_editor(json.dumps({"clips": [{"id": "c1", "score": 90, "type": "гость", "clear_3s": True,
+                                                  "start": 0, "end": 1, "use_lead_in": True}]}), pool)
+    assert out[0]["type"] == "гость" and out[0]["use_lead_in"] is True
