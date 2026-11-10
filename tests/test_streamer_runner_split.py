@@ -1,258 +1,132 @@
 """
-PHASE A runner split (modes/streamer/runner.py): analyze() / compose_one() /
-run() compatibility wrapper.
+Streamer v2 runner split (modes/streamer/runner.py): analyze() / compose_one() / run().
 
-No real GPU, ffmpeg, or ML models are used — the two genuinely heavy calls
-(enrich_video_for_mode, compose_vertical_clip) are monkeypatched at their
-source module so run()/analyze()/compose_one() are exercised for real, but
-nothing downstream of them does real video work.
-
-Note on the yuvelirochka legacy analyzer/clipper: modes/streamer/legacy/
-analyzer.py exposes no module-level `analyze` function (only the
-ViralMomentAnalyzer class + a differently-named analyze_transcript), and
-clipper.py exposes no `clip_segments` (only the VideoClipper class) — so
-`from modes.streamer.legacy.analyzer import analyze` / `... clipper import
-clip_segments` already raise ImportError today, in production, unmodified.
-analyze() catches that and falls back to _fallback_segments() — which is
-therefore the actual code path streamer mode runs today, not a test-only
-shortcut. These tests exercise exactly that real path rather than
-monkeypatching a legacy API surface that doesn't currently exist (see the
-PHASE A report's RISKS section for this pre-existing gap).
+No ffmpeg, ML models or network: the heavy calls (enrich_video_for_mode = ASR, the stream signals, the
+layout survey, the per-clip analysis and the render) are monkeypatched, so the runner's own logic is
+exercised for real. v1's yuvelirochka analyzer never existed (ImportError → «first 30 s» fallback); v2
+builds moments from the transcript + signals (scripts/shared/stream_moments.py).
 """
 from __future__ import annotations
+
+import pytest
 
 from modes.streamer import runner
 
 
-def _enrichment(*, active_speaker_segments, webcam_boxes, warnings=None):
-    return {
-        "webcam_layout": {"boxes": webcam_boxes},
-        "active_speaker_segments": active_speaker_segments,
-        "word_timestamps": [{"word": "hello"}, {"word": "chat"}],
-        "crop_hints": {"anchor": "center"},
-        "warnings": list(warnings or []),
-    }
+def _words(n_sent=40, sent_len=8, start=130.0):
+    """Sentences of `sent_len` words, 0.4 s per word, 1.5 s pause between sentences."""
+    out, t = [], start
+    for s in range(n_sent):
+        for i in range(sent_len):
+            w = f"слово{s}_{i}" + ("!" if i == sent_len - 1 else "")
+            out.append({"word": w, "start": round(t, 2), "end": round(t + 0.35, 2)})
+            t += 0.4
+        t += 1.5
+    return out
 
 
-# Three active-speaker segments -> three _fallback_segments() candidates
-# with three DISTINCT scores (2.0 base + 0.1 per nearby webcam box, see
-# _fallback_segments in runner.py), so "pick top N by score" is a real
-# assertion rather than a coincidence of insertion order:
-#   start=70  (C): 0 nearby boxes -> score 2.0  (lowest)
-#   start=10  (A): 1 nearby box   -> score 2.1
-#   start=40  (B): 3 nearby boxes -> score 2.3  (highest)
-_ACTIVE_SPEAKER_SEGS = [
-    {"start": 10, "end": 30},   # duration 20 -> A, score 2.1
-    {"start": 40, "end": 55},   # duration 15 -> B, score 2.3
-    {"start": 70, "end": 100},  # duration 30 -> C, score 2.0
-]
+WORDS = _words()
 
 
-def _default_enrichment(**_kwargs):
-    # frame/30 must land within 5s of the segment's own start to count as
-    # "nearby" (see _fallback_segments). One box near start=10, three near
-    # start=40, none near start=70.
-    boxes = (
-        [{"frame": 10 * 30}] +          # 1 box near A (start=10)  -> +0.1
-        [{"frame": 40 * 30}] * 3        # 3 boxes near B (start=40) -> +0.3
-    )
-    return _enrichment(active_speaker_segments=_ACTIVE_SPEAKER_SEGS, webcam_boxes=boxes)
+@pytest.fixture
+def patched(monkeypatch, tmp_path):
+    calls = {"enrich": 0, "render": [], "analysis": 0}
+
+    def enrich(**kw):
+        calls["enrich"] += 1
+        return {"word_timestamps": list(WORDS), "warnings": []}
+
+    monkeypatch.setattr("scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode", enrich)
+    monkeypatch.setattr(runner, "_source_info", lambda p: {"width": 1920, "height": 1080, "duration": 600.0})
+    monkeypatch.setattr(runner, "_layout_survey", lambda *a, **k: {"rects": []})
+    from scripts.shared import stream_signals as ss
+    n = 600
+    loud = [0.0] * n
+    for t in range(300, 312):
+        loud[t] = 4.0                              # one loud moment at 300 s
+    monkeypatch.setattr(ss, "audio_signals", lambda *a, **k: {"loud": loud, "pitch": [0.0] * n})
+    monkeypatch.setattr(ss, "visual_signals", lambda *a, **k: {"flash": [0.0] * n, "cut": [0.0] * n})
+
+    def render(src, out, start, dur, track, subtitle_path=None, report=None):
+        calls["render"].append({"start": start, "dur": dur, "layout": track.get("layout")})
+        if report is not None:
+            report.update(render_encoder="cpu", render_s=0.1)
+        open(out, "wb").write(b"x")
+        return out
+
+    monkeypatch.setattr("scripts.shared.crop.smart_crop_adapter.render_tracked", render)
+
+    def clip_an(crop, src, start, dur):
+        calls["analysis"] += 1
+        return None, None, "no_model: test"
+
+    monkeypatch.setattr("modes.virality.runner._clip_analysis", clip_an)
+    monkeypatch.setattr("scripts.shared.cut_profile.ensure_render_args", lambda *a, **k: None)
+    monkeypatch.setattr("scripts.shared.crop.stream_layout.analyze_layout",
+                        lambda *a, **k: {"webcam": None, "chat": []})
+    return calls
 
 
-# ── analyze() ────────────────────────────────────────────────────────────
-
-def test_analyze_calls_enrichment_exactly_once(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: (calls.append(kw) or _default_enrichment()),
-    )
-
-    runner.analyze("input.mp4", str(tmp_path), params={})
-
-    assert len(calls) == 1
+PARAMS = {"source_sha256": "x" * 64, "editor": False, "settings": {"subtitleStyle": "none"}}
 
 
-def test_analyze_returns_all_candidates_unfiltered(monkeypatch, tmp_path):
-    """analyze() must NOT pre-select a top-N subset — that stays run()'s job."""
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-
-    result = runner.analyze("input.mp4", str(tmp_path), params={"max_clips": 1})
-
-    assert len(result["segments"]) == 3  # all 3 candidates, despite max_clips=1
+def test_analyze_calls_enrichment_exactly_once(patched, tmp_path):
+    runner.analyze("input.mp4", str(tmp_path), params=dict(PARAMS))
+    assert patched["enrich"] == 1
 
 
-def test_analyze_normalizes_to_canonical_segment_contract(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-
-    result = runner.analyze("input.mp4", str(tmp_path), params={})
-
-    for seg in result["segments"]:
-        assert set(seg.keys()) == {"start_sec", "duration_sec", "score", "source"}
-        assert isinstance(seg["start_sec"], float)
-        assert isinstance(seg["duration_sec"], float)
-
-
-def test_analyze_falls_back_and_warns_when_legacy_analyzer_unavailable(monkeypatch, tmp_path):
-    """Documents the real current behavior: the yuvelirochka import fails
-    (see module docstring), so analyze() always falls back today and
-    records why via a warning."""
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-
-    result = runner.analyze("input.mp4", str(tmp_path), params={})
-
-    assert any("streamer_analyzer_unavailable" in w for w in result["warnings"])
-    assert all(seg["source"] == "speaker_fallback" for seg in result["segments"])
+def test_analyze_returns_moments_with_canonical_contract(patched, tmp_path):
+    res = runner.analyze("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=1))
+    segs = res["segments"]
+    assert len(segs) > 1                            # the whole pool, not only max_clips
+    for s in segs:
+        assert {"start_sec", "duration_sec", "score", "source"} <= set(s)
+        assert isinstance(s["start_sec"], float) and isinstance(s["duration_sec"], float)
+        assert 20.0 <= s["duration_sec"] <= 62.5
+        assert s["source"].startswith("stream_moment")
+    # the loud moment at 300 s is the top pick
+    assert segs[0]["start_sec"] <= 300 <= segs[0]["start_sec"] + segs[0]["duration_sec"]
+    assert res["crop_hints"]["version"] == runner.STREAMER_VERSION
+    assert res["selection"]["chat"]["status"] == "no_chat"
 
 
-# ── compose_one() ────────────────────────────────────────────────────────
+def test_analyze_without_words_fails_clearly(monkeypatch, patched, tmp_path):
+    monkeypatch.setattr("scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
+                        lambda **kw: {"word_timestamps": [], "warnings": ["asr down"]})
+    with pytest.raises(RuntimeError, match="ASR_FAILED"):
+        runner.analyze("input.mp4", str(tmp_path), params=dict(PARAMS))
 
-def test_compose_one_does_not_call_enrichment(monkeypatch, tmp_path):
-    """B: compose_one() must never re-run enrich_video_for_mode()."""
-    def _boom(**_kw):
-        raise AssertionError("compose_one() must not call enrich_video_for_mode()")
-    monkeypatch.setattr("scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode", _boom)
 
-    captured = {}
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: (captured.update(kw) or kw["output_path"]),
-    )
-
-    segment = {"start_sec": 100.0, "duration_sec": 12.5, "score": 1.0, "source": "analyzer"}
+def test_compose_one_does_not_call_enrichment_and_renders_the_segment(patched, tmp_path):
     out = str(tmp_path / "clip.mp4")
-    result = runner.compose_one("input.mp4", out, segment, crop_hints={"anchor": "center"})
-
-    assert result == out
-    assert captured  # compose_vertical_clip was actually called
-
-
-def test_compose_one_passes_correct_start_and_duration(monkeypatch, tmp_path):
-    """C: compose_one() must translate start_sec/duration_sec -> the
-    compose_vertical_clip start_time/duration contract, unchanged values."""
-    captured = {}
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: (captured.update(kw) or kw["output_path"]),
-    )
-
-    segment = {"start_sec": 4350.0, "duration_sec": 370.0, "score": 1.0, "source": "analyzer"}
-    out = str(tmp_path / "clip.mp4")
-    runner.compose_one("input.mp4", out, segment, crop_hints={"x": 1})
-
-    assert captured["input_video_path"] == "input.mp4"
-    assert captured["output_path"] == out
-    assert captured["start_time"] == 4350.0
-    assert captured["duration"] == 370.0
-    assert captured["crop_hints"] == {"x": 1}
+    seg = {"start_sec": 4350.0, "duration_sec": 37.0}
+    assert runner.compose_one("input.mp4", out, seg, crop_hints={"anchor": "center"}) == out
+    assert patched["enrich"] == 0
+    assert patched["render"] == [{"start": 4350.0, "dur": 37.0, "layout": "person"}]
+    assert seg["render_encoder"] == "cpu" and seg["crop_layout"] == "person"
 
 
-# ── run() — compatibility wrapper (PRESERVE CURRENT PRODUCTION BEHAVIOR) ──
-
-def test_run_calls_analysis_exactly_once(monkeypatch, tmp_path):
-    """A (part 1): the old run() entry point must still call the expensive
-    analysis path exactly once, not once per selected clip."""
-    calls = []
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: (calls.append(kw) or _default_enrichment()),
-    )
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: kw["output_path"],
-    )
-
-    runner.run("input.mp4", str(tmp_path), params={"max_clips": 5})
-
-    assert len(calls) == 1
+def test_run_analyses_once_and_renders_top_clips_in_rank_order(patched, tmp_path):
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=2))
+    assert patched["enrich"] == 1
+    assert len(res["clips"]) == 2 and len(patched["render"]) == 2
+    assert patched["render"][0]["start"] <= 300 <= patched["render"][0]["start"] + patched["render"][0]["dur"]
+    assert res["mode"] == "streamer" and res["version"] == runner.STREAMER_VERSION and res["beta"] is True
+    assert {"clips", "mode", "beta", "selection", "warnings", "webcam_boxes_found", "active_speaker_segs"} <= set(res)
 
 
-def test_run_creates_up_to_max_clips_selected_by_score(monkeypatch, tmp_path):
-    """A (part 2): run() still picks the top `max_clips` candidates by
-    score and composes exactly that many, same as before the split."""
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-    compose_calls = []
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: (compose_calls.append(kw) or kw["output_path"]),
-    )
+def test_run_reports_per_clip_failure(monkeypatch, patched, tmp_path):
+    real = runner.compose_one
+    n = {"i": 0}
 
-    result = runner.run("input.mp4", str(tmp_path), params={"max_clips": 2})
+    def flaky(*a, **k):
+        n["i"] += 1
+        if n["i"] == 1:
+            raise RuntimeError("boom")
+        return real(*a, **k)
 
-    assert len(result["clips"]) == 2
-    assert len(compose_calls) == 2
-    # Highest two scores (B=2.3, A=2.1) selected, in that order — C (2.0) dropped.
-    assert compose_calls[0]["start_time"] == 40.0   # B
-    assert compose_calls[1]["start_time"] == 10.0   # A
-
-
-def test_run_respects_default_max_clips_of_five(monkeypatch, tmp_path):
-    """max_clips defaults to 5 when params omits it — unchanged from before
-    the split (mode.yaml's own output.max_clips: 5 is untouched in PHASE A)."""
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: kw["output_path"],
-    )
-
-    result = runner.run("input.mp4", str(tmp_path), params={})
-
-    # Only 3 raw candidates exist in this fixture -- fewer than the
-    # default cap of 5, so all 3 get composed.
-    assert len(result["clips"]) == 3
-
-
-def test_run_result_shape_unchanged(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-    monkeypatch.setattr(
-        "scripts.shared.crop.smart_crop_adapter.compose_vertical_clip",
-        lambda **kw: kw["output_path"],
-    )
-
-    result = runner.run("input.mp4", str(tmp_path), params={"max_clips": 1})
-
-    assert set(result.keys()) == {
-        "clips", "mode", "beta", "webcam_boxes_found", "active_speaker_segs", "warnings",
-    }
-    assert result["mode"] == "streamer"
-    assert result["beta"] is True
-    assert result["webcam_boxes_found"] == 4   # 1 + 3, see _default_enrichment
-    assert result["active_speaker_segs"] == 3
-
-
-def test_run_appends_warning_on_per_clip_compose_failure(monkeypatch, tmp_path):
-    """A per-clip compose failure must still just warn, same as before the
-    split — not abort the whole job."""
-    monkeypatch.setattr(
-        "scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
-        lambda **kw: _default_enrichment(),
-    )
-
-    def _flaky_compose(**kw):
-        if kw["start_time"] == 40.0:  # the highest-scored segment (B)
-            raise RuntimeError("ffmpeg exploded")
-        return kw["output_path"]
-    monkeypatch.setattr("scripts.shared.crop.smart_crop_adapter.compose_vertical_clip", _flaky_compose)
-
-    result = runner.run("input.mp4", str(tmp_path), params={"max_clips": 3})
-
-    assert len(result["clips"]) == 2  # one of the three failed
-    assert any("clip_1_failed" in w for w in result["warnings"])
+    monkeypatch.setattr(runner, "compose_one", flaky)
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3))
+    assert len(res["clips"]) == 2
+    assert any(w.startswith("clip_1_failed") for w in res["warnings"])
