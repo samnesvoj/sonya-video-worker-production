@@ -764,7 +764,10 @@ def full_game_graph(track: Dict[str, Any]) -> str:
 
 def track_graph(track: Dict[str, Any]) -> str:
     """The crop part of the -vf (layout → 1080x1920), without subtitles."""
-    if track.get("layout") == "game" and track.get("game_h"):
+    if track.get("layout") == "game" and track.get("tpl"):
+        from .stream_templates import template_graph          # streamer layout templates 2 / 4 / 5
+        vf = template_graph(track)
+    elif track.get("layout") == "game" and track.get("game_h"):
         vf = full_game_graph(track)
     elif track.get("layout") == "game":
         cx, cy, cw_, ch_ = track["cam"]

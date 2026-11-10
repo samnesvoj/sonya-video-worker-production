@@ -61,6 +61,12 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
     ad = sonya_ad_settings(params, settings)
     if ad:
         crop["sonya_ad"] = ad
+    # layout_template 1..5 (site choice; default 1 = webcam on top / game below), nick for template 5's caption
+    from scripts.shared.crop.stream_templates import normalize_template
+    crop["layout_template"] = normalize_template(params.get("layout_template", settings.get("layoutTemplate")))
+    nick = params.get("streamer_name") or settings.get("streamerName")
+    if nick:
+        crop["streamer_name"] = str(nick)[:60]
     style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
@@ -214,6 +220,8 @@ def analyze(
     mc.setdefault("editor", bool(params.get("editor", editor_available())))
     mc.setdefault("context", str(params.get("stream_title") or params.get("title") or "")[:200])
     mc.setdefault("jump_gap", crop["jump_gap"])
+    _set = params.get("settings") if isinstance(params.get("settings"), dict) else {}
+    mc.setdefault("moment_types", params.get("moment_types") or _set.get("momentTypes") or [])
     want = int(params.get("max_clips", 5))
     pool_n = int(params.get("pool_clips", max(want, 12)))
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
@@ -237,7 +245,7 @@ def analyze(
                          "source": s.get("source", "stream_moment"),
                          **{k: s[k] for k in ("candidate_id", "selection_reason", "hook", "keywords", "editor_score",
                                               "peak_t", "boundary_status", "tight_sec", "payoff_t", "punchline_t",
-                                              "category", "moment_type", "lead_in") if k in s},
+                                              "category", "moment_type", "lead_in", "music") if k in s},
                          "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
                          "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
                                    for w in clip_words]})
@@ -358,6 +366,9 @@ def compose_one(
         track = crop_track_v2(clip_an, dur, width=W, height=H)
         track.setdefault("layout", "person")
     track.setdefault("webcam_source", None)
+    from scripts.shared.crop.stream_templates import apply_template
+    track = apply_template(track, crop.get("layout_template"), nick=crop.get("streamer_name"))
+    segment["layout_template"] = track.get("template")
     if clip_an is None:
         track["fallback_reason"] = err.split(":", 1)[0] if err else "analysis_failed"
     zones = text_zones(clip_an, track) if track.get("layout") != "game" else []

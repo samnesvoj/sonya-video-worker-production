@@ -603,6 +603,6 @@ def stream_game_track(analysis: Optional[Dict[str, Any]], layout: Dict[str, Any]
             "detector": ((analysis or {}).get("meta") or {}).get("detector"), "source_width": W, "source_height": H,
             "output_aspect": "9:16", **geo, "webcam_rect": rect, "webcam_source": source,
             "chat_zones": layout.get("chat") or [], "game_overlap": round(cov, 3),
-            "seam_y": geo["top_h"],
+            "seam_y": geo["top_h"], "cam_src": cam_rect, "face": [round(face[0] + face[2] / 2, 1), round(face[1] + face[3] / 2, 1), round(face[2], 1), round(face[3], 1)] if face is not None else None,
             "seam": [[0.0, round(duration, 3)]], "keyframes": [[0.0, game[0]], [round(duration, 3), game[0]]],
             "cuts": (analysis or {}).get("cuts", []), "shots": [], "layout_version": VERSION}

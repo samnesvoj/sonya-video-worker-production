@@ -40,16 +40,23 @@ class MomentConfig:
     hook_sec: float = 3.0             # the opening that must grab
     tail_sec: float = 3.0             # time after the peak for the reaction / payoff
     skip_intro_sec: float = 120.0     # «стрим скоро начнётся» screens, intro music
+    moment_types: List[str] = field(default_factory=list)   # stream_types: philosophy / zavoz / chaos / guest / ...; [] = any
     min_gap_sec: float = 20.0         # between two selected clips
     pool: int = 30                    # candidates shown to the editor (≤ 30: OpenRouter idle limit, CUT_PLAYBOOK)
     editor: bool = False
-    budget_rub: float = 10.0          # hard cap of editor spend per stream (owner: ≤ 10 ₽ per stream)
+    budget_rub: float = 5.0           # hard cap of editor spend per stream (owner 2026-11-10: ≤ 5 ₽ per stream)
     rub_per_usd: float = 100.0
     min_editor_score: float = 62.0    # «лучше меньше, но сильных»: below this the editor's pick is dropped
     min_keep: int = 2                 # ... but never fewer than this many clips when the stream has candidates
     jump_gap: float = 0.7             # pauses longer than this are cut out at render (scripts/shared/jumpcut)
     context: str = ""                 # stream title / game, for the editor only
     weights: Dict[str, float] = field(default_factory=lambda: dict(WEIGHTS))
+
+    def __post_init__(self) -> None:
+        from .stream_types import PHILOSOPHY_MAX_SEC, normalize_types
+        self.moment_types = normalize_types(self.moment_types)
+        if "philosophy" in self.moment_types:          # a finished thought runs up to 60 s
+            self.max_duration = max(self.max_duration, PHILOSOPHY_MAX_SEC)
 
 
 # ── 1. excitement curve ─────────────────────────────────────────────────────
@@ -215,7 +222,8 @@ def score_candidate(c: Dict[str, Any], e: np.ndarray, speech: np.ndarray, words,
 
 
 # owner 2026-11-10 ~06:00: «подводка → событие → реакция» — explicit categories
-CATEGORIES = {"guest": "приход гостя", "entrance": "эффектный выход", "joke": "жёсткая шутка"}
+CATEGORIES = {"guest": "приход гостя", "entrance": "эффектный выход", "joke": "жёсткая шутка",
+              "philosophy": "философия", "zavoz": "завоз", "chaos": "хаос", "conflict": "конфликт"}
 
 
 def _category(c: Dict[str, Any], words, hits, cfg: MomentConfig) -> Tuple[float, Optional[str]]:
@@ -285,7 +293,8 @@ def _sentence_list(words, c: Dict[str, Any], pause: float = 1.2) -> List[Tuple[i
     return [(c["first"] + a, c["first"] + b) for a, b in group_sentences(sub, pause_sec=pause)]
 
 
-def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "") -> List[Dict[str, str]]:
+def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "",
+                    types: Sequence[str] = (), max_sec: float = 45.0) -> List[Dict[str, str]]:
     items = []
     for c in pool:
         sents = c.get("sentences_txt") or [(0.0, c["text"])]
@@ -293,14 +302,15 @@ def editor_messages(pool: List[Dict[str, Any]], want: int, context: str = "") ->
                       **({"lead_in": c["lead_in_txt"]} if c.get("lead_in_txt") else {}),
                       "before": c.get("before", "")[-220:],
                       "phrases": [f"{i}) +{t:.0f}s {txt[:260]}" for i, (t, txt) in enumerate(sents)]})
-    head = f"Стрим: {context[:200]}\n" if context else ""
+    from .stream_types import editor_types_line
+    head = (f"Стрим: {context[:200]}\n" if context else "") + editor_types_line(types, max_sec)
     user = (head + f"Нужно найти до {want} СИЛЬНЫХ клипов (лучше меньше, но сильных). Для каждого фрагмента: "
             "phrases — фразы с номером и временем от начала фрагмента; before — что было перед ним (контекст, "
             "в клип не входит). Выбери start (номер фразы, с которой клип начинается — с самого события/реакции, "
-            "без разгона) и end (номер фразы, на которой он заканчивается — после развязки), чтобы вышло 20–45 с.\n"
+            "без разгона) и end (номер фразы, на которой он заканчивается — после развязки), чтобы вышло 20–" + str(int(max_sec)) + " с.\n"
             "Фрагменты:\n" + json.dumps(items, ensure_ascii=False) +
             "\n\nВерни JSON: {\"clips\": [{\"id\": str, \"score\": 0-100, "
-            "\"type\": \"эмоция|конфликт|смешное|неожиданное|фейл|клатч|история|гость|выход|шутка|скучно\", "
+            "\"type\": \"эмоция|конфликт|смешное|неожиданное|фейл|клатч|история|гость|выход|шутка|философия|завоз|хаос|скучно\", "
             "\"use_lead_in\": bool (только если у фрагмента есть lead_in — подводка к гостю: ставить её в начало), "
             "\"clear_3s\": bool (понятно ли по первой фразе, что происходит и почему интересно), "
             "\"start\": int, \"end\": int, "
@@ -372,7 +382,8 @@ def _tags(c: Dict[str, Any], sig: Dict[str, Sequence[float]], hits) -> str:
     for t, kind, _w in hits:
         if a <= t < b:
             kinds[kind] = kinds.get(kind, 0) + 1
-    names = {"laugh": "смех", "mat": "мат", "react": "реакция", "shout": "крик-слово", "phrase": "«да ладно»-фраза",
+    names = {"wisdom": "мотивационная фраза", "zavoz_lead": "подводка к выходу", "chaos_word": "слово-хаос",
+             "laugh": "смех", "mat": "мат", "react": "реакция", "shout": "крик-слово", "phrase": "«да ладно»-фраза",
              "guest_lead": "подводка к гостю", "guest_in": "приветствие гостя", "reveal": "«смотрите/как я вам»",
              "joke": "мат+смех"}
     tags += [f"{names[k]}×{n}" for k, n in sorted(kinds.items())]
@@ -410,7 +421,8 @@ def _editor_view(c: Dict[str, Any], words, all_sents: List[Tuple[int, int]], cfg
     c["before"] = " ".join(w.text.strip() for w in words[k:c["first"]])
 
 
-_TYPE_TO_CAT = {"гость": "guest", "выход": "entrance", "шутка": "joke"}
+_TYPE_TO_CAT = {"гость": "guest", "выход": "entrance", "шутка": "joke", "философия": "philosophy",
+                "завоз": "zavoz", "хаос": "chaos", "конфликт": "conflict"}
 
 
 def _lead_and_category(c: Dict[str, Any], v: Optional[Dict[str, Any]], words) -> Dict[str, Any]:
@@ -422,6 +434,9 @@ def _lead_and_category(c: Dict[str, Any], v: Optional[Dict[str, Any]], words) ->
         out["moment_type"] = typ
     if cat:
         out["category"] = cat
+    if cat == "philosophy":
+        from .stream_types import MUSIC_NOTE
+        out["music"] = MUSIC_NOTE                      # no safe music library in the project: rendered without music
     li = c.get("lead_in")
     if li and (v.get("use_lead_in") if v else cat == "guest") and words[li[1]].end < c["start"] - 1.0:
         out["lead_in"] = [round(float(words[li[0]].start), 3), round(float(words[li[1]].end), 3)]
@@ -479,8 +494,11 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
     if not words:
         meta["selection_status"] = "no_words"
         return [], meta
+    from . import stream_types as st
     e = excitement(signals, n_sec, cfg.weights)
     speech = _speech_mask(words, n_sec)
+    tctx = st.Context(words, n_sec, signals, hits)
+    hits = tctx.hits                                         # + wisdom / zavoz_lead / chaos_word hits
     cands = build_candidates(words, cfg, hits)
     meta["candidates"] = len(cands)
     scored = []
@@ -490,6 +508,17 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
         if is_promo(c["text"]) or sum(low.count(x) for x in _ALERT) >= 2:
             continue
         sc, why = score_candidate(c, e, speech, words, cfg, hits)
+        ts = st.classify(c, tctx)
+        c["type_scores"] = {k: v for k, v in ts.items() if v > 0}
+        best = st.best_type(ts, cfg.moment_types)
+        if best:
+            if not c.get("category") or best in cfg.moment_types:
+                c["category"] = best
+            if best in cfg.moment_types:
+                sc = max(sc, ts[best]) + 0.5                 # asked for this type: it outranks generic excitement
+                why.append(f"type {best} {ts[best]:.1f}")
+        if cfg.moment_types and "conflict" not in cfg.moment_types and c.get("category") not in cfg.moment_types:
+            continue                                         # not one of the requested types
         scored.append((c, sc, why))
     scored.sort(key=lambda t: (-t[1], t[0]["start"], t[0]["end"]))
     # diverse pool: best per region, never overlapping, spaced
@@ -523,6 +552,11 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
                 if len(picked) >= max_clips:
                     break
                 c0, sc, why = by_id[v["id"]]
+                vcat = _TYPE_TO_CAT.get(v["type"]) or c0.get("category")
+                if cfg.moment_types and vcat not in cfg.moment_types and v["type"] not in ("", "скучно") \
+                        and not (c0.get("category") in cfg.moment_types):
+                    rejected += 1                            # a good clip, but not of the requested type
+                    continue
                 strong = v["clear_3s"] and v["type"] != "скучно" and v["score"] >= cfg.min_editor_score
                 if not strong and len(picked) >= cfg.min_keep:
                     rejected += 1
@@ -557,10 +591,11 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
 def _run_editor(pool: List[Dict[str, Any]], want: int, cfg: MomentConfig,
                 chat: Optional[Callable[..., Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     meta: Dict[str, Any] = {"prompt_version": PROMPT_VERSION, "pool": len(pool), "budget_rub": cfg.budget_rub}
-    msgs = editor_messages(pool, want, cfg.context)
+    em = lambda p: editor_messages(p, want, cfg.context, cfg.moment_types, cfg.max_duration)   # noqa: E731
+    msgs = em(pool)
     while len(pool) > want and forecast_rub(msgs, len(pool), cfg) > cfg.budget_rub:
         pool = pool[:-1]                                    # shrink until the forecast fits the cap
-        msgs = editor_messages(pool, want, cfg.context)
+        msgs = em(pool)
     meta["forecast_rub"] = forecast_rub(msgs, len(pool), cfg)
     if meta["forecast_rub"] > cfg.budget_rub:
         meta["status"] = "skipped_budget"
