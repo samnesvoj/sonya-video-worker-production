@@ -93,13 +93,23 @@ def applies(mode: str, params: Dict[str, Any]) -> bool:
 RENDER_BITRATE = "6M"
 
 
+def _double(rate: str) -> str:
+    """"6M" -> "12M" (VBV buffer = 2 s of the cap)."""
+    num = rate.rstrip("kKmM")
+    return f"{float(num) * 2:g}{rate[len(num):]}"
+
+
 def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
     """sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", bitrate) for nvenc / cpu."""
     if family == "nvenc":
         args = ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20"]
         args += ["-b:v", bitrate] if bitrate else ["-b:v", "0"]
     elif family == "cpu":
-        args = ["-c:v", "libx264", "-preset", "slow", "-crf", "19"] + (["-b:v", bitrate] if bitrate else [])
+        # libx264 ignores -b:v next to -crf (measured: 7.1 Mb/s on a 1080p60 stream clip): cap it with the VBV
+        # instead, so a 60 s clip stays ≈ 45 MB like the NVENC / VideoToolbox renders (Telegram's 50 MB limit)
+        args = ["-c:v", "libx264", "-preset", "slow", "-crf", "19"]
+        if bitrate:
+            args += ["-maxrate", bitrate, "-bufsize", _double(bitrate)]
     else:
         raise ValueError(f"unsupported encoder family {family}")
     return args + ["-pix_fmt", "yuv420p"]

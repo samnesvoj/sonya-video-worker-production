@@ -770,6 +770,8 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
         parts.append(f"[single][pair]overlay=0:0:enable='{enable}'")
         vf = ";".join(parts)
     cwd = None
+    # ffmpeg runs from the subtitle directory (below): relative source / output paths would point there
+    input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
     if subtitle_path:
         # Reference the .ass by its bare name from its own directory: project
         # paths may contain ', :, spaces… which filtergraph quoting can't express

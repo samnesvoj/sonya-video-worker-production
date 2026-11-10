@@ -293,9 +293,10 @@ def cam_window(rect: Sequence[int], face_cx: float, face_cy: float, aspect: floa
 
 
 def game_window(W: int, H: int, avoid: Sequence[Sequence[float]], *, aspect: float = 1080 / 960,
-                heights: Sequence[float] = (0.9, 0.8, 0.7)) -> Tuple[List[int], float]:
-    """Game crop (aspect 1080:960) that shows as little of `avoid` (chat columns, the webcam) as it can,
-    nearest the centre (the crosshair). Tries the tallest window first. -> (box, share of the box covered)."""
+                heights: Sequence[float] = (0.9, 0.8, 0.7, 0.6)) -> Tuple[List[int], float]:
+    """Game crop (aspect 1080:960) that shows as little of `avoid` (chat columns, the webcam) as it can, nearest
+    the centre (the crosshair stays in the middle 60 % of the window, both ways). Tallest window first; a smaller
+    one (a light zoom) only when the taller ones cannot leave `avoid` out. -> (box, share of the box covered)."""
     best: Optional[Tuple[float, float, List[int]]] = None
     for hf in heights:
         gh = int(H * hf) // 2 * 2
@@ -303,15 +304,20 @@ def game_window(W: int, H: int, avoid: Sequence[Sequence[float]], *, aspect: flo
         if gw > W:
             gw = W // 2 * 2
             gh = int(gw / aspect) // 2 * 2
-        gy = (H - gh) // 2 // 2 * 2
-        for gx in range(0, W - gw + 1, 8):
-            box = [gx, gy, gw, gh]
-            cov = sum(_overlap(box, a) for a in avoid) / float(gw * gh)
-            off = abs(gx + gw / 2 - W / 2) / W
-            key = (round(cov, 2), off - 0.05 * hf)
-            if best is None or key < best[:2]:
-                best = (key[0], key[1], [gx // 2 * 2, gy, gw, gh])
-        if best and best[0] <= 0.01:
+        y_lo = max(0, int(H / 2 - 0.8 * gh))
+        y_hi = min(H - gh, int(H / 2 - 0.2 * gh))
+        x_lo = max(0, int(W / 2 - 0.8 * gw))
+        x_hi = min(W - gw, int(W / 2 - 0.2 * gw))
+        ys = sorted(set([(H - gh) // 2] + list(range(y_lo, max(y_lo, y_hi) + 1, 8))))
+        for gy in ys:
+            for gx in range(x_lo, max(x_lo, x_hi) + 1, 8):
+                box = [gx, gy, gw, gh]
+                cov = sum(_overlap(box, a) for a in avoid) / float(gw * gh)
+                off = abs(gx + gw / 2 - W / 2) / W + abs(gy + gh / 2 - H / 2) / H
+                key = (round(cov, 3), off - 0.05 * hf)
+                if best is None or key < best[:2]:
+                    best = (key[0], key[1], [gx // 2 * 2, gy // 2 * 2, gw, gh])
+        if best and best[0] <= 0.002:
             break
     assert best is not None
     return best[2], best[0]
@@ -319,8 +325,10 @@ def game_window(W: int, H: int, avoid: Sequence[Sequence[float]], *, aspect: flo
 
 def analyze_layout(video: str, start: float, duration: float, face_src: Optional[Sequence[float]],
                    W: int, H: int, *, detector_box: Optional[Sequence[float]] = None,
-                   n_frames: int = 24) -> Dict[str, Any]:
-    """-> {"version", "webcam": {rect (src px), by, cover, edges} | None, "chat": [boxes src px], "frames": n}."""
+                   known_rects: Sequence[Sequence[int]] = (), n_frames: int = 24) -> Dict[str, Any]:
+    """-> {"version", "webcam": {rect (src px), by, cover, edges} | None, "chat": [boxes src px], "frames": n}.
+    `known_rects` (src px, the stream survey): when this clip finds no webcam of its own, a known rectangle whose
+    border is visible in THIS clip's frames is taken (by="survey")."""
     frames, k = sample_frames(video, start, duration, n_frames)
     out: Dict[str, Any] = {"version": VERSION, "frames": len(frames), "webcam": None, "chat": []}
     if len(frames) < 4:
@@ -331,6 +339,18 @@ def analyze_layout(video: str, start: float, duration: float, face_src: Optional
     face = [v * k for v in face_src[:4]] if face_src is not None else None
     seed = [v * k for v in detector_box] if detector_box is not None else None
     cam = webcam_rect(frames, face, maps=maps, seed=seed, chat=chat_w)
+    if cam is None:
+        for kr in known_rects:
+            x, y, w, h = (int(round(v * k)) for v in kr)
+            V, Hz = maps
+            cov = min(_profile(V, x, y, y + h, True) if x > 1 else 1.0,
+                      _profile(V, x + w, y, y + h, True) if x + w < V.shape[1] - 2 else 1.0,
+                      _profile(Hz, y, x, x + w, False) if y > 1 else 1.0,
+                      _profile(Hz, y + h, x, x + w, False) if y + h < V.shape[0] - 2 else 1.0)
+            if cov >= 0.5:
+                cam = {"rect": [x, y, w, h], "cover": round(cov, 3), "by": "survey", "ok": True, "why": None,
+                       "edges": int((x <= 1) + (y <= 1) + (x + w >= V.shape[1] - 2) + (y + h >= V.shape[0] - 2))}
+                break
     if cam is not None:
         r = cam["rect"]
         # a talking face inside the webcam is not chat: drop chat cells that fall in the webcam
@@ -344,10 +364,11 @@ def analyze_layout(video: str, start: float, duration: float, face_src: Optional
 
 # ── whole-stream survey + the game track ────────────────────────────────────
 
-def webcam_face(analysis: Optional[Dict[str, Any]], W: int, H: int, *, min_presence: float = 0.3,
-                min_score: float = 0.7) -> Optional[List[float]]:
+def webcam_face(analysis: Optional[Dict[str, Any]], W: int, H: int, *, min_presence: float = 0.25,
+                min_score: float = 0.6) -> Optional[List[float]]:
     """The streamer's webcam face in a per-clip analysis (clip_analysis samples): a small face (< 22 % of the width)
-    that holds its place and size. -> median [x, y, w, h] (source px) or None (same rule as game_track)."""
+    that holds its place and size. -> median [x, y, w, h] (source px) or None. Looser than game_track (score 0.6,
+    25 % of samples): a face in paint / a mask scores 0.6–0.75 (Buster «Халк» stream); steadiness still guards."""
     if not analysis or not analysis.get("samples"):
         return None
     boxes = []

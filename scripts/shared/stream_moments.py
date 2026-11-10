@@ -340,6 +340,9 @@ def _run_editor(pool: List[Dict[str, Any]], want: int, cfg: MomentConfig,
         meta.update(tel)
         cost = tel.get("cost_usd")
         meta["cost_rub"] = round(float(cost) * cfg.rub_per_usd, 3) if cost is not None else None
+        if cost is None and tel.get("input_tokens") is not None:     # Timeweb reports tokens, not money
+            est = (float(tel["input_tokens"]) * _PRICE_IN + float(tel.get("output_tokens") or 0) * _PRICE_OUT) / 1e6
+            meta["cost_rub_estimate"] = round(est * cfg.rub_per_usd, 3)
         verdicts = llm_editor.parse(res.text, {c["id"]: c for c in pool})
     except Exception as exc:                                # never let the editor kill the run
         meta["status"] = "error"

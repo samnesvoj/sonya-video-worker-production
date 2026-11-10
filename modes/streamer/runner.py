@@ -274,7 +274,8 @@ def compose_one(
             det_box = _webcam_box(input_video_path, start, dur, W, H)
             segment["webcam_detector_box"] = det_box
         try:
-            lay = sl.analyze_layout(input_video_path, start, dur, face, W, H, detector_box=det_box)
+            known = [r["rect"] for r in (hints.get("survey") or {}).get("rects") or [] if r.get("seen", 0) >= 2]
+            lay = sl.analyze_layout(input_video_path, start, dur, face, W, H, detector_box=det_box, known_rects=known)
         except Exception as exc:                      # never lose the clip over the layout look
             logger.warning("[streamer] layout analysis failed: %s", exc)
             lay = {"webcam": None, "chat": [], "error": str(exc)[:200]}

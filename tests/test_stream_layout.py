@@ -124,3 +124,46 @@ def test_stream_game_track_none_without_webcam():
 def test_moving_face_is_not_a_webcam():
     an = {"samples": [{"t": i * 0.1, "faces": [[100 + i * 40, 300, 60, 80, 0.9, 0.0]]} for i in range(20)]}
     assert sl.webcam_face(an, 1920, 1080) is None
+
+
+def test_render_game_layout_one_pass_absolute_paths(monkeypatch, tmp_path):
+    """One ffmpeg pass straight from the source: lanczos, cam + game stacked, 6 Mb/s args, and absolute paths
+    (ffmpeg runs from the subtitle folder; a relative output path broke every clip of the first v2 run)."""
+    from scripts.shared.crop import smart_crop_adapter as sca
+    from scripts.shared import cut_profile
+    seen = {}
+
+    def fake_run(make, args, **kw):
+        seen["cmd"] = make(args)
+        seen["cwd"] = kw.get("cwd")
+        import subprocess
+        return subprocess.CompletedProcess(seen["cmd"], 0, "", ""), "cpu", 0.1
+
+    monkeypatch.setattr(cut_profile, "run_encode", fake_run)
+    monkeypatch.chdir(tmp_path)
+    sub = tmp_path / "subs"
+    sub.mkdir()
+    (sub / "stream_clip_01.ass").write_text("[Script Info]\n", encoding="utf-8")
+    track = {"layout": "game", "cam": [10, 10, 540, 480], "game": [400, 54, 1092, 972]}
+    sca.render_tracked("src.mp4", "out/clip.mp4", 100.0, 40.0, track,
+                       encoder_args=cut_profile.encoder_args("cpu"), subtitle_path=str(sub / "stream_clip_01.ass"))
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("-i") + 1] == str(tmp_path / "src.mp4")
+    assert cmd[-1] == str(tmp_path / "out" / "clip.mp4")
+    vf = cmd[cmd.index("-vf") + 1]
+    assert vf.count("flags=lanczos") == 2 and "vstack" in vf and "crop=540:480:10:10" in vf
+    assert cmd.count("-i") == 1 and cmd[cmd.index("-maxrate") + 1] == "6M"
+    assert seen["cwd"] == str(sub)
+
+
+def test_game_window_shows_less_of_a_big_top_left_webcam_than_the_centred_window():
+    """Buster stream: webcam 0..1092 x 0..604 top-left reaches the crosshair, so it cannot be left out entirely;
+    the window must still show less of it than the centred 90 % window did, crosshair kept in the picture."""
+    cam = [0, 0, 1092, 604]
+    box, cov = sl.game_window(1920, 1080, [cam])
+    gh = int(1080 * 0.9) // 2 * 2
+    gw = int(gh * 1080 / 960) // 2 * 2
+    centred = [(1920 - gw) // 2, (1080 - gh) // 2, gw, gh]
+    assert cov < sl._overlap(centred, cam) / float(gw * gh)
+    gx, gy, w, h = box
+    assert gx + 0.2 * w <= 960 <= gx + 0.8 * w and gy + 0.2 * h <= 540 <= gy + 0.8 * h
