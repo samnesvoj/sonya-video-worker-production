@@ -35,6 +35,7 @@ WORK_W = 960                   # analysis width
 CELL = 24                      # chat grid cell (analysis px)
 PRESENT_MIN = 0.06             # mean share of the cell covered by small text lines
 CHANGE_MIN = 0.04              # mean share of the cell whose text differs between two looks
+EDGE_FRAC = 0.22          # a chat/event panel must reach into the outer 22% of the frame width
 
 
 # ── frames ──────────────────────────────────────────────────────────────────
@@ -266,6 +267,12 @@ def chat_zones(frames: Sequence[np.ndarray], *, min_height_frac: float = 0.12,
     for i in range(1, n):
         x, y, w, h, a = st[i]
         if h * CELL < min_height_frac * Hh or a < 6:
+            continue
+        # chat / event panels sit at the frame EDGES; a "text" blob in the middle of the game is
+        # HUD, name tags or subtitles of the game itself — never blur it (owner 2026-11-10:
+        # «что за заблюренный прямоугольник посередине»).
+        zx0, zx1 = x * CELL, (x + w) * CELL
+        if zx0 > EDGE_FRAC * Ww and zx1 < (1.0 - EDGE_FRAC) * Ww:
             continue
         zones.append({"box": [int(x * CELL), int(y * CELL), int(w * CELL), int(h * CELL)],
                       "text": round(float(present[lab == i].mean()), 3),
