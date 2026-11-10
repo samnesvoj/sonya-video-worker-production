@@ -382,7 +382,7 @@ def _tags(c: Dict[str, Any], sig: Dict[str, Sequence[float]], hits) -> str:
     for t, kind, _w in hits:
         if a <= t < b:
             kinds[kind] = kinds.get(kind, 0) + 1
-    names = {"wisdom": "мотивационная фраза", "zavoz_lead": "подводка к выходу", "chaos_word": "слово-хаос",
+    names = {"wisdom": "мотивационная фраза", "wisdom_soft": "слово о жизни", "zavoz_lead": "подводка к выходу", "chaos_word": "слово-хаос",
              "laugh": "смех", "mat": "мат", "react": "реакция", "shout": "крик-слово", "phrase": "«да ладно»-фраза",
              "guest_lead": "подводка к гостю", "guest_in": "приветствие гостя", "reveal": "«смотрите/как я вам»",
              "joke": "мат+смех"}

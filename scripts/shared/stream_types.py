@@ -46,9 +46,13 @@ _WISDOM = re.compile(
     r"не сдавайтесь|не сдавайся|главное не сдаваться|главное (это )?верить|главное не бояться|не бойтесь|не бойся|"
     r"идите к (своей )?(цели|мечте)|своей мечт|ваша мечта|моя мечта|все получится|получится у (каждого|вас|всех)|"
     r"жизнь (одна|коротка|такая)|в жизни (главное|нужно)|путь к успеху|путь (к|в) (цели|мечте)|"
-    r"я хочу (вам |всем )?сказать|запомните|помните что|каждый (из вас|человек)|человек (может|способен)|"
+    r"помните что|каждый (из вас|человек)|человек (может|способен)|"
     r"сила в (том|тебе)|успех (приходит|это)|смысл жизни|не бывает (поздно|невозможного)|никогда не поздно|"
     r"сомневал|смеялись|говорили что (я|у меня) не|ничего не получится")
+# softer life-talk vocabulary: one word means nothing, a dense cluster in a calm monologue does
+_SOFT = re.compile(r"верил|поверил|сомнева|мечт|\bцел[ьиюе]\b|\bпуть\b|\bпути\b|успех|успешн|\bжизн|страх|боял|боюсь|"
+                   r"сдаваться|сдался|сдавал|\bшанс|ошибк|\bопыт|смысл|счастлив|выгора|\bтрудно|тяжело|упорств|"
+                   r"терпени|талант|самооценк|уверенн|принима|важно|ценност|настоящ|осознал|понял что|понимаешь что")
 _ZAVOZ = re.compile(r"встречайте|на сцену|выходит|заходит|заезжает|появляется|поприветствуем|аплодисменты|"
                     r"завоз|завозим|завез|представляю|прямо сейчас к нам|дамы и господа|барабанная дробь|"
                     r"а теперь|и вот он|и вот она|сюрприз")
@@ -76,7 +80,7 @@ def type_hits(words: Sequence[Dict[str, Any]], n_sec: int = 0) -> List[Tuple[flo
     for i, w in enumerate(seq):
         win = " ".join(t for t in toks[i:i + 4] if t)
         t = round(float(_w(w, "start")), 2)
-        for kind, rx, gap in (("wisdom", _WISDOM, 5.0), ("zavoz_lead", _ZAVOZ, 6.0), ("chaos_word", _CHAOS, 3.0)):
+        for kind, rx, gap in (("wisdom", _WISDOM, 5.0), ("wisdom_soft", _SOFT, 2.0), ("zavoz_lead", _ZAVOZ, 6.0), ("chaos_word", _CHAOS, 3.0)):
             if rx.search(win) and t - last.get(kind, -99.0) >= gap:
                 out.append((t, kind, win))
                 last[kind] = t
@@ -143,13 +147,14 @@ def classify(c: Dict[str, Any], ctx: Context) -> Dict[str, float]:
 
     # philosophy: ≥ 2 motivational phrases (or 1 strong + length), calm voice, almost no pauses, no jokes / shouts
     wis = ctx.span(a, b, ("wisdom",))
+    soft = len(ctx.span(a, b, ("wisdom_soft",)))
     silent = float(c.get("silent", 0.0))
-    if wis and 20.0 <= dur <= PHILOSOPHY_MAX_SEC + 1e-6 and len(emo) <= 2 and loud_max < 3.0 and silent < 0.25 \
+    if (wis or soft >= max(5, dur / 6.0)) and 20.0 <= dur <= PHILOSOPHY_MAX_SEC + 1e-6 and len(emo) <= 2 and loud_max < 3.0 and silent < 0.25 \
             and not any(h[1] in ("laugh", "joke") for h in emo):
         n = len(wis)
-        if n >= 2 or (n == 1 and dur >= 30.0 and len(emo) == 0):
-            out["philosophy"] = round(1.2 + 0.45 * min(n, 4) + (0.3 if len(emo) == 0 else 0.0)
-                                      - abs(dur - 40.0) / 80.0, 3)
+        if n >= 2 or (n == 1 and dur >= 30.0 and len(emo) == 0) or (not wis and len(emo) <= 1):
+            out["philosophy"] = round(1.2 + 0.45 * min(n, 4) + min(0.5, 0.05 * soft)
+                                      + (0.3 if len(emo) == 0 else 0.0) - abs(dur - 40.0) / 80.0, 3)
 
     # zavoz: lead-in → music → entrance → reaction. Needs the lead-in AND a reaction AND (music or a greeting)
     lead = ctx.span(a - 30.0, a + 10.0, ("zavoz_lead", "guest_lead"))
