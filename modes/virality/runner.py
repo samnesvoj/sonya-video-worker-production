@@ -145,6 +145,10 @@ def _source_dims(path: str) -> "tuple[int, int]":
 def _compose(input_video_path: str, enrichment: Dict[str, Any], selected: List[Dict[str, Any]],
              output_dir: Path, params: Dict[str, Any]) -> List[str]:
     crop = params["crop"]
+    from scripts.shared import split_filler
+    _f = split_filler.normalize(params, params.get("settings") if isinstance(params.get("settings"), dict) else None)
+    if _f["mode"] != "none":
+        crop = dict(crop, bottom_filler=_f)
     if params.get("promo"):
         crop = dict(crop, promo=params["promo"])     # overlay drawn with the subtitles
     return _compose_tracked(input_video_path, selected, output_dir, crop,
@@ -233,6 +237,10 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
 
     from scripts.shared.subtitles import subtitles_for_clip
 
+    from scripts.shared import split_filler
+    from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
+    import os
+    filler = crop.get("bottom_filler")
     fit = crop.get("layout") in ("fit", "blur")
     per_clip = crop.get("analysis") == "per_clip" and not fit
     analysis = None if per_clip else _load_face_analysis(crop)
@@ -275,7 +283,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         sub_path = None
         if subs.get("mode") == "burn":
             sm = subtitles_for_clip(words, start, dur, Path(out).with_suffix(".ass"),
-                                    centered=(track.get("split") or {}).get("intervals") or track.get("seam"),
+                                    centered=(split_filler.seam_intervals(dur, filler["top_h"]) if filler else
+                                              (track.get("split") or {}).get("intervals") or track.get("seam")),
                                     avoid=zones,
                                     preset=subs.get("style"), keywords=seg.get("keywords"),
                                     hook=seg.get("hook") if subs.get("hook", False) else None,
@@ -288,7 +297,16 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             seg.update(sm)
             sub_path = str(Path(out).with_suffix(".ass")) if burn else None
         try:
-            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
+            if filler:
+                tmp = str(Path(out).with_suffix(".top.mp4"))
+                render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg)
+                if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
+                                      ffmpeg=ffmpeg_bin()):
+                    os.remove(tmp)
+                else:
+                    os.replace(tmp, out)
+            else:
+                render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
             if crop.get("promo") and crop["promo"].get("integration"):
                 seg.update(_insert_integration(out, crop["promo"], words or [], start, dur))
             return out

@@ -61,6 +61,10 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
     ad = sonya_ad_settings(params, settings)
     if ad:
         crop["sonya_ad"] = ad
+    from scripts.shared import split_filler
+    filler = split_filler.normalize(params, settings)          # bottom_filler none|gameplay|asmr (+ filler_id, filler_top_h)
+    if filler["mode"] != "none":
+        crop["bottom_filler"] = filler
     # layout_template 1..5 (site choice; default 1 = webcam on top / game below), nick for template 5's caption
     from scripts.shared.crop.stream_templates import normalize_template
     crop["layout_template"] = normalize_template(params.get("layout_template", settings.get("streamer_layout", settings.get("layoutTemplate"))))
@@ -345,6 +349,10 @@ def compose_one(
 
     clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
     track = None
+    from scripts.shared import split_filler
+    filler = crop.get("bottom_filler") if (crop.get("bottom_filler") or {}).get("mode", "none") != "none" else None
+    if filler:                                        # split-screen: the top is the streamer's face/webcam only, never the game
+        crop["layout"], crop["layout_template"] = "person", 1
     if crop.get("layout") == "game":
         from scripts.shared.crop import stream_layout as sl
         face = sl.webcam_face(clip_an, W, H)
@@ -367,7 +375,8 @@ def compose_one(
         track.setdefault("layout", "person")
     track.setdefault("webcam_source", None)
     from scripts.shared.crop.stream_templates import apply_template
-    track = apply_template(track, crop.get("layout_template"), nick=crop.get("streamer_name"))
+    if not filler:
+        track = apply_template(track, crop.get("layout_template"), nick=crop.get("streamer_name"))
     segment["layout_template"] = track.get("template")
     if clip_an is None:
         track["fallback_reason"] = err.split(":", 1)[0] if err else "analysis_failed"
@@ -414,9 +423,11 @@ def compose_one(
         ass = Path(output_path).with_suffix(".ass")
         game = track.get("layout") == "game"
         centered = None
-        if game:                                       # full-game layout: right above the game; old one: the seam
+        if filler:                                     # captions on the seam between the face and the filler
+            centered = split_filler.seam_intervals(out_dur, filler["top_h"])
+        elif game:                                       # full-game layout: right above the game; old one: the seam
             centered = [[0.0, round(out_dur, 3), track["seam_y"]]] if track.get("seam_y") else [[0.0, round(out_dur, 3)]]
-        if not game:
+        if not game and not filler:
             t2 = track if not crop.get("jump_cuts", True) else None
             centered = (((t2 or {}).get("split") or {}).get("intervals") or (t2 or {}).get("seam")) if t2 else None
         hook = (segment.get("hook") or None) if crop.get("hook_title", True) else None
@@ -428,7 +439,18 @@ def compose_one(
         segment["subtitle_burn"] = "burned" if burn else "none"
         segment["subtitle_hook"] = sm.get("subtitle_hook")
         sub_path = str(ass) if burn else None
-    from scripts.shared.crop.smart_crop_adapter import render_pieces
+    from scripts.shared.crop.smart_crop_adapter import render_pieces, ffmpeg_bin
+    if filler:
+        tmp = str(Path(output_path).with_suffix(".top.mp4"))
+        render_pieces(input_video_path, tmp, pieces, track, start, fps=fps,
+                      has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=None, report=segment)
+        ok = split_filler.apply(tmp, output_path, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=segment,
+                                ffmpeg=ffmpeg_bin())
+        if ok:
+            os.remove(tmp)
+        else:                                          # no usable filler: the plain top render is still a valid clip
+            os.replace(tmp, output_path)
+        return output_path
     render_pieces(input_video_path, output_path, pieces, track, start, fps=fps,
                   has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=sub_path, report=segment)
     return output_path
