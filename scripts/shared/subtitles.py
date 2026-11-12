@@ -130,7 +130,17 @@ def ass_escape(text: str) -> str:
 
 def _in_any(c: Cue, intervals) -> bool:
     """Most of the cue falls inside one of the intervals."""
-    return any(min(c.end, b) - max(c.start, a) >= 0.5 * (c.end - c.start) for a, b in intervals or [])
+    return _seam_of(c, intervals) is not False
+
+
+def _seam_of(c: Cue, intervals):
+    """The interval the cue falls in (most of it): its seam y (3rd item, e.g. the top of the game in the full-game
+    streamer layout) or None (frame centre); False = in none."""
+    for iv in intervals or []:
+        a, b = iv[0], iv[1]
+        if min(c.end, b) - max(c.start, a) >= 0.5 * (c.end - c.start):
+            return iv[2] if len(iv) > 2 else None
+    return False
 
 
 def placement(c: Cue, style: SubtitleStyle, play_res: Tuple[int, int], centered, avoid) -> str:
@@ -139,7 +149,11 @@ def placement(c: Cue, style: SubtitleStyle, play_res: Tuple[int, int], centered,
     w, h = play_res
     lines = max(1, len(c.lines))
     band_h = lines * style.size * 1.25
-    if _in_any(c, centered):
+    seam = _seam_of(c, centered)
+    if seam is not False and seam is not None:      # just above the seam: the whole game stays uncovered
+        bottom = float(seam) - 22
+        top, tag = bottom - band_h, "{\\an2\\pos(%d,%d)}" % (w // 2, int(bottom))
+    elif seam is None:
         top, bottom, tag = h / 2 - band_h / 2, h / 2 + band_h / 2, "{\\an5\\pos(%d,%d)}" % (w // 2, h // 2)
     else:
         bottom = h - style.margin_v
@@ -191,7 +205,8 @@ def subtitles_for_clip(raw_words: Optional[Iterable[Dict[str, Any]]], clip_start
                        centered: Optional[List[Tuple[float, float]]] = None,
                        avoid: Optional[List[List[float]]] = None, preset: Optional[str] = None,
                        keywords: Optional[List[str]] = None, hook: Optional[str] = None,
-                       font: Optional[str] = None, promo: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       font: Optional[str] = None, promo: Optional[Dict[str, Any]] = None,
+                       hook_top: Optional[int] = None) -> Dict[str, Any]:
     """Write <clip>.ass for one render interval. Returns metadata; no file
     when there are no words (status says why)."""
     style = style or SubtitleStyle()
@@ -211,7 +226,8 @@ def subtitles_for_clip(raw_words: Optional[Iterable[Dict[str, Any]]], clip_start
     if preset and preset != "classic":   # trendy word-level styles (scripts/shared/subtitle_styles.py)
         from .subtitle_styles import PRESETS, to_ass as preset_ass
         ass_text = preset_ass(words, preset, clip_duration, centered=centered, avoid=avoid, base=style,
-                              keywords=keywords, hook=hook, font=font, promo=promo)
+                              keywords=keywords, hook=hook, font=font, promo=promo,
+                              **({"hook_top": hook_top} if hook_top is not None else {}))
         if promo:
             meta["promo_version"] = "promo-v1"
         if hook:

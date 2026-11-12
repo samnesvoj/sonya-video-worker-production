@@ -155,9 +155,10 @@ def _wrap_hook(hook: str, max_w: float = 900.0, font: str = "Montserrat Black") 
 def to_ass(words: List[Word], preset_id: str, clip_duration: float, play_res: Tuple[int, int] = (1080, 1920),
            centered=None, avoid=None, base: Optional[SubtitleStyle] = None,
            keywords: Optional[List[str]] = None, hook: Optional[str] = None, font: Optional[str] = None,
-           promo: Optional[Dict] = None) -> str:
+           promo: Optional[Dict] = None, hook_top: Optional[int] = None) -> str:
     """keywords: words to keep emphasised (Submagic-style); hook: a title shown on top for the first seconds
-    (Opus-style), on a translucent graphite plate."""
+    (Opus-style), on a translucent graphite plate. hook_top: its top edge in px (default: the style's 230 px;
+    the streamer layout puts it higher, over the webcam's headroom, so it does not cover the face)."""
     p = PRESETS.get(preset_id) or PRESETS[DEFAULT]
     hook_font = "Montserrat Black"
     if font and font in available_fonts():
@@ -185,8 +186,9 @@ def to_ass(words: List[Word], preset_id: str, clip_duration: float, play_res: Tu
         "", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
     ev: List[str] = []
     if hook:
+        pos = f"{{\\an8\\pos({w // 2},{int(hook_top)})}}" if hook_top is not None else ""
         ev.append(f"Dialogue: 1,{_ass_time(0.0)},{_ass_time(min(3.2, clip_duration))},Hook,,0,0,0,,"
-                  f"{{\\fad(150,300)}}{_wrap_hook(hook, font=hook_font)}")
+                  f"{{\\fad(150,300)}}{pos}{_wrap_hook(hook, font=hook_font)}")
     kw = {_norm(k) for k in keywords or [] if _norm(k)}
     gs = groups(words, p, clip_duration)
     for gi, g in enumerate(gs):
