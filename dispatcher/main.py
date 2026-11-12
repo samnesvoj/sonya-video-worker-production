@@ -41,7 +41,7 @@ def build_fleet(env=os.environ) -> FleetManager:
     cfg = FleetConfig.from_env(dict(env))
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return FleetManager(cfg, FleetStore(str(STATE_DIR / "fleet.db")), VastClient(_vast_key(env), dry_run=cfg.dry_run),
-                        PostgresQueueView(env["DATABASE_URL"]), release_token_provider(cfg.release_repo.split("/")[-1], env), env)
+                        PostgresQueueView(env["DATABASE_URL"]), release_token_provider(cfg.release_repo, env), env)
 
 
 def build_accounting(fleet: FleetManager, env=os.environ):
