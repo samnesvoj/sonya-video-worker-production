@@ -309,6 +309,17 @@ def extract_audio_global(video_path: str) -> AudioGlobalData:
             import librosa as _librosa
             logger.info("Extracting full audio via direct librosa.load (audio_cache unavailable)...")
             y, sr = _librosa.load(video_path, sr=16000, mono=True)
+    except Exception as first:
+        # The worker image has no librosa (requirements-worker.txt): read the audio with ffmpeg instead,
+        # so the real v5 pipeline runs instead of failing at step 1 (the old «first 60 s» fallback).
+        try:
+            y, sr = _ffmpeg_audio_16k(video_path), 16000
+            logger.warning("Audio via ffmpeg + numpy (librosa unavailable: %s)", str(first)[:120])
+        except Exception as exc:
+            logger.error(f"Audio extraction failed: {exc}")
+            return AudioGlobalData(samples=np.array([]), sample_rate=16000, duration_sec=0.0,
+                                   source_path=video_path, extraction_ok=False, error=str(exc))
+    try:
 
         duration_sec = float(len(y) / max(sr, 1))
         logger.info("Audio extracted from cached WAV: %.1fs @ %d Hz", duration_sec, sr)
@@ -331,6 +342,52 @@ def extract_audio_global(video_path: str) -> AudioGlobalData:
         )
 
 
+def _ffmpeg_audio_16k(video_path: str) -> np.ndarray:
+    """Mono float32 @ 16 kHz through ffmpeg (no librosa / soundfile needed)."""
+    import os
+    import shutil
+    ff = os.environ.get("SONYA_FFMPEG") or shutil.which("ffmpeg") or "ffmpeg"
+    raw = subprocess.run([ff, "-nostdin", "-loglevel", "error", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000",
+                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+def _frames(win: np.ndarray, frame_length: int = 2048, hop_length: int = 512) -> np.ndarray:
+    if len(win) < frame_length:
+        win = np.pad(win, (0, frame_length - len(win)))
+    n = 1 + (len(win) - frame_length) // hop_length
+    idx = np.arange(frame_length)[None, :] + hop_length * np.arange(n)[:, None]
+    return win[idx]
+
+
+class _NumpyFeatures:
+    """The three librosa.feature calls v5 uses, in numpy (same frame/hop defaults), for images without librosa."""
+
+    @staticmethod
+    def rms(y, frame_length=2048, hop_length=512):
+        f = _frames(np.asarray(y, np.float32), frame_length, hop_length)
+        return np.sqrt(np.mean(f ** 2, axis=1))[None, :]
+
+    @staticmethod
+    def zero_crossing_rate(y, frame_length=2048, hop_length=512):
+        f = _frames(np.asarray(y, np.float32), frame_length, hop_length)
+        return np.mean(np.abs(np.diff(np.signbit(f), axis=1)), axis=1)[None, :]
+
+    @staticmethod
+    def spectral_flatness(y, n_fft=2048, hop_length=512, amin=1e-10):
+        f = _frames(np.asarray(y, np.float32), n_fft, hop_length) * np.hanning(n_fft)[None, :]
+        power = np.maximum(amin, np.abs(np.fft.rfft(f, axis=1)) ** 2)
+        return (np.exp(np.mean(np.log(power), axis=1)) / np.mean(power, axis=1))[None, :]
+
+
+def _librosa_or_numpy():
+    try:
+        import librosa
+        return librosa.feature, "librosa"
+    except Exception:  # noqa: BLE001 — worker image: numpy versions of the same three features
+        return _NumpyFeatures, "numpy"
+
+
 def compute_audio_features_from_array(
     y: np.ndarray,
     sr: int,
@@ -340,7 +397,7 @@ def compute_audio_features_from_array(
 ) -> AudioWindowFeatures:
     """Compute rich audio features for a time window from a pre-loaded array."""
     try:
-        import librosa
+        feature, _backend = _librosa_or_numpy()
 
         start_sample = int(start_sec * sr)
         end_sample = int(end_sec * sr)
@@ -352,11 +409,11 @@ def compute_audio_features_from_array(
         profile_cfg = AUDIO_PROFILES.get(profile, AUDIO_PROFILES["lecture"])
 
         # --- speech clarity ---
-        spectral_flatness = librosa.feature.spectral_flatness(y=win)[0]
+        spectral_flatness = feature.spectral_flatness(y=win)[0]
         speech_clarity = float(np.clip(1.0 - np.mean(spectral_flatness), 0, 1))
 
         # --- speech rate via ZCR ---
-        zcr = librosa.feature.zero_crossing_rate(win)[0]
+        zcr = feature.zero_crossing_rate(win)[0]
         zcr_mean = float(np.mean(zcr))
         zcr_min, zcr_max = profile_cfg["optimal_zcr_range"]
         if zcr_mean < zcr_min:
@@ -369,7 +426,7 @@ def compute_audio_features_from_array(
         # --- energy / RMS ---
         frame_length = 2048
         hop_length = 512
-        rms = librosa.feature.rms(y=win, frame_length=frame_length, hop_length=hop_length)[0]
+        rms = feature.rms(y=win, frame_length=frame_length, hop_length=hop_length)[0]
         energy_mean = float(np.mean(rms))
         energy_std = float(np.std(rms))
 

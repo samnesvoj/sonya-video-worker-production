@@ -1,8 +1,8 @@
 name: educational
-version: "1.0"
+version: "4.0"
 description: >
-  Educational content mode. Layout-aware: screen_share → preserve_screen,
-  single_speaker → person_focus. Based on educational_mode_v5.
+  Educational v4: a series of complete explanations (whole sentences, v5 analysis, optional Gemini editor),
+  four templates (subtitles + cards + title), slides/boards shown whole on a stage. See docs/EDUCATIONAL_V4.md.
 
 models:
   yolo11n:
@@ -17,4 +17,4 @@ models:
 output:
   format: mp4
   resolution: "1080x1920"
-  max_clips: 10
+  max_clips: 6
