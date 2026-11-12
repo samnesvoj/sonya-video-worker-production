@@ -60,6 +60,7 @@ class FleetManager:
         self._token, self._env, self.now = token_provider, environ, clock
         self._dry_seen: set = set()
         self._create_backoff_until = 0.0
+        self._prime_backoff_until = 0.0    # a failed warm prime must never delay a create for a real job
         self._reserve_backoff_until = 0.0
         self._spares_at = float("-inf")
 
@@ -367,7 +368,8 @@ class FleetManager:
         gap (jobs not covered yet) >= power_gap, a multi-GPU POWER server; otherwise any acceptable host, as a burst.
         prime=True: warm-eligible only. reserve=True: the paused POWER reserve (reserve-eligible power hosts only).
         Spares on: an offer Vast refuses -> the next one of the ranking, up to spares_count tries (off: one try)."""
-        if now < (self._reserve_backoff_until if reserve else self._create_backoff_until):
+        if now < (self._reserve_backoff_until if reserve else
+                  max(self._prime_backoff_until, self._create_backoff_until) if prime else self._create_backoff_until):
             return 0
         if self.store.creates_since(now - 3600) >= self.cfg.max_creates_per_hour:
             self.store.event(now, None, "create_rate_limited")
@@ -416,8 +418,10 @@ class FleetManager:
         except (launcher.LaunchError, VastError) as exc:
             if reserve:
                 self._reserve_backoff_until = now + 600
+            elif prime:
+                self._prime_backoff_until = now + 600
             else:
-                self._create_backoff_until = now + (600 if prime else 60)
+                self._create_backoff_until = now + 60
             self.store.event(now, None, "reserve_failed" if reserve else "prime_failed" if prime else "create_failed",
                              reason=str(exc)[:160])
             return 0
