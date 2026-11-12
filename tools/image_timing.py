@@ -3,7 +3,7 @@
 package tree. Page cache is warm after the first run, so this is a LOWER bound for a cold Vast host. No GPU involved."""
 import subprocess, sys, time
 
-MODS = ["numpy", "cv2", "torch", "torchvision", "ultralytics", "mediapipe", "faster_whisper", "scenedetect", "boto3", "yaml", "fastapi", "openai", "google.genai"]
+MODS = ["numpy", "cv2", "torch", "torchvision", "torchaudio", "onnxruntime", "ultralytics", "mediapipe", "faster_whisper", "scenedetect", "boto3", "yaml", "fastapi", "openai", "google.genai"]
 print("| module | import seconds (min of 3) |\n|---|---|")
 tot = 0.0
 for m in MODS:

@@ -1,14 +1,11 @@
 """
 modes/virality/runner.py
 ========================
-Virality mode: hook_mode_v1 + modes_scoring + yuvelirochka visual boosts.
-
-Visual boosts applied to hook_mode segments:
-  - gemini_viral_moments  → overlap boost +0.3 per overlapping moment
-  - person in first 3s    → webcam_layout boxes boost +0.2
-  - layout_segments       → dominant layout awareness
-  - active_speaker_segs   → speaking boost +0.15
-  - pose_detections       → human action boost +0.1
+Virality mode = the Mac mini (SONYA Desktop Cut) recipe only: mandatory ASR → whole stories /
+question + answer (cut_selection.select_story_clips) → word-exact boundaries → per-clip tracked crop with
+burned subtitles (_compose_tracked). The old path (hook_mode_v1 + visual boosts, Gemini selection,
+gemini_composer letterbox) was removed 2026-11-08 on the owner's request; full copy: git tag
+old-worker-way, archive/legacy_virality/README.md.
 """
 from __future__ import annotations
 
@@ -35,6 +32,11 @@ def run(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # production jobs carry no Cut settings → the Mac mini reference recipe (scripts/shared/cut_profile.py);
+    # its caches live next to output/, never inside it (everything in output/ is uploaded)
+    from scripts.shared.cut_profile import apply_profile
+    params = apply_profile("virality", params, input_video_path, str(output_dir.parent / "cut_work"))
+
     from scripts.shared.enhancers.sonya_enhancer import enrich_video_for_mode
     enrichment = enrich_video_for_mode(
         input_video_path=input_video_path,
@@ -51,6 +53,8 @@ def run(
         output_dir=output_dir,
     )
 
+    if params.get("cut_profile"):
+        selection = dict(selection or {}, cut_profile=params["cut_profile"])
     return {
         "clips": clips,
         "mode": "virality",
@@ -64,128 +68,49 @@ def _select_and_compose(
     enrichment: Dict[str, Any],
     params: Dict[str, Any],
     output_dir: Path,
-) -> List[str]:
-    """Select clips, refine boundaries on ASR words, compose.
-
-    With ASR words: candidates are complete phrases from the transcript and
-    the selection (Gemini on opt-in, else deterministic local ranking) comes
-    from scripts/shared/cut_selection.py — timestamps only from ASR.
-    Without words: legacy hook_mode_v1 path (+ visual boosts), whose
-    fallback is the first 30 s; selection_status says so explicitly.
-    """
+) -> "tuple[List[str], Dict[str, Any]]":
+    """ASR words → story clips (Desktop cut-local-rank-v3) → exact boundaries → tracked render.
+    No words or no story candidates = the job fails (Desktop: no clips → error), never a guessed 0–30 s."""
     max_clips = params.get("max_clips", 3)
+    if params.get("selection") != "story" or (params.get("crop") or {}).get("mode") != "tracked" \
+            or params.get("llm") == "on":
+        raise ValueError("virality runs only the Mac mini recipe (selection=story, crop.mode=tracked, "
+                         "no llm=on); see scripts/shared/cut_profile.py")
     words = enrichment.get("word_timestamps") or []
-    if words:   # owner-confirmed name fixes (Вавилон→Эвелон near «стример»…) before selection and subtitles
-        from scripts.shared.glossary import apply as apply_glossary
-        words = apply_glossary(words, params.get("glossary"))
-        enrichment["word_timestamps"] = words
-    selection: Dict[str, Any] = {}
-    asr_segments: List[Dict[str, Any]] = []
-    if params.get("promo") and not (params.get("selection") == "story" and params.get("llm") != "on"
-                                     and ((params.get("crop") or {}).get("mode") == "tracked")):
-        # advertiser rules + overlay exist only on the story selector + tracked renderer: refuse
-        # instead of shipping clips that ignore the conditions or lack the marking
-        raise ValueError("promo requires selection=story and crop.mode=tracked")
-    if words and params.get("selection") == "story" and params.get("llm") != "on":
-        # Desktop: whole stories / question + answer, 20–90 s (cut-local-rank-v3)
-        from scripts.shared.cut_selection import StoryConfig, select_story_clips
-        story = dict(params.get("story") or {})
-        if story.get("strategy") in ("viral", "hooks", "story"):
-            # loudness per second (one ffmpeg pass, cached in the project): emotional peaks for ranking
-            try:
-                from scripts.shared.audio_features import loudness_per_second, zscores
-                from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
-                cache = (params.get("crop") or {}).get("clip_cache_dir")
-                cache = str(Path(cache).parent / "audio_energy.json") if cache else None
-                story["energy"] = zscores(loudness_per_second(input_video_path, ffmpeg_bin(), cache))
-            except Exception as exc:             # ranking still works on words alone; say so
-                logger.warning("[virality] audio energy unavailable: %s", exc)
-        if params.get("promo"):          # advertiser conditions shape WHICH moments are picked
-            story["promo"] = params["promo"]
-        asr_segments, selection = select_story_clips(words, max_clips, StoryConfig(**story))
-    elif words:
-        from scripts.shared.cut_selection import CandidateConfig, select_clips
-        asr_segments, selection = select_clips(
-            words, max_clips, llm_opt_in=params.get("llm") == "on",
-            cfg=CandidateConfig(**(params.get("candidates") or {})))
-    if asr_segments:
-        top = asr_segments
-    else:
-        selection["selection_status"] = ("no_asr_legacy_fallback" if not words
-                                         else "no_asr_candidates_legacy_fallback")
-        top = _legacy_segments(input_video_path, enrichment, params)
+    if not words:
+        # Mac mini recipe: ASR is mandatory (Desktop _ensure_asr)
+        raise RuntimeError("ASR_FAILED: no word timestamps - Cut does not run without speech recognition ("
+                           + "; ".join(str(w) for w in enrichment.get("warnings", []))[:300] + ")")
+    # owner-confirmed name fixes (Вавилон→Эвелон near «стример»…) before selection and subtitles
+    from scripts.shared.glossary import apply as apply_glossary
+    words = apply_glossary(words, params.get("glossary"))
+    enrichment["word_timestamps"] = words
+
+    # Desktop: whole stories / question + answer, 20–90 s (cut-local-rank-v3)
+    from scripts.shared.cut_selection import StoryConfig, select_story_clips
+    story = dict(params.get("story") or {})
+    if story.get("strategy") in ("viral", "hooks", "story"):
+        # loudness per second (one ffmpeg pass, cached in the project): emotional peaks for ranking
+        try:
+            from scripts.shared.audio_features import loudness_per_second, zscores
+            from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
+            cache = (params.get("crop") or {}).get("clip_cache_dir")
+            cache = str(Path(cache).parent / "audio_energy.json") if cache else None
+            story["energy"] = zscores(loudness_per_second(input_video_path, ffmpeg_bin(), cache))
+        except Exception as exc:             # ranking still works on words alone; say so
+            logger.warning("[virality] audio energy unavailable: %s", exc)
+    if params.get("promo"):          # advertiser conditions shape WHICH moments are picked
+        story["promo"] = params["promo"]
+    top, selection = select_story_clips(words, max_clips, StoryConfig(**story))
+    if not top:
+        raise RuntimeError("NO_CLIPS: no complete story / question+answer found in the speech "
+                           f"({len(words)} words)")
 
     # ── Exact boundaries on real ASR words (does not change WHICH moments) ──
     from scripts.shared.boundaries import BoundaryConfig, refine_segments
     selected = refine_segments(top[:max_clips], words,
                                BoundaryConfig(**(params.get("boundaries") or {})))
     return _compose(input_video_path, enrichment, selected, output_dir, params), selection
-
-
-def _legacy_segments(input_video_path: str, enrichment: Dict[str, Any],
-                     params: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """hook_mode_v1 + yuvelirochka visual boosts (unchanged legacy behaviour)."""
-    # ── Base segments from hook_mode_v1 ──────────────────────────────────────
-    try:
-        from scripts.legacy_gpu.hook_mode_v1 import HookMode
-        hook_mode = HookMode(params=params)
-        raw_segments = hook_mode.extract_segments(input_video_path)
-        logger.info("[virality] hook_mode_v1: %d raw segments", len(raw_segments))
-    except Exception as exc:
-        logger.warning("[virality] hook_mode_v1 unavailable (%s) — fallback segments", exc)
-        enrichment.setdefault("warnings", []).append(f"virality_engine_unavailable: {exc}")
-        raw_segments = [{"start": 0.0, "duration": 30.0, "score": 0.5}]
-
-    # ── yuvelirochka visual boosts ────────────────────────────────────────────
-    gemini_viral_moments   = enrichment.get("gemini_viral_moments") or []
-    layout_segments        = enrichment.get("layout_segments") or []
-    pose_detections        = enrichment.get("pose_detections") or []
-    webcam_layout          = enrichment.get("webcam_layout") or {}
-    active_speaker_segs    = enrichment.get("active_speaker_segments") or []
-    crop_hints             = enrichment.get("crop_hints") or {}
-
-    webcam_boxes = webcam_layout.get("boxes", [])
-
-    for seg in raw_segments:
-        start = float(seg.get("start", 0))
-        end   = start + float(seg.get("duration", 30))
-        boost = 0.0
-
-        # Person visible in first 3 seconds → strong hook signal
-        if start <= 3.0 and webcam_boxes:
-            boost += 0.2
-
-        # Gemini viral moment overlap
-        for m in gemini_viral_moments:
-            m_start = float(m.get("start", m.get("start_time", 0)))
-            m_end   = m_start + float(m.get("duration", m.get("clip_duration", 0)))
-            if m_start < end and m_end > start:
-                boost += 0.3
-
-        # Layout signal: person-focused layout → virality boost
-        for ls in layout_segments:
-            ls_start = float(ls.get("start", 0))
-            ls_end   = float(ls.get("end", ls_start + 1))
-            if ls_start < end and ls_end > start:
-                layout_type = ls.get("layout", ls.get("type", ""))
-                if layout_type in ("single_speaker", "person", "talking_head"):
-                    boost += 0.1
-
-        # Active speaker in segment
-        for as_seg in active_speaker_segs:
-            as_start = float(as_seg.get("start", 0))
-            as_end   = float(as_seg.get("end", as_start))
-            if as_start < end and as_end > start:
-                boost += 0.15
-
-        # Human pose detected (action visible)
-        if pose_detections:
-            boost += 0.1
-
-        seg["score"] = float(seg.get("score", 0)) + boost
-
-    # ── Select top segments ───────────────────────────────────────────────────
-    return sorted(raw_segments, key=lambda s: float(s.get("score", 0)), reverse=True)
 
 
 def _load_face_analysis(crop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -218,39 +143,16 @@ def _source_dims(path: str) -> "tuple[int, int]":
 
 
 def _compose(input_video_path: str, enrichment: Dict[str, Any], selected: List[Dict[str, Any]],
-             output_dir: Path, params: Optional[Dict[str, Any]] = None) -> List[str]:
-    crop_hints = enrichment.get("crop_hints") or {}
-    crop = (params or {}).get("crop") or {}
-    if crop.get("mode") == "tracked":
-        if params.get("promo"):
-            crop = dict(crop, promo=params["promo"])     # overlay drawn with the subtitles
-        return _compose_tracked(input_video_path, selected, output_dir, crop,
-                                enrichment.get("word_timestamps") or [])
-    # ── Compose vertical clips ────────────────────────────────────────────────
-    from scripts.shared.crop.smart_crop_adapter import compose_vertical_clip
-    output_paths = []
-    for i, seg in enumerate(selected):
-        out = str(output_dir / f"viral_clip_{i+1:02d}.mp4")
-        if seg.get("boundary_status") == "dropped_overlap":
-            logger.info("[virality] Clip %d dropped: overlaps a higher-ranked clip", i + 1)
-            continue
-        try:
-            compose_vertical_clip(
-                input_video_path=input_video_path,
-                output_path=out,
-                crop_hints=crop_hints,
-                start_time=float(seg.get("start", 0)),
-                duration=float(seg.get("duration", 30.0)),
-            )
-            output_paths.append(out)
-        except Exception as exc:
-            logger.warning("[virality] Clip %d failed: %s", i + 1, exc)
-
-    from scripts.shared.mode_output import write_selected_segments
-    names = [str(output_dir / f"viral_clip_{i+1:02d}.mp4") for i in range(len(selected))]
-    write_selected_segments(str(output_dir), "virality", selected,
-                            [n if n in output_paths else None for n in names])
-    return output_paths
+             output_dir: Path, params: Dict[str, Any]) -> List[str]:
+    crop = params["crop"]
+    from scripts.shared import split_filler
+    _f = split_filler.normalize(params, params.get("settings") if isinstance(params.get("settings"), dict) else None)
+    if _f["mode"] != "none":
+        crop = dict(crop, bottom_filler=_f)
+    if params.get("promo"):
+        crop = dict(crop, promo=params["promo"])     # overlay drawn with the subtitles
+    return _compose_tracked(input_video_path, selected, output_dir, crop,
+                            enrichment.get("word_timestamps") or [])
 
 
 def _clip_analysis(crop: Dict[str, Any], video: str, start: float, dur: float):
@@ -295,7 +197,6 @@ def _insert_integration(clip: str, promo: Dict[str, Any], words: List[Dict[str, 
     variant falls back to a midroll when the clip is too short for it to play out (offer rule:
     «интеграция должна успеть полностью воспроизвестись»)."""
     import os
-    import subprocess
     from scripts.shared.promo import PromoSpec, check_asset, insert_asset_cmd, media_info, pick_insert_time
     from scripts.shared.crop.smart_crop_adapter import _env_encoder_args, ffmpeg_bin
     from scripts.shared.subtitle_styles import FONTS, FONTS_DIR
@@ -315,7 +216,8 @@ def _insert_integration(clip: str, promo: Dict[str, Any], words: List[Dict[str, 
     cmd = insert_asset_cmd(clip, info["path"], tmp, mode, t, info["duration"], clip_info["duration"],
                            clip_info["has_audio"], spec.marking(), font, ffmpeg=ff,
                            encoder_args=_env_encoder_args() or None)
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    from scripts.shared import nvenc_guard            # GeForce NVENC session cap -> CPU, never an error
+    r = nvenc_guard.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"integration failed: {r.stderr[-400:]}")
     os.replace(tmp, clip)
@@ -335,6 +237,10 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
 
     from scripts.shared.subtitles import subtitles_for_clip
 
+    from scripts.shared import split_filler
+    from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
+    import os
+    filler = crop.get("bottom_filler")
     fit = crop.get("layout") in ("fit", "blur")
     per_clip = crop.get("analysis") == "per_clip" and not fit
     analysis = None if per_clip else _load_face_analysis(crop)
@@ -377,7 +283,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         sub_path = None
         if subs.get("mode") == "burn":
             sm = subtitles_for_clip(words, start, dur, Path(out).with_suffix(".ass"),
-                                    centered=(track.get("split") or {}).get("intervals") or track.get("seam"),
+                                    centered=(split_filler.seam_intervals(dur, filler["top_h"]) if filler else
+                                              (track.get("split") or {}).get("intervals") or track.get("seam")),
                                     avoid=zones,
                                     preset=subs.get("style"), keywords=seg.get("keywords"),
                                     hook=seg.get("hook") if subs.get("hook", False) else None,
@@ -390,7 +297,16 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             seg.update(sm)
             sub_path = str(Path(out).with_suffix(".ass")) if burn else None
         try:
-            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path)
+            if filler:
+                tmp = str(Path(out).with_suffix(".top.mp4"))
+                render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg)
+                if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
+                                      ffmpeg=ffmpeg_bin()):
+                    os.remove(tmp)
+                else:
+                    os.replace(tmp, out)
+            else:
+                render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
             if crop.get("promo") and crop["promo"].get("integration"):
                 seg.update(_insert_integration(out, crop["promo"], words or [], start, dur))
             return out

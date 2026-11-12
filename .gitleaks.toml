@@ -8,3 +8,15 @@ description = "dummy Timeweb key constant in tests/test_llm_timeweb.py"
 condition = "AND"
 paths = ['''^tests/test_llm_timeweb\.py$''']
 regexes = ['''^tw-SEC[A-Za-z0-9_-]*$''']
+
+[[allowlists]]
+description = "model registry: 'key' is a model identifier (e.g. gigaam_v3_e2e_rnnt_ckpt), not a credential"
+condition = "AND"
+paths = ['''^release/models\.required\.json$''', '''^docs/mac_mini/[a-z_.-]+\.json$''']
+regexes = ['''^[a-z0-9]+(_[a-z0-9]+)+$''']
+
+[[allowlists]]
+description = "Dummy key constant in the Educational overlay test (checks the value is never logged); placeholder text, verified by hand"
+paths = ['''^tests/test_edu_overlays\.py$''']
+condition = "AND"
+regexes = ['''^[a-z]{2}-SECRET-KEY-0123456789$''']

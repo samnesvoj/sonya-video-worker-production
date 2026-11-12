@@ -62,6 +62,17 @@ def enrich_video_for_mode(
         result["warnings"].append("SONYA_ENHANCERS_ENABLED=false")
         return result
 
+    # The tracked renderer (Mac mini recipe) does its own per-clip cuts + YuNet faces and never reads the
+    # whole-video vision below (YOLO / pose / webcam / Gemini layout / lip sync / crop hints - only the legacy
+    # compose and the no-ASR legacy selection use them). Skipping them saves minutes per job (run 2: ~6 min
+    # of YOLO on a 15 min video) and keeps unused detectors from downloading weights.
+    tracked = (params.get("crop") or {}).get("mode") == "tracked"
+    if tracked:
+        logger.info("[enhancer] crop=tracked: whole-video vision skipped (per-clip analysis instead)")
+
+    def _vision(name: str, default: str = "true") -> bool:
+        return not tracked and _flag(name, default)
+
     def _step(name: str, progress: float, fn: Callable) -> None:
         try:
             value = fn()
@@ -75,7 +86,7 @@ def enrich_video_for_mode(
             result["warnings"].append(msg)
 
     # ── Gemini Video Analyzer (viral moments) ─────────────────────────────────
-    if _flag("GEMINI_DIRECT_VIDEO_ENABLED", "false"):
+    if _vision("GEMINI_DIRECT_VIDEO_ENABLED", "false"):
         def _gemini_viral():
             from scripts.shared.gemini.gemini_analyzer import GeminiVideoAnalyzer
             api_key = os.environ.get("GEMINI_API_KEY")
@@ -92,7 +103,7 @@ def enrich_video_for_mode(
         _step("gemini_viral_moments", 0.10, _gemini_viral)
 
     # ── Gemini Layout Analyzer ────────────────────────────────────────────────
-    if _flag("GEMINI_LAYOUT_ENABLED"):
+    if _vision("GEMINI_LAYOUT_ENABLED"):
         def _gemini_layout():
             from scripts.shared.gemini.gemini_layout_analyzer import GeminiLayoutAnalyzer
             api_key = os.environ.get("GEMINI_API_KEY")
@@ -106,7 +117,7 @@ def enrich_video_for_mode(
         _step("layout_segments", 0.20, _gemini_layout)
 
     # ── YOLO common object detection ──────────────────────────────────────────
-    if _flag("YOLO_COMMON_ENABLED"):
+    if _vision("YOLO_COMMON_ENABLED"):
         def _yolo_common():
             from scripts.shared.vision.yolo_common import detect_common
             model_path = model_file("common", "yolo11n.pt")
@@ -117,7 +128,7 @@ def enrich_video_for_mode(
         _step("yolo_detections", 0.35, _yolo_common)
 
     # ── YOLO pose detection ───────────────────────────────────────────────────
-    if _flag("YOLO_POSE_ENABLED"):
+    if _vision("YOLO_POSE_ENABLED"):
         def _yolo_pose():
             from scripts.shared.vision.yolo_common import detect_pose
             model_path = model_file("common", "yolo11n-pose.pt")
@@ -128,7 +139,7 @@ def enrich_video_for_mode(
         _step("pose_detections", 0.50, _yolo_pose)
 
     # ── Webcam / person detector ──────────────────────────────────────────────
-    if _flag("WEBCAM_DETECTOR_ENABLED"):
+    if _vision("WEBCAM_DETECTOR_ENABLED"):
         def _webcam():
             from scripts.shared.vision.webcam_detector import WebcamDetector
             model_path = model_file("common", "webcam_detector.pt")
@@ -153,16 +164,16 @@ def enrich_video_for_mode(
         _step("word_timestamps", 0.72, _load_words)
     elif _flag("WORD_LEVEL_SUBTITLES_ENABLED"):
         def _transcribe():
-            from scripts.shared.transcription.transcriber import Transcriber
-            t = Transcriber()
-            # Returns: {"text", "language", "segments", "words": [{word, start, end}]}
-            transcript = t.transcribe(audio_file=input_video_path)
+            # SONYA ASR (scripts/shared/asr): GigaAM v3 by default (owner decision), faster-whisper fallback.
+            # Returns: {"text", "language", "backend", "model", "segments", "words": [{word, start, end}]}
+            from scripts.shared import asr
+            transcript = asr.transcribe(input_video_path, language=params.get("language"))
             # Return word-level list directly
             return transcript.get("words", [])
         _step("word_timestamps", 0.72, _transcribe)
 
     # ── Lip sync / active speaker detection ───────────────────────────────────
-    if _flag("LIP_SYNC_DETECTION_ENABLED", "false"):
+    if _vision("LIP_SYNC_DETECTION_ENABLED", "false"):
         def _lip_sync():
             from scripts.shared.speaker.lip_sync_detector import analyze_speakers_in_clip
             # Pipeline-safe: returns empty dict if MediaPipe unavailable
@@ -171,17 +182,18 @@ def enrich_video_for_mode(
             return lip_result.get("speaking_segments", [])
         _step("active_speaker_segments", 0.85, _lip_sync)
 
-    # ── Crop hints (always runs, based on whatever was collected) ─────────────
-    def _crop_hints():
-        from scripts.shared.crop.smart_crop_adapter import get_crop_hints
-        return get_crop_hints(
-            input_video_path,
-            yolo_detections=result.get("yolo_detections"),
-            webcam_layout=result.get("webcam_layout"),
-            pose_detections=result.get("pose_detections"),
-            layout_segments=result.get("layout_segments"),
-        )
-    _step("crop_hints", 0.95, _crop_hints)
+    # ── Crop hints (legacy compose only; based on whatever was collected) ─────
+    if not tracked:
+        def _crop_hints():
+            from scripts.shared.crop.smart_crop_adapter import get_crop_hints
+            return get_crop_hints(
+                input_video_path,
+                yolo_detections=result.get("yolo_detections"),
+                webcam_layout=result.get("webcam_layout"),
+                pose_detections=result.get("pose_detections"),
+                layout_segments=result.get("layout_segments"),
+            )
+        _step("crop_hints", 0.95, _crop_hints)
 
     if progress_callback:
         progress_callback("done", 1.0)

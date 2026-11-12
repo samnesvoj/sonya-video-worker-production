@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import re
 from decimal import Decimal
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from dispatcher.config import FleetConfig
 
 SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
-                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET")
+                      "S3_BUCKET_NAME", "S3_BUCKET", "S3_REGION", "MODELS_S3_BUCKET", "MODELS_S3_PREFIX",
+                      # optional: the Cut LLM editor (Gemini via Timeweb, OpenRouter fallback); without them the
+                      # worker keeps the local ranking (scripts/shared/cut_profile.py)
+                      "TIMEWEB_GEMINI_API_KEY", "TIMEWEB_GEMINI_BASE_URL", "TIMEWEB_GEMINI_MODEL",
+                      "SONYA_LLM_TIMEWEB_ENABLED", "OPENROUTER_API_KEY", "SONYA_LLM_OPENROUTER_MODEL",
+                      # load tests only (not secrets): resource sampler, clips rendered in parallel inside one job
+                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC",
+                      # multi-GPU sizing overrides (not secrets; scripts/ops/gpu_plan.py, MULTIGPU_NOTES.md)
+                      "SONYA_NVENC_MAX_SESSIONS", "SONYA_VRAM_PER_JOB_MB", "SONYA_RAM_PER_JOB_MB", "SONYA_CPU_THREADS_PER_JOB",
+                      "SONYA_JOBS_PER_GPU_MAX")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
@@ -27,31 +36,217 @@ def validate_release(cfg: FleetConfig) -> None:
 
 def search_query(cfg: FleetConfig) -> dict:
     return {"verified": {"eq": True}, "rentable": {"eq": True}, "rented": {"eq": False}, "num_gpus": {"eq": 1},
-            "gpu_ram": {"gte": cfg.min_vram_gb * 1000}, "disk_space": {"gte": cfg.disk_gb},
+            "gpu_name": {"in": list(cfg.default_gpus + cfg.fallback_gpus)},
+            "gpu_ram": {"gte": cfg.min_vram_gb * 1000 - 500}, "disk_space": {"gte": cfg.disk_gb},
+            "cpu_cores_effective": {"gte": cfg.min_cpu_cores}, "cpu_ram": {"gte": max(cfg.min_cpu_ram_gb, 4 * cfg.jobs_per_instance + 4) * 1000},   # ~3.5 GB RAM per parallel video
             "reliability2": {"gte": cfg.min_reliability}, "inet_down": {"gte": cfg.min_inet_down_mbps},
-            "cuda_max_good": {"gte": 12.4}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
-            "order": [["dph_total", "asc"]], "limit": 50}
+            "cuda_max_good": {"gte": 12.6}, "dph_total": {"lte": float(cfg.max_dph)}, "type": "on-demand",
+            "order": [["dph_total", "asc"]], "limit": 200,
+            # load tests only: the pinned host may have several cards (2x A40 test 2026-11-09); production stays 1 card
+            **({"num_gpus": {"gte": 1}, "machine_id": {"eq": cfg.pin_machine_id}} if cfg.pin_machine_id else {})}
 
 
-def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set) -> Optional[dict]:
-    ok = [o for o in offers if o.get("gpu_name") in cfg.allowed_gpus and o.get("machine_id") not in banned_machines
-          and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph]
-    # rank by the FULL hourly cost with our disk (stopped/running storage is billed too), not by the headline dph_total
-    cost = lambda o: Decimal(str(o.get("dph_base", o["dph_total"]))) + Decimal(str(o.get("storage_cost", 0))) * cfg.disk_gb / Decimal(720)
-    return min(ok, key=cost) if ok else None
+# ── server choice (owner 2026-11-08: «процессор под стать Mac mini, норм видеокарта, недорого и сразу с хорошим интернетом»;
+#    decision: «бери RTX 3060 (12 ГБ) с процессором Ryzen 7 5800X») ────────────────────────────────────────────────────
+# The Cut recipe is CPU-heavy (face tracking, ffmpeg filters, subtitles); the GPU does ASR + NVENC. So a modern fast CPU
+# matters as much as the GPU. Vast's cpu_ghz is sometimes the base clock (5950X shows 3.4), so the CPU is judged by its
+# FAMILY (all of these boost >= 4.0 GHz) + effective cores, not by cpu_ghz alone.
+MODERN_CPU = re.compile(
+    r"Ryzen\s+[3579]\s+[5789]\d{3}"          # Ryzen 5000 / 7000 / 8000 / 9000 desktop (5800X, 5700X3D, 5950X, 7950X3D ...)
+    r"|Threadripper\s+(?:PRO\s+)?[579]\d{3}"  # Threadripper 5000 / 7000 / 9000
+    r"|1[2-5]th Gen Core"                      # Intel 12th-15th gen (Vast: "12th Gen Core™ i7-12700")
+    r"|Core™?\s+i[3579]-1[2-4]\d{3}"           # same, other spelling ("Core™ i7-14700")
+    r"|Core™?\s+Ultra", re.I)
+EUROPE = {"AL", "AD", "AT", "BA", "BE", "BG", "BY", "CH", "CY", "CZ", "DE", "DK", "EE", "ES", "FI", "FR", "GB", "UK", "GR", "HR", "HU",
+          "IE", "IS", "IT", "LI", "LT", "LU", "LV", "MC", "MD", "ME", "MK", "MT", "NL", "NO", "PL", "PT", "RO", "RS", "SE", "SI", "SK",
+          "UA", "XK"}
+# Measured job time (s, claim -> done) for kishlak_15m virality in Europe, load test 2026-11-09 (SPEED_REPORT.md):
+# A4000 + i7-14700 (ES) 103-108, 4060 Ti + 5950X (DE) 109; run 4 RTX 3090 (CPU encode) 179. 3060 assumed like the A4000.
+# Only the RATIO matters: score = estimated job time x hourly price ("время обработки × цена").
+JOB_SECONDS = {"RTX 3060": 110.0, "RTX A4000": 105.0, "RTX 4060 Ti": 109.0, "RTX 3090": 179.0}
 
 
-def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str]) -> Dict[str, Any]:
+def cpu_modern(o: Mapping[str, Any]) -> bool:
+    return bool(MODERN_CPU.search(str(o.get("cpu_name") or "")))
+
+
+def in_europe(o: Mapping[str, Any]) -> bool:
+    geo = str(o.get("geolocation") or "")
+    return geo.rsplit(",", 1)[-1].strip().upper() in EUROPE
+
+
+def hourly_cost(o: Mapping[str, Any], cfg: FleetConfig) -> Decimal:
+    """GPU + our disk per hour (stopped/running storage is billed too), not the headline dph_total."""
+    return Decimal(str(o.get("dph_base", o.get("dph_total", 99)))) + Decimal(str(o.get("storage_cost", 0))) * cfg.disk_gb / Decimal(720)
+
+
+def offer_class(o: Mapping[str, Any], cfg: FleetConfig) -> Optional[int]:
+    """0 = default class (RTX 3060 + modern CPU), 1 = fallback GPU + modern CPU, None = not acceptable."""
+    if not cpu_modern(o) or float(o.get("cpu_cores_effective") or 0) < cfg.min_cpu_cores:
+        return None
+    if o.get("gpu_name") in cfg.default_gpus:
+        return 0
+    if o.get("gpu_name") in cfg.fallback_gpus:
+        return 1
+    return None
+
+
+def warm_eligible(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
+    """May this host be the warm (paused) server: default class IN EUROPE and cheap storage (pause cost = disk x storage).
+    Europe is required: the same RTX 3060 in Vietnam took 260 s per video vs ~105 s in Europe (S3 is in Russia)."""
+    cls = offer_class(o, cfg)
+    return (cls == 0 or (cls == 1 and cfg.warm_fallback)) and in_europe(o) and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
+
+
+def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[int] = ()) -> Tuple:
+    est = JOB_SECONDS.get(str(o.get("gpu_name")), JOB_SECONDS["RTX 3090"])
+    # Europe FIRST (load test 2026-11-09): our S3 + API are in Russia; from Vietnam every upload/status call cost seconds
+    # (260 s per video, 2.5x Europe) and the image pull took 289 s vs 117 s in Germany. Then the class, then the cache.
+    return (not in_europe(o),
+            offer_class(o, cfg),
+            o.get("machine_id") not in set(known_machines),   # booted there before -> the image layers are likely cached
+            Decimal(str(est)) * hourly_cost(o, cfg),
+            -float(o.get("inet_down") or 0))
+
+
+def rank_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                *, warm: bool = False, exclude: Iterable[int] = ()) -> List[dict]:
+    """Every acceptable offer, best first: Europe, default class, cached image, time x price, faster internet.
+    warm=True: only hosts that may hold the paused warm server (default class, storage <= max_storage_gb_month)."""
+    skip = set(exclude)
+    if cfg.pin_machine_id:      # load tests only: one named host (any GPU/CPU class), still under the price cap
+        pinned = [o for o in offers if o.get("machine_id") == cfg.pin_machine_id and o.get("id") not in skip
+                  and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph]
+        return sorted(pinned, key=lambda o: Decimal(str(o.get("dph_total", 99))))
+    ok = [o for o in offers if offer_class(o, cfg) is not None and o.get("machine_id") not in banned_machines
+          and o.get("id") not in skip and o.get("machine_id") not in skip
+          and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph
+          and float(o.get("inet_down") or 0) >= cfg.min_inet_down_mbps
+          and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability
+          and (not warm or warm_eligible(o, cfg))]
+    known = set(known_machines)
+    return sorted(ok, key=lambda o: offer_rank(o, cfg, known))     # stable: ties keep Vast's order, like min() did
+
+
+def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+               *, warm: bool = False, exclude: Iterable[int] = ()) -> Optional[dict]:
+    """Best acceptable offer (the first of rank_offers)."""
+    ranked = rank_offers(offers, cfg, banned_machines, known_machines, warm=warm, exclude=exclude)
+    return ranked[0] if ranked else None
+
+
+# ── POWER class: several data-center cards on one offer, for a rush (off by default; FleetConfig.power_*) ─────────────────
+def num_gpus(o: Mapping[str, Any]) -> int:
+    try:
+        return max(1, int(o.get("num_gpus") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def total_vram_mb(o: Mapping[str, Any]) -> int:
+    """All cards together. Vast: gpu_ram is PER card (MB), gpu_total_ram (when present) is the sum."""
+    if o.get("gpu_total_ram"):
+        return int(float(o["gpu_total_ram"]))
+    return int(float(o.get("gpu_ram") or 0)) * num_gpus(o)
+
+
+def offer_slots(o: Mapping[str, Any], cfg: FleetConfig, *, power: bool = False, environ: Mapping[str, str] | None = None) -> int:
+    """Parallel videos the fleet counts for this server. Default / fallback class: jobs_per_instance (unchanged, 2).
+    Power: SONYA_POWER_JOBS_PER_INSTANCE, else the SAME formula the worker applies to its real hardware
+    (scripts/ops/gpu_plan.capacity: VRAM of each card, CPU threads, RAM - ~1.5 GB VRAM / ~3.5 GB RAM / ~4 threads per video).
+    environ: the dispatcher env - the per-video budget overrides (SONYA_VRAM_PER_JOB_MB ...) it passes to the worker too."""
+    if not power:
+        return cfg.jobs_per_instance
+    if cfg.power_jobs_per_instance:
+        return cfg.power_jobs_per_instance
+    from scripts.ops.gpu_plan import Budget, capacity   # stdlib-only module; one formula for worker and fleet
+    n = num_gpus(o)
+    per_card = total_vram_mb(o) // n
+    return capacity([per_card] * n, float(o.get("cpu_cores_effective") or 0), int(float(o.get("cpu_ram") or 0)),
+                    Budget.from_env(dict(environ or {})))["total"]
+
+
+def power_search_query(cfg: FleetConfig) -> dict:
+    q = search_query(cfg)
+    q.update({"num_gpus": {"gte": cfg.power_min_gpus, "lte": cfg.power_max_gpus}, "gpu_name": {"in": list(cfg.power_gpus)},
+              "cpu_cores_effective": {"gte": cfg.power_min_cpu_cores},
+              "cpu_ram": {"gte": cfg.power_min_cpu_ram_gb * 1000}, "dph_total": {"lte": float(cfg.power_max_dph)}})
+    return q
+
+
+def power_ok(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
+    """Acceptable as a POWER server. The CPU is judged by our effective cores (data-center hosts run EPYC / Xeon, which the
+    desktop MODERN_CPU rule does not list); per-video speed comes from many cores + NVENC on every card."""
+    return (o.get("gpu_name") in cfg.power_gpus and cfg.power_min_gpus <= num_gpus(o) <= cfg.power_max_gpus
+            and total_vram_mb(o) >= cfg.power_min_total_vram_gb * 1000 - 500 * num_gpus(o)
+            and float(o.get("cpu_cores_effective") or 0) >= cfg.power_min_cpu_cores
+            and float(o.get("cpu_ram") or 0) >= cfg.power_min_cpu_ram_gb * 1000
+            and Decimal(str(o.get("dph_total", 99))) <= cfg.power_max_dph
+            and float(o.get("inet_down") or 0) >= cfg.min_inet_down_mbps
+            and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability)
+
+
+def rank_power_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                      *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None,
+                      reserve: bool = False) -> List[dict]:
+    """Every acceptable power offer, best first: Europe (S3 + API are in Russia), then a host that has our image cached,
+    then the price of ONE video slot per hour (hourly cost / parallel videos), then faster internet.
+    reserve=True: only hosts whose pause (stopped disk) costs <= power_reserve_max_storage_rub per month."""
+    skip, known = set(exclude), set(known_machines)
+    ok = [o for o in offers if power_ok(o, cfg) and o.get("machine_id") not in banned_machines
+          and o.get("id") not in skip and o.get("machine_id") not in skip and (not reserve or reserve_ok(o, cfg))]
+
+    def rank(o):
+        return (not in_europe(o), o.get("machine_id") not in known,
+                hourly_cost(o, cfg) / max(1, offer_slots(o, cfg, power=True, environ=environ)), -float(o.get("inet_down") or 0))
+    return sorted(ok, key=rank)
+
+
+def pick_power_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
+                     *, exclude: Iterable[int] = (), environ: Mapping[str, str] | None = None) -> Optional[dict]:
+    """Best power offer (the first of rank_power_offers)."""
+    ranked = rank_power_offers(offers, cfg, banned_machines, known_machines, exclude=exclude, environ=environ)
+    return ranked[0] if ranked else None
+
+
+def pause_rub_month(o: Mapping[str, Any], cfg: FleetConfig) -> Decimal:
+    """What this host bills per month for our STOPPED disk (disk_gb x storage price per GB-month), in RUB."""
+    return Decimal(str(o.get("storage_cost") or 0)) * cfg.disk_gb * cfg.usd_rub
+
+
+def reserve_ok(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
+    """May this power host be the paused POWER reserve: its pause costs <= power_reserve_max_storage_rub per month."""
+    return power_ok(o, cfg) and pause_rub_month(o, cfg) <= cfg.power_reserve_max_storage_rub
+
+
+def offer_brief(o: Mapping[str, Any], known_machines: Iterable[int] = ()) -> Dict[str, Any]:
+    """Short, secret-free description of an offer for the spares list (fleet_events / status)."""
+    geo = str(o.get("geolocation") or "")
+    return {"offer": o.get("id"), "machine": o.get("machine_id"), "gpu": o.get("gpu_name"), "num_gpus": num_gpus(o),
+            "dph": str(o.get("dph_total")), "storage": str(o.get("storage_cost")), "geo": geo.rsplit(",", 1)[-1].strip(),
+            "cpu": str(o.get("cpu_name") or "")[:40], "cached": o.get("machine_id") in set(known_machines)}
+
+
+def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str], *,
+                   power_slots: int = 0) -> Dict[str, Any]:
+    """power_slots > 0: a POWER server - the worker sizes itself ("auto": its real cards, CPU threads, RAM; a broken card is
+    left out) but never runs more than the fleet counted for it."""
     validate_release(cfg)
     if not github_token:
         raise LaunchError("no GitHub release token")
     env = {"SONYA_RELEASE_SHA": cfg.release_sha, "SONYA_RELEASE_REPO": cfg.release_repo, "GITHUB_RELEASE_TOKEN": github_token,
            "WORKER_ID": label, "WORKER_BACKEND_MODE": "api", "ENABLED_MODES": ",".join(cfg.pool_modes),
-           "SONYA_REQUIRE_MODEL_LOCK": "1", "SONYA_MIN_VRAM_MB": str(cfg.min_vram_gb * 1000 - 4000)}
+           "SONYA_REQUIRE_MODEL_LOCK": "1", "SONYA_MIN_VRAM_MB": str(cfg.min_vram_gb * 1000 - 4000),
+           "SONYA_WORKER_CONCURRENCY": "auto" if power_slots else str(cfg.jobs_per_instance),
+           # NVENC: the NVIDIA runtime mounts libnvidia-encode only with the "video" capability; without it the worker
+           # fell back to libx264 on Vast (run 4: "render encoder: cpu @ 6M", 179 s vs 108 s on the Mac mini)
+           "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"}
     missing = [k for k in ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_REGION", "MODELS_S3_BUCKET")
                if not environ.get(k)]
     if missing or not (environ.get("S3_BUCKET_NAME") or environ.get("S3_BUCKET")):
         raise LaunchError(f"dispatcher is missing worker env: {', '.join(missing) or 'S3_BUCKET_NAME'}")
+    if power_slots:
+        env["SONYA_WORKER_CONCURRENCY_MAX"] = str(power_slots)
     env.update({k: environ[k] for k in SECRET_PASSTHROUGH if environ.get(k)})
     return {"client_id": "me", "image": cfg.image, "env": env, "disk": cfg.disk_gb, "label": label, "runtype": "args"}
 

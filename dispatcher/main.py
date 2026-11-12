@@ -3,6 +3,7 @@ Entry points on the SONYA VPS (central side only).
   build_fleet()   -> FleetManager wired to Vast, the production queue (read-only) and the GitHub App
   python -m dispatcher.main run      loop: fleet tick every SONYA_FLEET_TICK_SECONDS + due accounting reports
   python -m dispatcher.main once     single tick (cron / manual check)
+  python -m dispatcher.main status   servers + the ranked spare offers per class (reads fleet.db only)
 Secrets come from files/env on THIS host: VAST_API_KEY_FILE (0600), GH_APP_* , WORKER_SECRET, S3_*.
 SONYA_FLEET_ENABLED=false (default) makes everything a no-op; SONYA_FLEET_DRY_RUN=true (default) sends no write call to Vast.
 """
@@ -19,7 +20,7 @@ from dispatcher.config import FleetConfig
 from dispatcher.fleet import FleetManager
 from dispatcher.queue import PostgresQueueView
 from dispatcher.store import FleetStore
-from dispatcher.token_provider import github_app_token_provider
+from dispatcher.token_provider import github_app_token_provider, release_token_provider
 from dispatcher.vast_api import VastClient
 
 log = logging.getLogger("sonya.fleet.main")
@@ -40,7 +41,7 @@ def build_fleet(env=os.environ) -> FleetManager:
     cfg = FleetConfig.from_env(dict(env))
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return FleetManager(cfg, FleetStore(str(STATE_DIR / "fleet.db")), VastClient(_vast_key(env), dry_run=cfg.dry_run),
-                        PostgresQueueView(env["DATABASE_URL"]), github_app_token_provider(cfg.release_repo.split("/")[-1], env), env)
+                        PostgresQueueView(env["DATABASE_URL"]), release_token_provider(cfg.release_repo.split("/")[-1], env), env)
 
 
 def build_accounting(fleet: FleetManager, env=os.environ):
@@ -103,5 +104,17 @@ def import_confirmed(fleet: FleetManager, ledger) -> None:  # pragma: no cover
     vast_billing.import_charges(ledger, rows, now)
 
 
+def status(state_dir: Path = STATE_DIR) -> int:
+    from dispatcher.status import status_text
+    db = state_dir / "fleet.db"
+    if not db.exists():
+        print(f"no fleet state yet ({db})")
+        return 1
+    print(status_text(FleetStore(str(db))))
+    return 0
+
+
 if __name__ == "__main__":  # pragma: no cover
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        sys.exit(status())
     sys.exit(run(once=(len(sys.argv) > 1 and sys.argv[1] == "once")))

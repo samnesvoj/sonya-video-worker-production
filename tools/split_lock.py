@@ -2,7 +2,7 @@
 """
 Split requirements/worker.lock.txt into three hash-pinned layer files so Docker builds (and Vast pulls) get SEPARATE layers:
   01-cuda-libs   nvidia-* (cuDNN, cuBLAS, ... ~ 3 GB, changes almost never)
-  02-torch       torch, torchvision, triton            (changes only on a PyTorch upgrade)
+  02-torch       torch, torchvision, torchaudio, triton (changes only on a PyTorch upgrade)
   03-rest        everything else                       (changes most often)
 Layers download in parallel and an unchanged big layer is reused from the host cache. `--check` (CI) proves the union equals the lock.
 """
@@ -16,7 +16,7 @@ def _arg(flag, default):
 LOCK = _arg("--lock", ROOT / "requirements" / "worker.lock.txt")      # e.g. requirements/candidates/torch213-cu126.lock.txt
 OUT = _arg("--out", ROOT / "requirements" / "split")
 # nvidia-ml-py (NVML bindings, tiny, imported by ultralytics) is NOT a CUDA library layer: it stays in 03-rest.
-GROUPS = [("01-cuda-libs", re.compile(r"^(nvidia-(?!ml-py)|cuda-)")), ("02-torch", re.compile(r"^(torch|torchvision|triton)$"))]
+GROUPS = [("01-cuda-libs", re.compile(r"^(nvidia-(?!ml-py)|cuda-)")), ("02-torch", re.compile(r"^(torch|torchvision|torchaudio|triton)$"))]
 
 
 def blocks(text: str):

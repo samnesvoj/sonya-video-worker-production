@@ -1,0 +1,103 @@
+{
+ "version": 1,
+ "items": [
+  {
+   "id": "asmr_bubbles",
+   "file": "asmr_bubbles.mp4",
+   "kind": "asmr",
+   "desc": "pastel bubbles rising",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 1698471,
+   "sha256": "c718ed784de14cebc033e273b404e2871d8b2d767595340ccb827919faed1681",
+   "s3_key": "worker-v2/assets/fillers/asmr_bubbles.mp4"
+  },
+  {
+   "id": "asmr_slime_blue",
+   "file": "asmr_slime_blue.mp4",
+   "kind": "asmr",
+   "desc": "glossy blue slime",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 441328,
+   "sha256": "dfb95ac0cc18a2acc1acfaeda1a9ebda2d8691b7e727f2b26bd8d92721d1d878",
+   "s3_key": "worker-v2/assets/fillers/asmr_slime_blue.mp4"
+  },
+  {
+   "id": "asmr_slime_pink",
+   "file": "asmr_slime_pink.mp4",
+   "kind": "asmr",
+   "desc": "glossy pink slime",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 436471,
+   "sha256": "4e7521aa1681dc6ec072684a10e1bc28f8b9c44e6194295ec097d6f975212bd9",
+   "s3_key": "worker-v2/assets/fillers/asmr_slime_pink.mp4"
+  },
+  {
+   "id": "asmr_soap_cut",
+   "file": "asmr_soap_cut.mp4",
+   "kind": "asmr",
+   "desc": "pastel soap block sliced",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 183065,
+   "sha256": "4ed52f0f78f8b0d72f5766520b984fede2f0b500fbb31f73506e91ed27839464",
+   "s3_key": "worker-v2/assets/fillers/asmr_soap_cut.mp4"
+  },
+  {
+   "id": "gameplay_hopper",
+   "file": "gameplay_hopper.mp4",
+   "kind": "gameplay",
+   "desc": "vertical auto-jumper",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 531382,
+   "sha256": "d39146ee75fcda0cedb8b7f6f0198fca0d9e3a2aa3e93742cd776a62f70d8561",
+   "s3_key": "worker-v2/assets/fillers/gameplay_hopper.mp4"
+  },
+  {
+   "id": "gameplay_runner_lanes",
+   "file": "gameplay_runner_lanes.mp4",
+   "kind": "gameplay",
+   "desc": "3-lane pseudo-3D runner",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 398200,
+   "sha256": "554bb006a77139167ce89613344591aefb14f40692159345f50bfe60474c6113",
+   "s3_key": "worker-v2/assets/fillers/gameplay_runner_lanes.mp4"
+  },
+  {
+   "id": "gameplay_runner_side",
+   "file": "gameplay_runner_side.mp4",
+   "kind": "gameplay",
+   "desc": "2D side-scroller, cube over spikes",
+   "license": "own-generated",
+   "source": "tools/gen_fillers.py (PIL+ffmpeg), rendered 2026-11-10 on Mac mini",
+   "watermark": false,
+   "audio": false,
+   "duration_sec": 20,
+   "size": 537671,
+   "sha256": "3b30a388340d9a9f239169b9de7074b0767438e1b7bc04e6d2332548989c4dda",
+   "s3_key": "worker-v2/assets/fillers/gameplay_runner_side.mp4"
+  }
+ ]
+}

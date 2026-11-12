@@ -1,1 +1,46 @@
-{"schema_version": 1, "note": "Fill with tools/make_models_lock.py (needs S3 read access, trusted machine). Required in production via SONYA_REQUIRE_MODEL_LOCK=1.", "models": {}}
+{
+  "schema_version": 1,
+  "note": "Mac mini 2026-11-08: sha256/size of the exact files on the Mac mini (gigaam = the files behind the reference transcripts; yolo/whisper = byte-identical to the pinned public files). whisper_base_config fetched from the pinned HF revision and matched public_sha256. webcam_detector deliberately NOT pinned (off by owner decision).",
+  "models": {
+    "gigaam_v3_e2e_rnnt_ckpt": {
+      "s3_path": "models/gigaam/v3_e2e_rnnt.ckpt",
+      "sha256": "f60c62fe45902d967000770a12f260de7c5ac4d4b8e5e852f1df8c548e3958b5",
+      "size": 448929252
+    },
+    "gigaam_v3_e2e_rnnt_tokenizer": {
+      "s3_path": "models/gigaam/v3_e2e_rnnt_tokenizer.model",
+      "sha256": "828c12c991019eef952a960661f25a92d6ad279591e2ea466b4aeddf1d20a18a",
+      "size": 255336
+    },
+    "yolo11n": {
+      "s3_path": "models/common/yolo11n.pt",
+      "sha256": "0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1",
+      "size": 5613764
+    },
+    "yolo11n_pose": {
+      "s3_path": "models/common/yolo11n-pose.pt",
+      "sha256": "869e83fcdffdc7371fa4e34cd8e51c838cc729571d1635e5141e3075e9319dc0",
+      "size": 6255593
+    },
+    "whisper_base_config": {
+      "s3_path": "models/whisper-base/config.json",
+      "sha256": "56a6d8110d311f19c8f0471e562832c7527f146b567275bfca59fcf7c184da9a",
+      "size": 2309
+    },
+    "whisper_base_model": {
+      "s3_path": "models/whisper-base/model.bin",
+      "sha256": "d01c3014881c9c6f3133c182f3d2887eb6ca1c789a7538c5c007196857a0a6a9",
+      "size": 145217532
+    },
+    "whisper_base_tokenizer": {
+      "s3_path": "models/whisper-base/tokenizer.json",
+      "sha256": "fb7b63191e9bb045082c79fd742a3106a12c99513ab30df4a0d47fa6cb6fd0ab",
+      "size": 2203239
+    },
+    "whisper_base_vocabulary": {
+      "s3_path": "models/whisper-base/vocabulary.txt",
+      "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
+      "size": 459861
+    }
+  }
+}

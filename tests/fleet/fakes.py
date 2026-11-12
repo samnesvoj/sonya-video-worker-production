@@ -27,6 +27,14 @@ class Clock:
         self.t += s
 
 
+def offer(oid, machine, gpu="RTX 3060", cpu="AMD Ryzen 7 5800X 8-Core Processor", cores=8.0, dph=0.082, storage=0.2,
+          geo="United Kingdom, GB", down=5900.0, rel=0.995, **kw):
+    """The owner's default class (2026-11-08): RTX 3060 12 GB + Ryzen 7 5800X, UK, 5.9 Gbit/s, $0.082/h."""
+    return {"id": oid, "machine_id": machine, "gpu_name": gpu, "cpu_name": cpu, "cpu_cores_effective": cores, "dph_total": dph,
+            "dph_base": round(dph - 0.003, 4), "storage_cost": storage, "geolocation": geo, "inet_down": down, "reliability2": rel,
+            "internet_up_cost_per_tb": 4, "internet_down_cost_per_tb": 2.6, **kw}
+
+
 class FakeVast:
     """In-memory Vast: create/stop/resume/destroy with controllable scheduling behaviour."""
     dry_run = False
@@ -35,15 +43,20 @@ class FakeVast:
         self.inst = {}
         self.calls = []
         self._ids = itertools.count(1000)
-        self.offers = [{"id": 1, "gpu_name": "RTX 3090", "dph_total": 0.19, "dph_base": 0.187, "machine_id": 7, "storage_cost": 0.2,
-                        "internet_up_cost_per_tb": 4, "internet_down_cost_per_tb": 2.6}]
+        self.offers = [offer(1, 7)]
         self.resume_gets_gpu = True
         self.fail_stop = False
         self.fail_create = False
+        self.host_error = ""            # next create lands on a host that cannot start the container
+        self.fail_offers = set()        # create on these offer ids -> VastError (offer rented a second ago)
+        self.fail_resume = False        # resume call -> VastError
+        self.created_offers = []        # offer id of every successful create, in order
+        self.instance_offer = {}        # instance id -> offer id
 
     def list_instances(self):
-        return [VastInstance(id=i, label=d["label"], actual_status=d["status"], intended_status=d["intended"], gpu_name="RTX 3090",
-                             dph_total=Decimal("0.19"), disk_gb=Decimal("80")) for i, d in self.inst.items()]
+        return [VastInstance(id=i, label=d["label"], actual_status=d["status"], intended_status=d["intended"], gpu_name="RTX 3060",
+                             dph_total=Decimal("0.082"), disk_gb=Decimal("40"), status_msg=d.get("msg", ""))
+                for i, d in self.inst.items()]
 
     def search_offers(self, q):
         self.calls.append(("search",))
@@ -52,9 +65,16 @@ class FakeVast:
     def create(self, offer_id, payload):
         if self.fail_create:
             raise VastError("boom", 500)
+        if offer_id in self.fail_offers:
+            self.calls.append(("create_refused", offer_id))
+            raise VastError("no_such_ask", 400)
         iid = next(self._ids)
+        self.created_offers.append(offer_id)
+        self.instance_offer[iid] = offer_id
         self.calls.append(("create", iid, payload))
-        self.inst[iid] = {"label": payload["label"], "status": "running", "intended": "running"}
+        self.inst[iid] = {"label": payload["label"], "status": "created" if self.host_error else "running",
+                          "intended": "running", "msg": self.host_error}
+        self.host_error = ""
         return iid
 
     def stop(self, iid):
@@ -65,6 +85,8 @@ class FakeVast:
 
     def resume(self, iid):
         self.calls.append(("resume", iid))
+        if self.fail_resume:
+            raise VastError("resume refused", 400)
         self.inst[iid].update(intended="running", status="running" if self.resume_gets_gpu else "scheduling")
 
     def destroy(self, iid):
@@ -76,7 +98,9 @@ class FakeVast:
 
 
 def make(cfg_over=None, dry=False):
-    cfg = FleetConfig(enabled=True, dry_run=dry, image=IMAGE, release_sha=SHA, **(cfg_over or {}))
+    # the lifecycle tests below pre-date the warm/burst split: one instance, no priming (tests/fleet/test_warm.py covers those)
+    base = {"warm_prime": False, "max_instances": 1, "jobs_per_instance": 1}
+    cfg = FleetConfig(enabled=True, dry_run=dry, image=IMAGE, release_sha=SHA, **{**base, **(cfg_over or {})})
     clock, vast = Clock(), FakeVast()
     vast.dry_run = dry
     conn = sqlite3.connect(":memory:", check_same_thread=False)

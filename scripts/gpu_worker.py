@@ -28,11 +28,26 @@ Flow (both modes):
 """
 from __future__ import annotations
 
+import os as _os
+
+if _os.environ.get("SONYA_CPU_AFFINITY") and hasattr(_os, "sched_setaffinity"):
+    # big multi-worker servers (scripts/ops/gpu_plan.cpu_windows): this worker's CPU window, set BEFORE any import starts
+    # a thread pool; ffmpeg / OpenCV / torch inherit it and size their pools by it. A bad value leaves the default.
+    try:
+        _cpus = set()
+        for _part in _os.environ["SONYA_CPU_AFFINITY"].split(","):
+            _a, _, _b = _part.partition("-")
+            _cpus.update(range(int(_a), int(_b or _a) + 1))
+        _os.sched_setaffinity(0, _cpus & _os.sched_getaffinity(0) or _os.sched_getaffinity(0))
+    except (OSError, ValueError):
+        pass
+
 import argparse
 import json
 import logging
 import os
 import platform
+import re
 import shutil
 import signal
 import socket
@@ -105,6 +120,7 @@ _CONTENT_TYPES = {
     ".json": "application/json",
     ".srt": "text/plain",
     ".vtt": "text/vtt",
+    ".ass": "text/x-ssa",
 }
 _FILE_TYPES = {
     ".mp4": "output",
@@ -112,6 +128,7 @@ _FILE_TYPES = {
     ".json": "enrichment_json",
     ".srt": "subtitle",
     ".vtt": "subtitle",
+    ".ass": "subtitle",     # burned-in subtitle source of a clip: never counted as a clip
 }
 
 
@@ -127,6 +144,7 @@ def _on_sigterm(signum, _frame) -> None:
     logger.warning("[worker] signal=%s received active_job=%s", signum, job_id)
     if job_id:
         _ACTIVE_JOB["id"] = None
+        os.environ["WORKER_API_DURABLE_SEC"] = "5"   # docker stop grants ~10 s: never block the shutdown on retries
         _fail(job_id, "WORKER_SHUTDOWN", "worker terminated while job was running", retry=True)
     raise SystemExit(143)
 
@@ -208,6 +226,33 @@ class _BackendAPIClient:
             )
         return resp.json()
 
+    def _post_durable(self, path: str, body: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
+        """_post for the calls whose loss loses the user's result (files / complete / fail): a backend or
+        network blip (connection error, timeout, HTTP 5xx/408/429) is retried with backoff for up to
+        WORKER_API_DURABLE_SEC (default 900 s) instead of dropping the finished job. The backend handlers
+        are idempotent (files: ON CONFLICT (s3_key) DO NOTHING; complete: plain UPDATE). Other 4xx raise
+        at once: retrying a rejected request cannot help."""
+        budget = float(os.environ.get("WORKER_API_DURABLE_SEC", "900"))
+        deadline = time.monotonic() + budget
+        delay = 2.0
+        while True:
+            try:
+                return self._post(path, body, timeout=timeout)
+            except RuntimeError as exc:          # HTTP status from the backend
+                m = re.search(r"HTTP (\d{3})", str(exc))
+                code = int(m.group(1)) if m else 0
+                if not (code >= 500 or code in (408, 429)):
+                    raise
+                err: Exception = exc
+            except Exception as exc:             # connection reset / TLS EOF / timeout / DNS
+                err = exc
+            if time.monotonic() + delay > deadline:
+                raise err
+            logger.warning("[api] %s unreachable (%s) - retry in %.0f s", path.rsplit("/", 1)[-1],
+                           str(err)[:160], delay)
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
+
     def claim_job(
         self,
         job_id: Optional[str],
@@ -244,7 +289,7 @@ class _BackendAPIClient:
         processing_ms: int,
         enrichment_keys: Optional[List[str]] = None,
     ) -> None:
-        self._post(
+        self._post_durable(
             f"/api/worker/jobs/{job_id}/complete",
             {
                 "s3_output_key": s3_output_key,
@@ -262,7 +307,7 @@ class _BackendAPIClient:
         retry: bool,
     ) -> None:
         try:
-            self._post(
+            self._post_durable(
                 f"/api/worker/jobs/{job_id}/fail",
                 {
                     "error_code": error_code,
@@ -284,7 +329,7 @@ class _BackendAPIClient:
         size_bytes: int,
     ) -> None:
         try:
-            self._post(
+            self._post_durable(
                 f"/api/worker/jobs/{job_id}/files",
                 {
                     "file_type": file_type,
@@ -429,6 +474,18 @@ def ensure_models_for_mode(mode: str) -> bool:
 
 
 # ── Heartbeat ──────────────────────────────────────────────────────────────────
+
+def _progress_args(step: Any, pct: Any) -> "tuple[str, float]":
+    """Runners call progress_callback(stage, fraction) (virality, enhancer) or (fraction, text) (BEEP):
+    accept both, like the Desktop mode child (sonya_desktop/modes/child.py). Never raises."""
+    if isinstance(step, (int, float)) and not isinstance(step, bool) and not isinstance(pct, (int, float)):
+        step, pct = pct, step
+    try:
+        frac = float(pct) if pct is not None else 0.0
+    except (TypeError, ValueError):
+        frac = 0.0
+    return (str(step) if step is not None else "running"), frac
+
 
 class _HeartbeatPulse:
     """
@@ -624,7 +681,8 @@ def process_job(job: dict, worker_id: str) -> None:
             "assembling": "assembling",
         }
 
-        def _progress(step: str, pct: float) -> None:
+        def _progress(step=None, pct=None, *_a, **_kw) -> None:
+            step, pct = _progress_args(step, pct)
             logger.info(
                 "[worker] job_id=%s step=%s progress=%.0f%%", job_id, step, pct * 100
             )
@@ -675,9 +733,15 @@ def process_job(job: dict, worker_id: str) -> None:
                 )
                 result = {"clips": [out_path], "mode": "streamer", "warnings": []}
             else:
+                # Desktop ingest: VFR / rotated / non-H.264 sources are normalized before the mode
+                # (scripts/shared/source_normalize.py; virality + beep only)
+                from scripts.shared.source_normalize import normalize_source
+                norm = normalize_source(str(input_path), str(output_dir.parent / "ingest"), mode)
+                if norm["normalized"]:
+                    logger.info("[worker] job_id=%s source normalized: %s", job_id, ",".join(norm["reasons"]))
                 runner = get_runner(mode)
                 result = runner(
-                    input_video_path=str(input_path),
+                    input_video_path=norm["path"],
                     output_dir=str(output_dir),
                     params=params,
                     progress_callback=_progress,

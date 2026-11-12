@@ -1,8 +1,10 @@
 name: streamer
-version: "0.9-beta"
+version: "2.0-beta"
 description: >
-  Streamer mode (beta). Uses yuvelirochka analyzer/clipper/cropper stack.
-  Webcam detection, lip sync, person tracking.
+  Streamer mode v2 (beta): highlights of a long stream VOD from voice / reaction words / game events /
+  chat density, whole sentences 25-60 s, optional Gemini editor (analysis only, <= 10 RUB per stream);
+  layout "webcam on top (only the webcam, by its border), game below (off chat columns)", one render pass
+  at 6 Mb/s. See docs/STREAMER_V2.md.
 
 models:
   yolo11n:
@@ -16,7 +18,10 @@ models:
   webcam_detector:
     s3_path: models/common/webcam_detector.pt
     local_path: common/webcam_detector.pt
-    optional: false
+    optional: true
+    note: >
+      v2 finds the webcam by its border (OpenCV, no model). The YOLO box is only a seed when
+      STREAMER_WEBCAM_DETECTOR=true (off by default; not measured: the file was not readable on the Mac mini).
   face_landmarker:
     s3_path: models/common/face_landmarker.task
     local_path: common/face_landmarker.task

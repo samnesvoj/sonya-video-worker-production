@@ -28,11 +28,14 @@ class StubState:
         self.jobs: Dict[str, Dict[str, Any]] = {}
         self.failures: List[Dict[str, Any]] = []
 
-    def enqueue(self, mode: str, s3_input_key: str, params: Optional[dict] = None, user_id: str = "fast-start-test") -> str:
+    def enqueue(self, mode: str, s3_input_key: str, params: Optional[dict] = None, user_id: str = "fast-start-test",
+                only_worker_prefix: Optional[str] = None) -> str:
+        """only_worker_prefix (load test phase G): only a worker whose id starts with it may claim the job. A server that
+        Vast already stopped listing can still run for seconds and steal the next level's job (2026-11-09, G1 -> G2)."""
         jid = str(uuid.uuid4())
         with self.lock:
             self.jobs[jid] = {"id": jid, "user_id": user_id, "mode": mode, "params": params or {}, "s3_input_key": s3_input_key, "status": "queued",
-                              "worker_id": None, "queued_at": self.clock(), "history": [("queued", self.clock())], "files": [], "error": None}
+                              "only": only_worker_prefix, "worker_id": None, "queued_at": self.clock(), "history": [("queued", self.clock())], "files": [], "error": None}
         return jid
 
     def _set(self, j: dict, status: str) -> None:
@@ -42,7 +45,8 @@ class StubState:
     def claim(self, worker_id: str, modes: Optional[List[str]] = None, job_id: Optional[str] = None) -> Optional[dict]:
         with self.lock:
             for j in sorted(self.jobs.values(), key=lambda j: j["queued_at"]):
-                if j["status"] == "queued" and (job_id is None or j["id"] == job_id) and (not modes or j["mode"] in modes):
+                if j["status"] == "queued" and (job_id is None or j["id"] == job_id) and (not modes or j["mode"] in modes) \
+                        and (not j.get("only") or str(worker_id).startswith(j["only"])):
                     j["worker_id"] = worker_id
                     self._set(j, "claimed")
                     return {k: j[k] for k in ("id", "user_id", "mode", "params", "s3_input_key", "status")}
@@ -116,6 +120,9 @@ def make_server(state: StubState, secret: str, host: str = "127.0.0.1", port: in
         def _send(self, code: int, obj: dict) -> None:
             b = json.dumps(obj).encode()
             self.send_response(code); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+
+        def do_GET(self):  # noqa: N802 - liveness only (tunnel check); no job data, no auth needed
+            return self._send(200, {"ok": True}) if self.path == "/healthz" else self._send(404, {"error": "not_found"})
 
         def do_POST(self):  # noqa: N802
             tok = self.headers.get("Authorization", "")

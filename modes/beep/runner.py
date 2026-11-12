@@ -28,6 +28,24 @@ def _duration(path: str) -> float:
     return float(d["format"]["duration"]), int(v.get("width") or 0), int(v.get("height") or 0)
 
 
+def _run_asr(input_video_path: str, out_dir: Path, language: Optional[str],
+             progress_callback: Optional[Callable[..., None]]) -> str:
+    """No precomputed words (the worker path): run the SONYA ASR (GigaAM by default, scripts/shared/asr) and keep its
+    words next to the output. Any ASR failure is a BEEP failure - never a «clean» video that was not checked."""
+    from scripts.shared import asr
+    try:
+        res = asr.transcribe(input_video_path, language=language)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"BEEP_FAILED: ASR failed — nothing was checked ({e})") from e
+    path = out_dir / "asr_words.json"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({k: res.get(k) for k in ("backend", "model", "language", "words")}, ensure_ascii=False),
+                    encoding="utf-8")
+    if progress_callback:
+        progress_callback(0.2, f"asr: {res.get('backend')} {len(res.get('words') or [])} words")
+    return str(path)
+
+
 def run(input_video_path: str, output_dir: str, params: Optional[Dict[str, Any]] = None,
         progress_callback: Optional[Callable[..., None]] = None) -> Dict[str, Any]:
     from scripts.shared import beep as bp
@@ -35,7 +53,9 @@ def run(input_video_path: str, output_dir: str, params: Optional[Dict[str, Any]]
     params = params or {}
     out_dir = Path(output_dir)
     wpath = params.get("word_timestamps_path")
-    if not wpath or not Path(wpath).is_file():
+    if not wpath:
+        wpath = _run_asr(input_video_path, out_dir, params.get("language"), progress_callback)
+    if not Path(wpath).is_file():
         raise RuntimeError("BEEP_FAILED: no ASR word timestamps — nothing was checked")
     words = json.loads(Path(wpath).read_text(encoding="utf-8")).get("words") or []
     if not words:

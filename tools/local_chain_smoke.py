@@ -41,7 +41,7 @@ def main():
            "SONYA_RELEASE_REPO": "o/r", "GITHUB_RELEASE_TOKEN": TOKEN, "SONYA_BASE_LOCK_SHA256": lock,
            "SONYA_RELEASES_DIR": str(tmp / "releases"), "SONYA_CURRENT_LINK": str(tmp / "current"),
            "SONYA_STATE_DIR": str(tmp / "run"), "SONYA_BOOTSTRAP_DIR": str(ROOT / "bootstrap"),
-           "SONYA_SKIP_GPU_CHECK": "1", "SONYA_HEALTH_PORT": "18099", "TMPDIR": str(tmp / "work"),
+           "SONYA_SKIP_GPU_CHECK": "1", "SONYA_REQUIRE_ASR": "0", "SONYA_HEALTH_PORT": "18099", "TMPDIR": str(tmp / "work"),
            "MODELS_LOCAL_DIR": str(tmp / "models"), "WORKER_POLL_INTERVAL": "1",
            "BACKEND_API_URL": f"http://127.0.0.1:{srv.server_address[1]}", "WORKER_SECRET": SECRET,
            "S3_ENDPOINT_URL": "http://127.0.0.1:9", "S3_ACCESS_KEY_ID": "x", "S3_SECRET_ACCESS_KEY": "y",

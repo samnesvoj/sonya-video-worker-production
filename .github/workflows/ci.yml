@@ -13,14 +13,12 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: |
-          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography 'moto[s3]'
+          pip install pytest pyyaml requests pydantic fastapi boto3 numpy pillow python-dotenv httpx scenedetect cryptography 'moto[s3]' fonttools
           pip install --no-deps opencv-python==4.14.0.94 opencv-contrib-python==4.14.0.94 opencv-python-headless==4.14.0.94
       - name: ffmpeg (with libass) so the video-processing tests run instead of being skipped
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
       - run: python -m pytest -q -rs
       - run: python tools/update_release_manifest.py --check
-      - name: Candidate lock is audited too (any new torch advisory fails)
-        run: python tools/osv_check.py requirements/candidates/torch213-cu126.lock.txt
       - name: Layer split files match the lock
         run: python tools/split_lock.py --check
       - name: Model fetcher benchmark (loopback S3, correctness + hashing headroom; NOT an internet measurement)
@@ -45,7 +43,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-      - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip
+      # setuptools 81.0.0 is forced by torch==2.11.0 (requires setuptools<82). The two advisories concern setuptools build/install-time
+      # features (package_index / easy_install paths), never executed at runtime in the worker image. Revisit together with the torch bump
+      # (docs/TORCH_UPGRADE.md). Everything else must stay clean.
+      - run: pip install pip-audit && pip-audit --require-hashes -r requirements/worker.lock.txt --disable-pip --ignore-vuln GHSA-xmj3-9gf7-h52w --ignore-vuln PYSEC-2026-3447
       - name: OSV for torch/torchvision (pip-audit cannot see +cuXXX wheels); new advisories fail unless accepted in writing
         run: python tools/osv_check.py requirements/worker.lock.txt
   docker-build:
@@ -79,6 +80,36 @@ jobs:
           docker run --rm -v "$PWD/tools/ci_model_smoke.py:/tmp/s.py:ro" -v "$PWD/release/models.required.json:/tmp/m.json:ro" --entrypoint python3 \
             sonya-video-worker-base:ci /tmp/s.py /tmp/m.json | tee report/model-smoke.txt
           { echo; echo "### Model smoke (default image)"; cat report/model-smoke.txt; } >> "$GITHUB_STEP_SUMMARY"
+      - name: GigaAM compatibility on the worker image (matched torch/torchaudio build, compiled ops, pinned upstream import, front-end, encoder)
+        run: |
+          set -o pipefail
+          mkdir -p report
+          docker run --rm -v "$PWD/tools/ci_gigaam_compat.py:/tmp/c.py:ro" --entrypoint python3 sonya-video-worker-base:ci /tmp/c.py | tee report/gigaam-compat.txt
+          { echo; echo "### GigaAM compatibility (no weights)"; cat report/gigaam-compat.txt; } >> "$GITHUB_STEP_SUMMARY"
+      - name: GigaAM real recognition, OFFLINE (runs only when the test-bucket secrets are configured; otherwise reported as SKIPPED)
+        env:
+          GIGAAM_S3_ACCESS_KEY_ID: ${{ secrets.GIGAAM_S3_ACCESS_KEY_ID }}
+          GIGAAM_S3_SECRET_ACCESS_KEY: ${{ secrets.GIGAAM_S3_SECRET_ACCESS_KEY }}
+          GIGAAM_S3_ENDPOINT: ${{ secrets.GIGAAM_S3_ENDPOINT }}
+          GIGAAM_S3_BUCKET: ${{ secrets.GIGAAM_S3_BUCKET }}
+        run: |
+          set -o pipefail
+          mkdir -p report
+          if [ -z "$GIGAAM_S3_ACCESS_KEY_ID" ]; then
+            echo "SKIPPED: GIGAAM_S3_* secrets are not configured, so NO real-weights recognition was verified in CI" | tee report/gigaam-real.txt
+          else
+            mkdir -p gw/gigaam && git clone --quiet https://github.com/salute-developers/GigaAM.git gsrc && git -C gsrc checkout --quiet 7447938d791c4f3e643386ee22c33777004293a5
+            docker run --rm -e GIGAAM_S3_ACCESS_KEY_ID -e GIGAAM_S3_SECRET_ACCESS_KEY -e GIGAAM_S3_ENDPOINT -e GIGAAM_S3_BUCKET -v "$PWD/gw:/w" --entrypoint python3 sonya-video-worker-base:ci - <<'PY'
+          import boto3, os
+          c = boto3.client("s3", endpoint_url=os.environ["GIGAAM_S3_ENDPOINT"], aws_access_key_id=os.environ["GIGAAM_S3_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["GIGAAM_S3_SECRET_ACCESS_KEY"], region_name="ru-1")
+          b = os.environ["GIGAAM_S3_BUCKET"]
+          for k, d in (("models/gigaam/v3_e2e_rnnt.ckpt", "gigaam/v3_e2e_rnnt.ckpt"), ("models/gigaam/v3_e2e_rnnt_tokenizer.model", "gigaam/v3_e2e_rnnt_tokenizer.model"), ("gigaam-test/speech.wav", "speech.wav")):
+              c.download_file(b, k, "/w/" + d)
+          PY
+            docker run --rm --network none -v "$PWD:/repo:ro" -v "$PWD/gw:/w:ro" -v "$PWD/gsrc:/gsrc:ro" --entrypoint python3 sonya-video-worker-base:ci \
+              /repo/tools/ci_gigaam_real.py --models-dir /w --audio /w/speech.wav --gigaam-src /gsrc | tee report/gigaam-real.txt
+          fi
+          { echo; echo "### GigaAM real recognition"; cat report/gigaam-real.txt; } >> "$GITHUB_STEP_SUMMARY"
       - name: Image report (measured layers, compressed vs uncompressed, package sizes, import times)
         run: |
           mkdir -p report
@@ -89,6 +120,13 @@ jobs:
             docker run --rm --entrypoint bash sonya-video-worker-base:ci -c 'cd /usr/local/lib/python3.11/site-packages && du -sm * 2>/dev/null | sort -rn | head -22 | sed "s/^/- /"; echo; echo "nvidia libs (MB):"; du -sm nvidia/* 2>/dev/null | sort -rn | head -14 | sed "s/^/- /"';
             echo; echo "### Import times inside the image (CPU, warm cache = lower bound)";
             docker run --rm -v "$PWD/tools/image_timing.py:/tmp/image_timing.py:ro" --entrypoint python3 sonya-video-worker-base:ci /tmp/image_timing.py; } | tee -a report/image-report.md
+          python3 - <<'PY' | tee -a report/image-report.md
+          import re
+          t = open('report/image-report.md').read()
+          m = re.search(r'Total: ([0-9.]+) GB uncompressed, ([0-9.]+) GB gzip', t)
+          u, w = float(m.group(1)), float(m.group(2))
+          print(f"\n**Size vs the previous main image (torch 2.5.1+cu124, no GigaAM): uncompressed {u:.2f} GB vs 7.48 GB ({u-7.48:+.2f}), wire {w:.2f} GB vs 3.75 GB ({w-3.75:+.2f}, {100*(w/3.75-1):+.0f} %).**")
+          PY
           cat report/image-report.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with: { name: image-report-default, path: report/ }
@@ -111,108 +149,3 @@ jobs:
             -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash \
             sonya-video-worker-base:ci /tmp/ci_docker_checks.sh
-
-  image-variant-nvidia:
-    # EXPERIMENT, not a gate: does the worker run on top of nvidia/cuda (host-cacheable base) without the pip nvidia-* wheels?
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-      - uses: docker/setup-buildx-action@v3
-      - id: lock
-        run: echo "sha=$(sha256sum requirements/worker.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile.nvidia
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: sonya-video-worker-nvidia:ci
-          build-args: |
-            BASE_LOCK_SHA256=${{ steps.lock.outputs.sha }}
-            IMAGE_VERSION=${{ github.sha }}
-      - name: Do the CUDA libraries from the base image satisfy torch / ctranslate2 ? (CPU-verifiable linkage checks)
-        run: |
-          set -o pipefail
-          mkdir -p report
-          docker run --rm --entrypoint bash sonya-video-worker-nvidia:ci -c '
-            SP=/opt/venv/lib/python3.11/site-packages
-            echo "ldd torch/lib/libtorch_cuda.so -> unresolved:"; ldd $SP/torch/lib/libtorch_cuda.so | grep "not found" || echo "(none)"
-            echo "ldd ctranslate2 -> unresolved:"; for f in $(ls $SP/ctranslate2*/*.so* $SP/ctranslate2/*.so* 2>/dev/null | head -5); do ldd $f | grep "not found"; done || true; echo "(done)"
-            python -c "import torch;print(\"torch\", torch.__version__, \"cuda-build\", torch.version.cuda, \"cudnn\", torch.backends.cudnn.version())"
-            ls $SP | grep -c "^nvidia" | sed "s/^/pip nvidia dirs: /"
-            ffmpeg -version | head -1' 2>&1 | tee report/linkage.txt
-      - name: Same in-image checks as the default image (bootstrap by pinned SHA, Trailer lock, readiness, health, imports)
-        env:
-          PINNED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -o pipefail
-          mkdir -p report
-          docker run --rm -e SONYA_RELEASE_SHA="$PINNED_SHA" -e SONYA_RELEASE_REPO="${{ github.repository }}" -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-            -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash sonya-video-worker-nvidia:ci /tmp/ci_docker_checks.sh 2>&1 | tee report/checks.txt
-      - name: Image report
-        if: always()
-        run: |
-          docker save sonya-video-worker-nvidia:ci -o img.tar
-          { echo "## nvidia/cuda-based variant"; python3 tools/image_report.py img.tar; echo; echo '```'; cat report/linkage.txt; echo '```'; } | tee report/image-report.md
-          cat report/image-report.md >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: image-report-nvidia, path: report/ }
-
-  image-candidate-torch213:
-    # EXPERIMENT (not a gate): the same worker on a PATCHED PyTorch (2.13.0+cu126, 0 OSV advisories vs 23 for 2.5.1).
-    # Proves: dependency resolution, imports, real YOLO / faster-whisper execution on CPU, bootstrap/Trailer/readiness/health code paths.
-    # Cannot prove: GPU behaviour, driver compatibility, numerical parity of mode outputs (needs the GPU experiment, docs/TORCH_UPGRADE.md).
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Free runner disk
-        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /usr/local/share/boost
-      - uses: docker/setup-buildx-action@v3
-      - id: lock
-        run: |
-          echo "cand=$(sha256sum requirements/candidates/torch213-cu126.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          echo "prod=$(sha256sum requirements/worker.lock.txt | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deploy/docker/Dockerfile
-          platforms: linux/amd64
-          load: true
-          push: false
-          tags: sonya-video-worker-torch213:ci
-          build-args: |
-            TORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
-            SPLIT_DIR=requirements/candidates/torch213-cu126-split
-            LOCK_FILE=requirements/candidates/torch213-cu126.lock.txt
-            BASE_LOCK_SHA256=${{ steps.lock.outputs.cand }}
-            IMAGE_VERSION=${{ github.sha }}
-      - name: "In-image checks (experiment only - the candidate image is told the production lock hash because the release lock differs by design)"
-        env:
-          PINNED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -o pipefail
-          mkdir -p report
-          docker run --rm -e SONYA_BASE_LOCK_SHA256="${{ steps.lock.outputs.prod }}" -e SONYA_RELEASE_SHA="$PINNED_SHA" -e SONYA_RELEASE_REPO="${{ github.repository }}" \
-            -e GITHUB_RELEASE_TOKEN="${{ secrets.GITHUB_TOKEN }}" -v "$PWD/tools/ci_docker_checks.sh:/tmp/ci_docker_checks.sh:ro" --entrypoint bash \
-            sonya-video-worker-torch213:ci /tmp/ci_docker_checks.sh 2>&1 | tee report/checks.txt
-      - name: Model smoke on PyTorch 2.13 (real checkpoints under the new torch.load defaults, NMS op, ctranslate2)
-        run: |
-          set -o pipefail
-          docker run --rm -v "$PWD/tools/ci_model_smoke.py:/tmp/s.py:ro" -v "$PWD/release/models.required.json:/tmp/m.json:ro" --entrypoint python3 \
-            sonya-video-worker-torch213:ci /tmp/s.py /tmp/m.json 2>&1 | tee report/model-smoke.txt
-      - name: Image report + import times
-        if: always()
-        run: |
-          docker save sonya-video-worker-torch213:ci -o img.tar
-          { echo "## torch 2.13.0+cu126 candidate"; python3 tools/image_report.py img.tar; echo; echo "### Import times";
-            docker run --rm -v "$PWD/tools/image_timing.py:/tmp/image_timing.py:ro" --entrypoint python3 sonya-video-worker-torch213:ci /tmp/image_timing.py; } | tee report/image-report.md
-          cat report/image-report.md report/model-smoke.txt >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: image-report-torch213, path: report/ }

@@ -39,6 +39,7 @@ from dispatcher.config import FleetConfig          # noqa: E402
 from dispatcher.fleet import FleetManager          # noqa: E402
 from dispatcher.store import FleetStore            # noqa: E402
 from tools.stub_worker_api import StubState        # noqa: E402
+from scripts.ops.models_prefix import s3_key       # noqa: E402
 
 THRESHOLDS = {
     "create_request_to_ready_s": 480,        # new instance: request -> worker ready
@@ -52,6 +53,16 @@ THRESHOLDS = {
 
 
 # ----------------------------------------------------------------------------- criteria
+# What the production site really sends (auth.js collectFormData + apiCreateVideoJob): only the user's choices,
+# never Cut settings -> the worker applies the Mac mini recipe itself (scripts/shared/cut_profile.py).
+SITE_VIRALITY_PARAMS = {"source": {"mode": "upload", "url": "", "fileName": "control.mp4", "platform": "upload"},
+                        "brand": "sonya", "clipType": "viral",
+                        "settings": {"subtitleStyle": "viral", "voiceoverEnabled": False, "voiceType": "male-1",
+                                     "translation": "none"},
+                        "frontend": "legacy_static_sonya", "production_endpoint": "/api/generation/jobs"}
+SITE_BEEP_PARAMS = {"source": {"mode": "upload", "url": "", "fileName": "control_beep.mp4", "platform": "upload"},
+                    "brand": "sonya", "frontend": "legacy_static_sonya", "production_endpoint": "/api/generation/jobs"}
+
 def evaluate(rep: dict, thr: dict = THRESHOLDS) -> List[dict]:
     c: List[dict] = []
 
@@ -95,13 +106,21 @@ class Env:
     logs: List[str] = field(default_factory=list)
 
 
-def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str, usd_rub: Decimal) -> dict:
+from dispatcher.vast_api import VastError  # noqa: E402
+
+def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str, usd_rub: Decimal, beep_key: Optional[str] = None) -> dict:
     t0 = env.clock()
     say = lambda m: env.log.append(f"[+{env.clock()-t0:6.0f}s] {m}")
     aborted = {"reason": None}
 
     def tick() -> None:
-        env.mgr.tick(); env.step()
+        try:
+            env.mgr.tick()
+        except VastError as exc:          # a Vast/network blip (run 3 died on one URLError): skip this tick like the
+            if not exc.retryable:         # production loop (dispatcher/main.py) does; the guards below still apply
+                raise
+            say(f"vast api blip ({exc}) - tick skipped")
+        env.step()
         cost = usage.cost_between(env.store, t0, env.clock(), env.clock())
         usd = cost["gpu"] + cost["disk"]
         if usd > Decimal(str(max_usd)) or env.clock() - t0 > max_minutes * 60:
@@ -119,13 +138,13 @@ def run_scenario(env: Env, max_usd: float, max_minutes: float, control_key: str,
 
     j1 = j2 = None
     try:
-        j1 = env.stub.enqueue("virality", control_key); say("job 1 (virality) queued")
+        j1 = env.stub.enqueue("virality", control_key, SITE_VIRALITY_PARAMS); say("job 1 (virality) queued")
         done = lambda jid: (lambda: env.stub.jobs[jid]["status"] in ("completed", "failed"))
         wait(done(j1), 25 * 60, "job 1 finished")
         insts = env.store.all(); iid = insts[0].id if insts else None
         wait(lambda: env.store.get(iid).state in ("stopped", "stopping"), 5 * 60, "instance stop requested")
         wait(lambda: env.store.get(iid).state == "stopped", 3 * 60, "instance stopped")
-        j2 = env.stub.enqueue("beep", control_key); say("job 2 (beep) queued")
+        j2 = env.stub.enqueue("beep", beep_key or control_key, SITE_BEEP_PARAMS); say("job 2 (beep) queued")
         wait(done(j2), 25 * 60, "job 2 finished (via RESUME)")
         wait(lambda: env.store.get(iid).state in ("stopped", "stopping"), 5 * 60, "instance stopped again")
     except TimeoutError as exc:
@@ -264,15 +283,98 @@ def preflight(args) -> List[dict]:
     add("release SHA is a full 40-hex commit", SHA_RE.match(args.release_sha or "") is not None, (args.release_sha or "")[:12])
     add("image is pinned by @sha256 digest", DIGEST_RE.search(args.image or "") is not None)
     lock = json.loads((ROOT / "release" / "models.lock.json").read_text()); man = json.loads((ROOT / "release" / "models.required.json").read_text())
-    missing = [m["key"] for m in man["models"] if m["key"] not in lock.get("models", {})]
+    missing = [m["key"] for m in man["models"] if m.get("required_for_gpu_test", True) and m["key"] not in lock.get("models", {})]
     add("models.lock.json pins every required model", not missing, f"missing: {missing}" if missing else f'{len(lock["models"])} pinned')
     add("control video exists", args.control_video and pathlib.Path(args.control_video).is_file(), str(args.control_video))
+    beep = getattr(args, "control_video_beep", None)
+    if beep:
+        add("BEEP control video exists", pathlib.Path(beep).is_file(), str(beep))
     add("spend limit given and confirmed", args.apply and args.confirm_spend == args.max_usd, f"max_usd={args.max_usd}")
     add("max-usd <= 3", args.max_usd <= 3)
-    for name in ("GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_FILE", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "MODELS_S3_BUCKET"):
+    app = all(os.environ.get(n) for n in ("GH_APP_ID", "GH_APP_INSTALLATION_ID", "GH_APP_PRIVATE_KEY_FILE"))
+    add("GitHub release access: GITHUB_RELEASE_TOKEN or GH_APP_* (value not shown)", bool(os.environ.get("GITHUB_RELEASE_TOKEN")) or app,
+        "static token" if os.environ.get("GITHUB_RELEASE_TOKEN") else ("GitHub App" if app else "none"))
+    for name in ("S3_ENDPOINT_URL", "S3_REGION", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "MODELS_S3_BUCKET"):
         add(f"env {name} present (value not shown)", bool(os.environ.get(name)))
     add("Vast API key file present (chmod 600)", bool(os.environ.get("VAST_API_KEY_FILE")) and (pathlib.Path(os.environ["VAST_API_KEY_FILE"]).stat().st_mode & 0o077) == 0 if os.environ.get("VAST_API_KEY_FILE") and pathlib.Path(os.environ["VAST_API_KEY_FILE"]).exists() else False)
-    add("backend URL is https (tunnel to the stub)", (args.backend_url or "").startswith("https://"), "")
+    add("backend URL is https, or the bore.pub test tunnel (stub only, throwaway secret)", _tunnel_url_ok(args.backend_url), "")
+    if getattr(args, "online_checks", False):
+        res += online_checks(args, lock)
+    return res
+
+
+def _tunnel_url_ok(url: Optional[str]) -> bool:
+    """https (any tunnel) or plain http to bore.pub: bore is a raw TCP tunnel that can re-open the SAME public port
+    after a drop, so the worker's BACKEND_API_URL never changes mid-run (pinggy's free URL died after ~18 min in run 2).
+    Plain http is acceptable ONLY for the stub API: the worker secret is throwaway, made for this run."""
+    import re as _re
+    url = url or ""
+    return url.startswith("https://") or bool(_re.fullmatch(r"http://bore\.pub:\d{4,5}", url))
+
+
+def _http(url: str, headers: Optional[dict] = None, method: str = "GET", timeout: int = 20):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers=headers or {}, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, b""
+    except Exception as e:  # noqa: BLE001
+        return None, type(e).__name__.encode()
+
+
+def online_checks(args, lock: dict) -> List[dict]:
+    """Free, read-only checks against GitHub / GHCR / S3 / the tunnel. No Vast call, nothing written. Values of secrets are never shown."""
+    res: List[dict] = []
+    add = lambda n, ok, d="": res.append({"check": n, "ok": bool(ok), "detail": d})
+    repo = os.environ.get("SONYA_RELEASE_REPO", "samnesvoj/sonya-video-worker-production")
+    tok = os.environ.get("GITHUB_RELEASE_TOKEN")
+    if tok and args.release_sha:
+        st, body = _http(f"https://api.github.com/repos/{repo}/commits/{args.release_sha}", {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"})
+        add("token can read the release SHA on GitHub (what bootstrap fetches)", st == 200, f"HTTP {st}")
+        if st == 200:
+            st2, _ = _http(f"https://api.github.com/repos/{repo}/contents/release/models.lock.json?ref={args.release_sha}", {"Authorization": f"Bearer {tok}"})
+            add("release SHA contains release/models.lock.json", st2 == 200, f"HTTP {st2}")
+    img = args.image or ""
+    if "@sha256:" in img and img.startswith("ghcr.io/"):
+        name, digest = img[len("ghcr.io/"):].split("@", 1)
+        st, body = _http(f"https://ghcr.io/token?scope=repository:{name}:pull")
+        ok = False
+        if st == 200:
+            t = json.loads(body).get("token", "")
+            st, _ = _http(f"https://ghcr.io/v2/{name}/manifests/{digest}", {"Authorization": f"Bearer {t}", "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"}, "HEAD")
+            ok = st == 200
+        add("image pullable WITHOUT login (Vast pulls anonymously)", ok, f"HTTP {st}" + ("" if ok else " - make the GHCR package public (base image has no SONYA code)"))
+    if args.backend_url and _tunnel_url_ok(args.backend_url):
+        from tools.stub_worker_api import serve_in_thread
+        try:
+            srv, _ = serve_in_thread(StubState(), _secrets.token_urlsafe(16), port=getattr(args, "stub_port", 8787))   # same port live() will use
+        except OSError as e:
+            srv = None; add("stub API port is free", False, f"{type(e).__name__} on port {getattr(args, 'stub_port', 8787)}")
+        if srv:
+            try:
+                st, _ = _http(args.backend_url.rstrip("/") + "/healthz")
+                add("tunnel reaches the stub API (GET /healthz through the tunnel)", st == 200, f"HTTP {st}")
+            finally:
+                srv.shutdown(); srv.server_close()
+    if all(os.environ.get(n) for n in ("S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "MODELS_S3_BUCKET")):
+        try:
+            import boto3
+            s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"], aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+                              aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"], region_name=os.environ.get("S3_REGION", "ru-1"))
+            bad = []
+            for k, pin in lock.get("models", {}).items():
+                try:
+                    h = s3.head_object(Bucket=os.environ["MODELS_S3_BUCKET"], Key=s3_key(pin["s3_path"]))
+                    if h["ContentLength"] != pin["size"] or h.get("Metadata", {}).get("sha256") != pin["sha256"]:
+                        bad.append(f"{k}: differs")
+                except Exception as e:  # noqa: BLE001
+                    bad.append(f"{k}: {type(e).__name__}")
+            add("every locked model is in S3 with the locked size + sha256", not bad, "; ".join(bad) if bad else f'{len(lock.get("models", {}))} ok')
+        except Exception as e:  # noqa: BLE001
+            add("every locked model is in S3 with the locked size + sha256", False, type(e).__name__)
     return res
 
 
@@ -285,7 +387,7 @@ def live(args) -> dict:                                       # pragma: no cover
         sys.exit(3)
     import boto3
     from dispatcher.main import _vast_key
-    from dispatcher.token_provider import github_app_token_provider
+    from dispatcher.token_provider import github_app_token_provider, static_token_provider
     from dispatcher.vast_api import VastClient
     from tools.stub_worker_api import serve_in_thread
     secret = _secrets.token_urlsafe(32)                       # throwaway worker secret for this run only
@@ -295,11 +397,16 @@ def live(args) -> dict:                                       # pragma: no cover
     bucket = os.environ.get("S3_BUCKET_NAME") or os.environ["MODELS_S3_BUCKET"]
     key = f"fast-start-test/{run_id}/input{pathlib.Path(args.control_video).suffix}"
     s3.upload_file(args.control_video, bucket, key)
+    beep_key = None
+    if getattr(args, "control_video_beep", None):
+        beep_key = f"fast-start-test/{run_id}/beep{pathlib.Path(args.control_video_beep).suffix}"
+        s3.upload_file(args.control_video_beep, bucket, beep_key)
     environ = {**os.environ, "BACKEND_API_URL": args.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket}
     cfg = FleetConfig(enabled=True, dry_run=False, image=args.image, release_sha=args.release_sha, max_instances=1, stopped_retention_seconds=1800, max_creates_per_hour=2)
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
-    mgr = FleetManager(cfg, store, vast, stub, github_app_token_provider(cfg.release_repo.split("/")[-1], os.environ), environ)
+    mgr = FleetManager(cfg, store, vast, stub, (static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]) if os.environ.get("GITHUB_RELEASE_TOKEN")
+                                                     else github_app_token_provider(cfg.release_repo.split("/")[-1], os.environ)), environ)
 
     def timelines(label):
         r = s3.list_objects_v2(Bucket=bucket, Prefix=f"fleet-metrics/{label}/")
@@ -314,12 +421,13 @@ def live(args) -> dict:                                       # pragma: no cover
 
     env = Env(time.time, time.sleep, mgr, store, stub, lambda: None, timelines, vast, tick_s=5.0, collect_logs=collect_logs)
     try:
-        rep = run_scenario(env, args.max_usd, args.max_minutes, key, Decimal(args.usd_rub))
+        rep = run_scenario(env, args.max_usd, args.max_minutes, key, Decimal(args.usd_rub), beep_key)
     finally:
         srv.shutdown()
     rep["quality"] = {"outputs_valid": None, "compare_verdict": None, "note": "download the outputs listed in job_files, run tools/compare_runs.py vs the Mac mini reference, watch them; then set these two fields"}
     blob = "\n".join(env.logs) + json.dumps([env.timelines(i.label) for i in env.store.all()])
-    needles = [secret, os.environ.get("S3_SECRET_ACCESS_KEY", ""), os.environ.get("S3_ACCESS_KEY_ID", ""), "ghs_", "BEGIN PRIVATE KEY"]
+    needles = [secret, os.environ.get("S3_SECRET_ACCESS_KEY", ""), os.environ.get("S3_ACCESS_KEY_ID", ""), os.environ.get("GITHUB_RELEASE_TOKEN", ""),
+               os.environ.get("TIMEWEB_GEMINI_API_KEY", ""), os.environ.get("OPENROUTER_API_KEY", ""), "ghs_", "github_pat_", "BEGIN PRIVATE KEY"]
     have_logs = any(l.strip() for l in env.logs)
     rep["secret_scan"] = {"clean": (not any(n and n in blob for n in needles)) if have_logs else None, "note": "scanned container log + timelines for the run secret, S3 keys, GitHub tokens" if have_logs else "could not capture logs: scan them by hand BEFORE trusting this"}
     (args.out).mkdir(parents=True, exist_ok=True)
@@ -343,7 +451,8 @@ def render_md(rep: dict, crit: List[dict]) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["simulate", "live"])
-    ap.add_argument("--release-sha"); ap.add_argument("--image"); ap.add_argument("--backend-url"); ap.add_argument("--control-video")
+    ap.add_argument("--release-sha"); ap.add_argument("--image"); ap.add_argument("--backend-url"); ap.add_argument("--control-video"); ap.add_argument("--control-video-beep", help="separate input for job 2 (beep); default: --control-video")
+    ap.add_argument("--no-online-checks", dest="online_checks", action="store_false", help="live preflight: skip the free GitHub/GHCR/tunnel/S3 read-only checks")
     ap.add_argument("--stub-port", type=int, default=8787); ap.add_argument("--max-usd", type=float, default=3.0); ap.add_argument("--confirm-spend", type=float); ap.add_argument("--max-minutes", type=float, default=90)
     ap.add_argument("--usd-rub", default="82.1386"); ap.add_argument("--apply", action="store_true"); ap.add_argument("--out", type=pathlib.Path, default=ROOT / "results" / "fast-start")
     a = ap.parse_args(argv)

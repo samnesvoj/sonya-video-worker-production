@@ -116,8 +116,11 @@ def download_models_for_mode(mode_yaml_path: str | Path) -> bool:
     s3     = _make_s3_client()
     all_ok = True
 
+    from scripts.ops.models_prefix import s3_key
+
     for model_key, spec in models.items():
         s3_path:  Optional[str] = spec.get("s3_path")
+        s3_path = s3_key(s3_path) if s3_path else s3_path
         optional: bool          = spec.get("optional", True)
         local_path              = _resolve_local_path(spec.get("local_path"), model_key)
 

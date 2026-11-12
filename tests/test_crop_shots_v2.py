@@ -57,12 +57,21 @@ def test_face_is_never_cut_by_the_window_edge():
     assert len(late) <= 3                                                # catches up within ~0.3 s
 
 
-def test_two_faces_visible_means_split_even_when_close():
-    """Owner's rule: two faces at once -> split screen, one person per half."""
+def test_two_faces_too_close_for_a_split_share_one_frame():
+    """Owner 2026-11-09 («почему в кадре два одинаковых фрагмента»): when a split half cannot leave the
+    other person out, a split shows the same pair twice -> one 9:16 window on the middle of the pair."""
     tr = crop_track_v2(an(faces=lambda t: [face(800, 150), face(1150, 150)]), 10.0, width=W, height=H)
+    assert tr["shots"][0]["target"] == "pair" and not tr.get("splits")
+    x = x_at(tr, 5)
+    assert x <= 800 - 75 and 1150 + 75 <= x + CW              # both faces fully in the one window
+
+
+def test_two_faces_far_enough_still_split():
+    """Owner's rule stays: two faces that a half CAN separate -> split, one person per half."""
+    tr = crop_track_v2(an(faces=lambda t: [face(600, 150), face(1300, 150)]), 10.0, width=W, height=H)
     assert tr["shots"][0]["target"] == "split" and tr["splits"] == [{"start": 0.0, "end": 10.0}]
-    assert split_inside(tr, "top", 5, 800, 300 + 97, 150, 195) and split_inside(tr, "bottom", 5, 1150, 300 + 97, 150, 195)
-    assert tr["split"]["h"] >= 0.48 * H                      # never a face zoom (9:8, even sides)
+    assert split_inside(tr, "top", 5, 600, 300 + 97, 150, 195) and split_inside(tr, "bottom", 5, 1300, 300 + 97, 150, 195)
+    assert tr["split"]["h"] >= 0.48 * H
 
 
 def split_inside(track, name, t, cx, cy, w, h):

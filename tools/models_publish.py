@@ -23,6 +23,8 @@ from typing import Dict, List, Optional
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "release" / "models.required.json"
+sys.path.insert(0, str(ROOT))
+from scripts.ops.models_prefix import s3_key  # noqa: E402
 CHUNK = 8 << 20
 
 
@@ -32,6 +34,15 @@ def sha256_file(p: pathlib.Path) -> str:
         for b in iter(lambda: f.read(CHUNK), b""):
             h.update(b)
     return h.hexdigest()
+
+
+def sha256_md5_file(p: pathlib.Path) -> tuple[str, str]:
+    """One pass over the file (the GigaAM checkpoint is ~450 MB): SHA-256 for our lock, MD5 only to cross-check upstream's own hash table."""
+    h, m = hashlib.sha256(), hashlib.md5()  # noqa: S324 - MD5 is upstream's checksum, used for comparison only
+    with open(p, "rb") as f:
+        for b in iter(lambda: f.read(CHUNK), b""):
+            h.update(b); m.update(b)
+    return h.hexdigest(), m.hexdigest()
 
 
 def load_manifest(path: pathlib.Path = MANIFEST) -> dict:
@@ -67,12 +78,18 @@ def scan(manifest: dict, srcs: List[pathlib.Path], explicit: Dict[str, pathlib.P
         if chosen is None:
             row.update(status="ambiguous" if len(cands) > 1 else "missing", candidates=[str(c) for c in cands])
         else:
-            sha = sha256_file(chosen)
+            sha, md5 = sha256_md5_file(chosen) if m.get("upstream_md5") else (sha256_file(chosen), None)
             row.update(path=str(chosen), size=chosen.stat().st_size, sha256=sha)
             if m.get("public_sha256"):
                 row["status"] = "matches_public" if sha == m["public_sha256"] else "differs_from_public"
+            elif m.get("upstream_md5"):
+                row.update(upstream_md5=m["upstream_md5"], md5=md5)
+                row["status"] = "matches_upstream_md5" if md5 == m["upstream_md5"] else "differs_from_upstream"
             else:
                 row["status"] = "private_ok"
+            if m.get("public_size") and row["size"] != m["public_size"]:
+                row["status"] = "differs_from_public" if row["status"].startswith("matches") else row["status"]
+                row["size_note"] = f"size {row['size']} != expected {m['public_size']}"
         rows.append(row)
     return rows
 
@@ -82,8 +99,8 @@ def make_lock(rows: List[dict], accept_custom: set) -> dict:
     for r in rows:
         if r["status"] in ("missing", "ambiguous"):
             problems.append(f"{r['key']}: {r['status']}")
-        elif r["status"] == "differs_from_public" and r["key"] not in accept_custom:
-            problems.append(f"{r['key']}: differs from the public file - re-run with --accept-custom {r['key']} if this Mac mini file is the tested reference")
+        elif r["status"] in ("differs_from_public", "differs_from_upstream") and r["key"] not in accept_custom:
+            problems.append(f"{r['key']}: differs from the {'public' if r['status'].endswith('public') else 'upstream'} file - re-run with --accept-custom {r['key']} if this Mac mini file is the tested reference")
         else:
             models[r["key"]] = {"s3_path": r["s3_path"], "sha256": r["sha256"], "size": r["size"]}
     if problems:
@@ -102,26 +119,27 @@ def upload(rows: List[dict], bucket: str, client, apply: bool) -> List[str]:
     cfg = TransferConfig(multipart_threshold=64 << 20, multipart_chunksize=32 << 20, max_concurrency=8)
     log = []
     for r in rows:
+        key = s3_key(r["s3_path"])               # MODELS_S3_PREFIX (default models/ = the path as written)
         if "sha256" not in r:
             raise SystemExit(f"{r['key']}: no local file; fix `scan` first")
         try:
-            head = client.head_object(Bucket=bucket, Key=r["s3_path"])
+            head = client.head_object(Bucket=bucket, Key=key)
             same = head["ContentLength"] == r["size"] and head.get("Metadata", {}).get("sha256") == r["sha256"]
         except Exception:  # noqa: BLE001 - not there
             head, same = None, False
         if same:
-            log.append(f"skip   {r['s3_path']} (already uploaded, same size + sha256)")
+            log.append(f"skip   {key} (already uploaded, same size + sha256)")
             continue
         if head is not None:
-            log.append(f"REPLACE {r['s3_path']} (different content already in the bucket)")
+            log.append(f"REPLACE {key} (different content already in the bucket)")
         if not apply:
-            log.append(f"would upload {r['s3_path']} ({r['size']/1e6:.1f} MB)")
+            log.append(f"would upload {key} ({r['size']/1e6:.1f} MB)")
             continue
-        client.upload_file(r["path"], bucket, r["s3_path"], ExtraArgs={"Metadata": {"sha256": r["sha256"]}}, Config=cfg)
-        got = client.head_object(Bucket=bucket, Key=r["s3_path"])
+        client.upload_file(r["path"], bucket, key, ExtraArgs={"Metadata": {"sha256": r["sha256"]}}, Config=cfg)
+        got = client.head_object(Bucket=bucket, Key=key)
         if got["ContentLength"] != r["size"] or got.get("Metadata", {}).get("sha256") != r["sha256"]:
-            raise SystemExit(f"{r['s3_path']}: uploaded object does not match (size/metadata)")
-        log.append(f"uploaded {r['s3_path']} ({r['size']/1e6:.1f} MB) verified size+sha256 metadata")
+            raise SystemExit(f"{key}: uploaded object does not match (size/metadata)")
+        log.append(f"uploaded {key} ({r['size']/1e6:.1f} MB) verified size+sha256 metadata")
     return log
 
 
@@ -134,9 +152,12 @@ def main(argv=None) -> int:
     ap.add_argument("--out", type=pathlib.Path)
     ap.add_argument("--accept-custom", action="append", default=[], metavar="KEY", help="accept a file whose hash differs from the public one")
     ap.add_argument("--bucket"); ap.add_argument("--confirm-bucket"); ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--skip", action="append", default=[], metavar="KEY", help="leave a model out of lock/upload on purpose (e.g. webcam_detector: off by owner decision)")
     a = ap.parse_args(argv)
     explicit = {k: pathlib.Path(v).expanduser() for k, v in (m.split("=", 1) for m in a.map)}
-    rows = scan(load_manifest(a.manifest), [s.expanduser() for s in a.src], explicit)
+    man = load_manifest(a.manifest)
+    man = {**man, "models": [m for m in man["models"] if m["key"] not in set(a.skip)]}
+    rows = scan(man, [s.expanduser() for s in a.src], explicit)
     if a.cmd == "scan":
         print(json.dumps(rows, indent=1) if a.out is None else f"report -> {a.out}")
         if a.out:
@@ -156,6 +177,7 @@ def main(argv=None) -> int:
     make_lock(rows, set(a.accept_custom))                      # same completeness/identity gate as `lock`
     if a.apply and a.confirm_bucket != a.bucket:
         raise SystemExit("refusing to upload: pass --confirm-bucket with the exact bucket name to confirm")
+    print(f"target: s3://{a.bucket}/{s3_key('models/')} (MODELS_S3_PREFIX)")
     for line in upload(rows, a.bucket, s3_client() if (a.apply or os.environ.get("S3_ENDPOINT_URL")) else _NoClient(), a.apply):
         print(line)
     if not a.apply:
