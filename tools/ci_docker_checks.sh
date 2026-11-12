@@ -56,8 +56,14 @@ ok "bootstrap fetched pinned SHA ${SONYA_RELEASE_SHA:0:12}, verified manifest + 
 # a wrong SHA, a branch name and a missing token must all be refused
 SONYA_RELEASE_SHA=main python3 /opt/sonya-bootstrap/sonya_bootstrap.py >/dev/null 2>&1 && fail "branch name accepted"
 SONYA_RELEASE_SHA=0000000000000000000000000000000000000000 SONYA_RELEASES_DIR=/tmp/r2 SONYA_CURRENT_LINK=/tmp/c2 python3 /opt/sonya-bootstrap/sonya_bootstrap.py >/dev/null 2>&1 && fail "unknown SHA accepted"
-env -u GITHUB_RELEASE_TOKEN SONYA_RELEASES_DIR=/tmp/r3 SONYA_CURRENT_LINK=/tmp/c3 python3 /opt/sonya-bootstrap/sonya_bootstrap.py >/dev/null 2>&1 && fail "download without token accepted"
-ok "branch name / unknown SHA / missing token refused"
+# no token: a non-public repo must be refused (the worker repo itself is public -> anonymous fetch, checked next)
+env -u GITHUB_RELEASE_TOKEN SONYA_RELEASE_REPO=samnesvoj/sonya-no-such-repo-ci SONYA_RELEASES_DIR=/tmp/r3 SONYA_CURRENT_LINK=/tmp/c3 python3 /opt/sonya-bootstrap/sonya_bootstrap.py >/dev/null 2>&1 && fail "download of a non-public repo without token accepted"
+ok "branch name / unknown SHA / non-public repo without token refused"
+if [ "${SONYA_CI_REPO_PUBLIC:-}" = "true" ]; then
+  REL4="$(env -u GITHUB_RELEASE_TOKEN SONYA_RELEASES_DIR=/tmp/r4 SONYA_CURRENT_LINK=/tmp/c4 python3 /opt/sonya-bootstrap/sonya_bootstrap.py 2>/dev/null | tail -1)" || fail "anonymous download of the public repo failed"
+  [ "$(basename "$REL4")" = "$SONYA_RELEASE_SHA" ] || fail "anonymous release dir is not the pinned SHA"
+  ok "public repo: pinned SHA fetched anonymously (no GitHub credential on the instance)"
+fi
 unset GITHUB_RELEASE_TOKEN
 
 # 4. Trailer is locked inside the released code

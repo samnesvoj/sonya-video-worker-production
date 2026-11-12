@@ -252,3 +252,9 @@ def test_warm_fallback_switch():
     assert launcher.warm_eligible(C_DE, on) and not launcher.warm_eligible(US_3060, on)
     assert launcher.pick_offer([C_DE, A_UK], on, set(), warm=True)["id"] == 1          # a European 3060 still wins
     assert FleetConfig.from_env({"SONYA_WARM_FALLBACK": "true"}).warm_fallback
+
+
+def test_create_payload_public_repo_carries_no_github_credential():
+    p = launcher.create_payload(CFG, "sonya-pool-x", "", ENV)
+    assert "GITHUB_RELEASE_TOKEN" not in p["env"] and p["env"]["SONYA_RELEASE_SHA"] == CFG.release_sha
+    assert launcher.create_payload(CFG, "sonya-pool-x", "tok", ENV)["env"]["GITHUB_RELEASE_TOKEN"] == "tok"

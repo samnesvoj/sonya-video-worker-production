@@ -232,9 +232,8 @@ def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Map
     """power_slots > 0: a POWER server - the worker sizes itself ("auto": its real cards, CPU threads, RAM; a broken card is
     left out) but never runs more than the fleet counted for it."""
     validate_release(cfg)
-    if not github_token:
-        raise LaunchError("no GitHub release token")
-    env = {"SONYA_RELEASE_SHA": cfg.release_sha, "SONYA_RELEASE_REPO": cfg.release_repo, "GITHUB_RELEASE_TOKEN": github_token,
+    # github_token == "": public repo, the instance fetches the pinned SHA anonymously and gets NO GitHub credential
+    env = {"SONYA_RELEASE_SHA": cfg.release_sha, "SONYA_RELEASE_REPO": cfg.release_repo,
            "WORKER_ID": label, "WORKER_BACKEND_MODE": "api", "ENABLED_MODES": ",".join(cfg.pool_modes),
            "SONYA_REQUIRE_MODEL_LOCK": "1", "SONYA_MIN_VRAM_MB": str(cfg.min_vram_gb * 1000 - 4000),
            "SONYA_WORKER_CONCURRENCY": "auto" if power_slots else str(cfg.jobs_per_instance),
@@ -247,6 +246,8 @@ def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Map
         raise LaunchError(f"dispatcher is missing worker env: {', '.join(missing) or 'S3_BUCKET_NAME'}")
     if power_slots:
         env["SONYA_WORKER_CONCURRENCY_MAX"] = str(power_slots)
+    if github_token:
+        env["GITHUB_RELEASE_TOKEN"] = github_token
     env.update({k: environ[k] for k in SECRET_PASSTHROUGH if environ.get(k)})
     return {"client_id": "me", "image": cfg.image, "env": env, "disk": cfg.disk_gb, "label": label, "runtype": "args"}
 

@@ -3,7 +3,11 @@ A fresh read-only installation token (contents:read, ONE repository, <=1 h) is m
 stored or logged."""
 from __future__ import annotations
 
+import json
 import os
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable, Mapping
 
@@ -37,10 +41,42 @@ def file_token_provider(path: str) -> Callable[[], str]:
     return _get
 
 
-def release_token_provider(repo_name: str, environ: Mapping[str, str] = os.environ) -> Callable[[], str]:
-    """GitHub App when GH_APP_ID is set (preferred: a token per instance); otherwise GITHUB_RELEASE_TOKEN_FILE."""
+def repo_is_public(repo: str, *, opener=urllib.request.urlopen, timeout: float = 10.0) -> bool:
+    """Unauthenticated GitHub API check. A private repo answers 404 to anonymous callers -> False."""
+    req = urllib.request.Request(f"https://api.github.com/repos/{repo}",
+                                 headers={"Accept": "application/vnd.github+json", "User-Agent": "sonya-fleet"})
+    try:
+        with opener(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode())
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+    return data.get("private") is False and data.get("visibility", "public") == "public"
+
+
+def anonymous_public_provider(repo: str, *, check=repo_is_public, ttl: float = 3600.0,
+                              clock=time.monotonic) -> Callable[[], str]:
+    """Public worker repo: NO token goes to Vast instances (bootstrap fetches the pinned SHA anonymously).
+    Returns "" while the repo is public (checked without auth, cached for `ttl`); refuses to create once it is not."""
+    state = {"at": None, "public": False}
+
+    def _get() -> str:
+        now = clock()
+        if state["at"] is None or now - state["at"] > ttl or not state["public"]:
+            state["public"], state["at"] = bool(check(repo)), now
+        if not state["public"]:
+            raise RuntimeError(f"{repo} is not public: configure GITHUB_RELEASE_TOKEN_FILE (fine-grained, read-only "
+                               "Contents of this one repo) or a GitHub App")
+        return ""
+    return _get
+
+
+def release_token_provider(repo: str, environ: Mapping[str, str] = os.environ) -> Callable[[], str]:
+    """`repo` = owner/name. GitHub App when GH_APP_ID is set; else GITHUB_RELEASE_TOKEN_FILE; else anonymous (public repo only).
+    Never put a token with write rights here: it travels to third-party Vast hosts."""
     if environ.get("GH_APP_ID"):
-        return github_app_token_provider(repo_name, environ)
+        return github_app_token_provider(repo.split("/")[-1], environ)
     if environ.get("GITHUB_RELEASE_TOKEN_FILE"):
         return file_token_provider(environ["GITHUB_RELEASE_TOKEN_FILE"])
-    return github_app_token_provider(repo_name, environ)
+    return anonymous_public_provider(repo)

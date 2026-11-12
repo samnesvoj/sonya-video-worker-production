@@ -93,5 +93,41 @@ def test_release_token_provider_file_and_app(tmp_path, monkeypatch):
         tp.release_token_provider("r", {"GITHUB_RELEASE_TOKEN_FILE": str(f)})()
     seen = []
     monkeypatch.setattr(tp, "github_app_token_provider", lambda repo, env: seen.append(repo) or (lambda: "app"))
-    assert tp.release_token_provider("r", {"GH_APP_ID": "1", "GITHUB_RELEASE_TOKEN_FILE": str(f)})() == "app"
+    assert tp.release_token_provider("o/r", {"GH_APP_ID": "1", "GITHUB_RELEASE_TOKEN_FILE": str(f)})() == "app"
     assert seen == ["r"]
+
+
+def test_default_is_anonymous_for_public_repo_only(monkeypatch):
+    from dispatcher import token_provider as tp
+    calls = []
+    real = tp.anonymous_public_provider
+    monkeypatch.setattr(tp, "anonymous_public_provider", lambda repo: calls.append(repo) or (lambda: ""))
+    assert tp.release_token_provider("o/r", {})() == "" and calls == ["o/r"]
+    state = {"public": True}
+    t = [0.0]
+    prov = real("o/r", check=lambda repo: state["public"], ttl=10, clock=lambda: t[0])
+    assert prov() == ""
+    state["public"] = False
+    t[0] = 5
+    assert prov() == ""          # cached inside ttl
+    t[0] = 20
+    with pytest.raises(RuntimeError, match="not public"):
+        prov()
+
+
+def test_repo_is_public_parses_github_api():
+    import io
+    import urllib.error
+    from dispatcher import token_provider as tp
+
+    class R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    seen = {}
+    def opener(req, timeout):
+        seen["auth"] = req.get_header("Authorization")
+        return R(json.dumps({"private": False, "visibility": "public"}).encode())
+    assert tp.repo_is_public("o/r", opener=opener) is True and seen["auth"] is None
+    assert tp.repo_is_public("o/r", opener=lambda req, timeout: R(b'{"private": true, "visibility": "private"}')) is False
+    def nf(req, timeout): raise urllib.error.HTTPError(req.full_url, 404, "nf", {}, None)
+    assert tp.repo_is_public("o/r", opener=nf) is False

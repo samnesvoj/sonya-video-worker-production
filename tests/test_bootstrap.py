@@ -99,11 +99,31 @@ def test_cached_release_needs_no_token(tmp_path, env):
     assert sb.bootstrap({**e2, "SONYA_RELEASE_SHA": sha}).name == sha
 
 
-def test_missing_token_without_cache_fails(tmp_path, env):
+def test_public_repo_downloads_anonymously_without_token(tmp_path, env, capsys):
     src, sha = make_remote(tmp_path)
     env.pop("GITHUB_RELEASE_TOKEN")
-    with pytest.raises(sb.BootstrapError, match="TOKEN"):
-        run(env, src, sha)
+    out = run(env, src, sha)
+    assert out.name == sha and not (out / ".git").exists()
+    assert "anonymously" in capsys.readouterr().err
+
+
+def test_anonymous_failure_explains_token_needed(tmp_path, env):
+    src, sha = make_remote(tmp_path)
+    env.pop("GITHUB_RELEASE_TOKEN")
+    with pytest.raises(sb.BootstrapError, match="GITHUB_RELEASE_TOKEN"):
+        run(env, tmp_path / "no-such-remote", sha)
+
+
+def test_anonymous_still_refuses_wrong_sha(tmp_path, env):
+    src, _ = make_remote(tmp_path)
+    env.pop("GITHUB_RELEASE_TOKEN")
+    with pytest.raises(sb.BootstrapError):
+        run(env, src, "0" * 40)
+
+
+def test_git_env_without_token_has_no_auth_header(tmp_path):
+    e = sb._git_env(None, tmp_path)
+    assert not any("extraheader" in str(v) for v in e.values()) and "AUTHORIZATION" not in json.dumps(e)
 
 
 def test_tag_must_resolve_to_sha(tmp_path, env):

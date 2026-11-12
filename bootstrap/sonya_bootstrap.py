@@ -8,8 +8,9 @@ never loaded from the release it verifies.
 
 Env (validated, values never printed):
   SONYA_RELEASE_SHA      required, full 40-hex commit SHA. Branches/HEAD/short SHAs are rejected.
-  SONYA_RELEASE_REPO     owner/name of the PRIVATE repo (default below)
-  GITHUB_RELEASE_TOKEN   short-lived (<=1h) read-only GitHub App installation token for that one repo.
+  SONYA_RELEASE_REPO     owner/name of the repo (default below)
+  GITHUB_RELEASE_TOKEN   optional. Public repo: absent -> anonymous fetch (no credential on the instance).
+                         Private repo: short-lived (<=1h) read-only token for that one repo.
                          Reaches git only through the child's environment (not argv, URL, file, git config).
                          Optional when the release is already verified on disk.
   SONYA_RELEASE_TAG      optional; the tag must resolve to the SHA
@@ -215,10 +216,18 @@ def bootstrap(env: Optional[Dict[str, str]] = None) -> Path:
         log(f"release {sha[:12]} already on disk and verified - no network needed")
         verify_release(dest, sha, env)  # manifest/lock re-checked on every start
     else:
-        if not token:
-            raise BootstrapError("GITHUB_RELEASE_TOKEN is required to download a release that is not on disk")
-        log(f"fetching release {sha[:12]} from {cfg['repo']} (read-only, pinned SHA)")
-        fetch_release(sha, cfg["repo"], cfg["tag"], token, dest)
+        if token:
+            log(f"fetching release {sha[:12]} from {cfg['repo']} (read-only, pinned SHA)")
+            fetch_release(sha, cfg["repo"], cfg["tag"], token, dest)
+        else:
+            # Public repo: no credential at all on the instance. Integrity does not depend on auth: the exact commit SHA is
+            # fetched and re-checked, then the manifest and dependency lock are verified below.
+            log(f"fetching release {sha[:12]} from {cfg['repo']} anonymously (public repo, pinned SHA, no token)")
+            try:
+                fetch_release(sha, cfg["repo"], cfg["tag"], None, dest)
+            except BootstrapError as exc:
+                raise BootstrapError(f"anonymous download failed ({exc}); if the repo is private, GITHUB_RELEASE_TOKEN "
+                                     "(read-only, Contents of this one repo) is required") from exc
         manifest = verify_release(dest, sha, env)
         _mark(dest, sha, manifest)
         log(f"release {sha[:12]} identity and manifest verified (version={manifest.get('version')})")
