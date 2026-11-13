@@ -1,5 +1,6 @@
 *
 !requirements/worker.lock.txt
+!requirements/ytdlp.lock.txt
 !requirements/split/*.lock.txt
 !requirements/candidates/**
 !bootstrap/sonya_bootstrap.py

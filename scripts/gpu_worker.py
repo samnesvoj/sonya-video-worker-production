@@ -642,8 +642,23 @@ def process_job(job: dict, worker_id: str) -> None:
         _update_status(job_id, JOB_STATUS_DOWNLOADING)
         input_ext  = Path(s3_input).suffix or ".mp4"
         input_path = tmp_dir / f"input{input_ext}"
+        sf = params.get("source_fetch")
+        if isinstance(sf, dict) and sf.get("url"):
+            # The VPS could not fetch this link (YouTube etc.): download here, upload to s3_input_key, continue as usual.
+            from scripts.source_fetch import SourceFetchError, fetch_source
+            try:
+                got = fetch_source(sf, mode, s3_input, tmp_dir)
+                input_path = got["path"]
+            except SourceFetchError as exc:
+                _fail(job_id, exc.code, exc.message, retry=False)
+                return
+            except Exception as exc:
+                logger.exception("[worker] source_fetch crashed job_id=%s", job_id)
+                _fail(job_id, "SOURCE_DOWNLOAD_FAILED", "Не удалось скачать видео по ссылке. Попробуйте позже.", retry=True)
+                return
         try:
-            download_file(s3_input, input_path)
+            if not (isinstance(sf, dict) and sf.get("url")):
+                download_file(s3_input, input_path)
             logger.info(
                 "[worker] input downloaded: %s (%d bytes)",
                 input_path, input_path.stat().st_size,

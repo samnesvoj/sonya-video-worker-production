@@ -59,14 +59,18 @@ def test_desktop_style_job_is_left_alone_and_there_is_no_rollback_switch(video, 
     assert cp.apply_profile("virality", half, video, str(tmp_path))["crop"]["mode"] == "tracked"
 
 
-def test_encoder_args_are_the_desktop_quality_preset_at_6mbps():
-    # sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", "6M")
-    assert cp.encoder_args("nvenc") == ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20",
-                                        "-b:v", "6M", "-maxrate", "6M", "-bufsize", "12M", "-pix_fmt", "yuv420p"]
-    # libx264: -b:v is ignored next to -crf, so the 6 Mb/s cap is a VBV cap (streamer v2 measured 7.1 Mb/s without it)
-    assert cp.encoder_args("cpu") == ["-c:v", "libx264", "-preset", "slow", "-crf", "19", "-maxrate", "6M",
-                                      "-bufsize", "12M", "-pix_fmt", "yuv420p"]
-    assert cp.encoder_args("cpu", None) == ["-c:v", "libx264", "-preset", "slow", "-crf", "19", "-pix_fmt", "yuv420p"]
+def test_encoder_args_quality_preset_capped_at_8mbps():
+    n = cp.encoder_args("nvenc")
+    assert n[:4] == ["-c:v", "h264_nvenc", "-preset", "p7"] and "hq" in n and "qres" in n
+    for pair in (["-spatial-aq", "1"], ["-temporal-aq", "1"], ["-rc-lookahead", "20"], ["-bf", "3"],
+                 ["-b:v", "8M"], ["-maxrate", "8M"], ["-bufsize", "16M"]):
+        assert any(n[i:i + 2] == pair for i in range(len(n))), pair
+    assert cp.encoder_args("nvenc_basic") == ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20",
+                                              "-b:v", "8M", "-maxrate", "8M", "-bufsize", "16M", "-pix_fmt", "yuv420p"]
+    # libx264: -b:v is ignored next to -crf, so the cap is a VBV cap
+    assert cp.encoder_args("cpu") == ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-maxrate", "8M",
+                                      "-bufsize", "16M", "-pix_fmt", "yuv420p"]
+    assert cp.encoder_args("cpu", None) == ["-c:v", "libx264", "-preset", "slow", "-crf", "18", "-pix_fmt", "yuv420p"]
 
 
 def test_render_args_probe_falls_back_to_cpu(monkeypatch):
@@ -105,7 +109,7 @@ def test_run_encode_nvenc_failure_or_hang_falls_back_to_libx264(monkeypatch):
     def run(cmd, **kw):
         calls.append((cmd, kw.get("timeout")))
         if "h264_nvenc" in cmd:
-            if len(calls) == 1:
+            if len(calls) <= 2:                                  # quality preset, then plain NVENC: both refused
                 return subprocess.CompletedProcess(cmd, 1, "", "OpenEncodeSessionEx failed: incompatible client key (21)")
             raise subprocess.TimeoutExpired(cmd, kw["timeout"])
         return subprocess.CompletedProcess(cmd, 0, "", "")
@@ -114,9 +118,9 @@ def test_run_encode_nvenc_failure_or_hang_falls_back_to_libx264(monkeypatch):
     for _ in range(2):                                            # 1st: error, 2nd: hang (timeout)
         r, used, _s = cp.run_encode(make, cp.encoder_args("nvenc"), timeout=cp.encode_timeout(45))
         assert r.returncode == 0 and used == "nvenc->cpu"
-        assert calls[-1][0] == make(cp.encoder_args("cpu", "6M")) and calls[-1][1] == 450
+        assert calls[-1][0] == make(cp.encoder_args("cpu", "8M")) and calls[-1][1] == 450
     r, used, _s = cp.run_encode(make, cp.encoder_args("cpu"))
-    assert used == "cpu" and len(calls) == 5                     # libx264 is never retried
+    assert used == "cpu" and len(calls) == 6                     # libx264 is never retried
     assert cp.encode_timeout(5) == 300                            # floor for short clips
 
 
@@ -139,8 +143,8 @@ def test_run_encode_all_nvenc_sessions_busy_goes_straight_to_libx264(monkeypatch
     monkeypatch.setattr(nvenc_guard, "session", lambda limit=None: contextlib.nullcontext(False))
     monkeypatch.setattr(nvenc_guard, "max_sessions", lambda: 3)
     make = lambda a: ["ffmpeg", *a]
-    r, used, _s = cp.run_encode(make, cp.encoder_args("nvenc", "6M"))
-    assert used == "nvenc->cpu" and calls == [make(cp.encoder_args("cpu", "6M"))]
+    r, used, _s = cp.run_encode(make, cp.encoder_args("nvenc", "8M"))
+    assert used == "nvenc->cpu" and calls == [make(cp.encoder_args("cpu", "8M"))]
 
 
 def test_site_job_gets_eight_clips_by_default(video, tmp_path, monkeypatch):

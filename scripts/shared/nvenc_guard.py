@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 NVENC_CODECS = ("h264_nvenc", "hevc_nvenc")
 # options only h264_nvenc understands (value follows); dropped when the encode moves to libx264
 NVENC_ONLY = {"-rc", "-cq", "-tune", "-multipass", "-rc-lookahead", "-spatial-aq", "-spatial_aq", "-temporal-aq",
-              "-temporal_aq", "-aq-strength", "-gpu", "-b_ref_mode", "-zerolatency", "-surfaces", "-delay"}
+              "-temporal_aq", "-aq-strength", "-gpu", "-b_ref_mode", "-bf", "-zerolatency", "-surfaces", "-delay"}
 # stderr of an NVENC encode that did not run for an NVENC reason (cap, driver, no libnvidia-encode, an ffmpeg built without
 # NVENC: "Unknown encoder" / its options unknown) -> the same encode on the CPU. Anything else (bad input) is a real error.
 REFUSED = re.compile(r"nvenc|NV_ENC|OpenEncodeSession|incompatible client key|No capable devices|CUDA|cuda|"
@@ -48,7 +48,7 @@ def uses_nvenc(cmd: Sequence[str]) -> bool:
 
 
 def to_cpu(cmd: Sequence[str]) -> List[str]:
-    """The same ffmpeg command with the NVENC encoder replaced by the Desktop CPU encoder (libx264 slow crf 19, same
+    """The same ffmpeg command with the NVENC encoder replaced by the Desktop CPU encoder (libx264 slow crf 18, same
     bitrate cap; "-b:v 0" = NVENC's uncapped quality mode -> no cap)."""
     from scripts.shared.cut_profile import encoder_args
     src = [str(a) for a in cmd]
