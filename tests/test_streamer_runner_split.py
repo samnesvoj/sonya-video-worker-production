@@ -30,6 +30,7 @@ WORDS = _words()
 
 @pytest.fixture
 def patched(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONYA_SUBTITLES_ALLOW_OFF", "1")   # these split tests run without subtitles
     calls = {"enrich": 0, "render": [], "analysis": 0}
 
     def enrich(**kw):

@@ -163,11 +163,15 @@ def test_editor_prompt_is_analysis_only():
 
 # ── runner wiring ───────────────────────────────────────────────────────────
 
-def test_look_options_from_site_settings():
+def test_look_options_from_site_settings(monkeypatch):
     from modes.educational import runner
+    monkeypatch.delenv("SONYA_SUBTITLES_ALLOW_OFF", raising=False)
     assert runner._look_options({"settings": {"edu_template": "3"}})["template"] == 3
     assert runner._look_options({"template": 4})["template"] == 4
     assert runner._look_options({})["template"] == 1
+    # owner 2026-11-12: subtitles always on; the site's "none" switches them off only with the ops env
+    assert runner._look_options({"settings": {"subtitleStyle": "none"}})["subtitles"] is True
+    monkeypatch.setenv("SONYA_SUBTITLES_ALLOW_OFF", "1")
     assert runner._look_options({"settings": {"subtitleStyle": "none"}})["subtitles"] is False
 
 

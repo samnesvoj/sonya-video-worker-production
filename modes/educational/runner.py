@@ -255,7 +255,8 @@ def _look_options(params: Dict[str, Any]) -> Dict[str, Any]:
     raw = params.get("template", settings.get("edu_template", settings.get("template")))
     tpl = get_template(raw)
     subs = params.get("subtitles", settings.get("subtitles", True))
-    if str(settings.get("subtitleStyle") or "").lower() in ("none", "off"):      # the site's subtitles switch
+    from scripts.shared.cut_profile import site_subtitle_style
+    if settings.get("subtitleStyle") and site_subtitle_style(settings) in ("none", "off"):   # site switch (ops env only)
         subs = False
     return {"template": tpl.id, "subtitles": subs not in (False, "off", "false", 0),
             "title": params.get("edu_title", settings.get("edu_title", True)) not in (False, "off", "false", 0)}

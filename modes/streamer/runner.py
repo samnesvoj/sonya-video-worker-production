@@ -71,7 +71,8 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
     nick = params.get("streamer_name") or settings.get("streamerName")
     if nick:
         crop["streamer_name"] = str(nick)[:60]
-    style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
+    from scripts.shared.cut_profile import site_subtitle_style
+    style = site_subtitle_style(settings)
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
         crop["subtitles"] = {"mode": "burn", "burn_supported": ffmpeg_has_ass(), "style": preset, "hook": False,
