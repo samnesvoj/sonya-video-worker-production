@@ -44,6 +44,32 @@ SITE_STYLES = {
     "basic": ("minimal", None),          # plain white, bottom
 }
 DEFAULT_STYLE = "viral"                  # job without settings (API / tests) → the reference look
+# owner 2026-11-12: «хочу, чтоб SONYA выкатывала автоматом 8 клипов по видео» - the site never sends max_clips;
+# fewer when the speech has fewer complete stories. SONYA_DEFAULT_MAX_CLIPS overrides (ops).
+DEFAULT_MAX_CLIPS = 8
+
+
+def default_max_clips(params: Optional[Dict[str, Any]] = None) -> int:
+    """params["max_clips"] when the job sets it, else SONYA_DEFAULT_MAX_CLIPS, else 8."""
+    v = (params or {}).get("max_clips")
+    if v in (None, "", 0):
+        v = os.environ.get("SONYA_DEFAULT_MAX_CLIPS") or DEFAULT_MAX_CLIPS
+    try:
+        return max(1, int(v))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CLIPS
+
+
+def site_subtitle_style(settings: Optional[Dict[str, Any]]) -> str:
+    """The site's subtitleStyle, lower-case; "none"/"off" -> the default style (owner 2026-11-12: «субтитры всегда
+    вшивались, как на Mac mini»: the legacy site form sent "none" whenever its toggle was left at the old default
+    "off" - not a real choice). SONYA_SUBTITLES_ALLOW_OFF=1 lets "none" switch them off again (ops)."""
+    style = str((settings or {}).get("subtitleStyle") or DEFAULT_STYLE).lower()
+    if style in ("none", "off") and os.environ.get("SONYA_SUBTITLES_ALLOW_OFF", "").lower() not in ("1", "true", "on", "yes"):
+        logger.info("[cut_profile] subtitleStyle=%r from the site ignored: subtitles are always burned (%s)",
+                    style, DEFAULT_STYLE)
+        return DEFAULT_STYLE
+    return style
 
 
 def _sha256(path: str) -> str:
@@ -207,7 +233,7 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
     crop: Dict[str, Any] = {"mode": "tracked", "analysis": "per_clip", "layout": "smart",
                             "source_sha256": _sha256(input_video_path),
                             "clip_cache_dir": str(Path(work_dir) / "vision" / "clips")}
-    style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
+    style = site_subtitle_style(settings)
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
         ok = ffmpeg_has_ass() if ass_supported is None else ass_supported
@@ -216,12 +242,13 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
         if not ok:
             logger.warning("[cut_profile] ffmpeg has no libass - subtitles cannot be burned")
     out["crop"] = crop
+    out["max_clips"] = default_max_clips(params)
     out["cut_profile"] = PROFILE_VERSION
     out.pop("llm", None)             # legacy Gemini selection switch: the story selector has its own editor
     try:
         ensure_render_args()
     except Exception as exc:         # noqa: BLE001 - the renderer's libx264 default still works
         logger.warning("[cut_profile] encoder probe failed: %s", exc)
-    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s", PROFILE_VERSION, story["strategy"],
-                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"))
+    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s max_clips=%d", PROFILE_VERSION, story["strategy"],
+                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"), out["max_clips"])
     return out
