@@ -129,7 +129,9 @@ def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
     """sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", bitrate) for nvenc / cpu."""
     if family == "nvenc":
         args = ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20"]
-        args += ["-b:v", bitrate] if bitrate else ["-b:v", "0"]
+        # -cq VBR treats -b:v as a target only: measured 12-16.6 Mb/s on the owner's VK clips (2026-11-13, 120 MB for
+        # 57 s) -> cap it with the VBV like libx264, so a 60 s clip stays ≈ 45 MB (Telegram's 50 MB limit)
+        args += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", _double(bitrate)] if bitrate else ["-b:v", "0"]
     elif family == "cpu":
         # libx264 ignores -b:v next to -crf (measured: 7.1 Mb/s on a 1080p60 stream clip): cap it with the VBV
         # instead, so a 60 s clip stays ≈ 45 MB like the NVENC / VideoToolbox renders (Telegram's 50 MB limit)
