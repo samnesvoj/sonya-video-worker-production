@@ -37,6 +37,7 @@ class FleetConfig:
     # (image + release + models on disk, resume ~10-40 s). Every other instance is a BURST one: created for the load and
     # DESTROYED (not stopped) when idle. A warm that cannot resume (host busy) is destroyed and the next instance becomes warm.
     warm_instances: int = 1                  # SONYA_WARM_INSTANCES (0 = old behaviour: every instance is burst-like)
+    allow_old_cpu: bool = True               # SONYA_ALLOW_OLD_CPU - last-resort class 2 (Xeon E5 etc.) when no modern-CPU offer
     warm_fallback: bool = False              # SONYA_WARM_FALLBACK - no European RTX 3060 offered: may a European fallback class
                                              # (4060 Ti / A4000 ..., same storage cap) be the warm? Owner decided 3060 -> off
     warm_prime: bool = True                  # SONYA_WARM_PRIME - no warm at all (first start / lost / stale) -> create one, let it boot, stop it
@@ -124,6 +125,7 @@ class FleetConfig:
             jobs_per_instance=_int(e, "SONYA_JOBS_PER_INSTANCE", 2, lo=1, hi=4),
             warm_instances=_int(e, "SONYA_WARM_INSTANCES", 1, lo=0, hi=1),
             warm_prime=e.get("SONYA_WARM_PRIME", "true").lower() in TRUE,
+            allow_old_cpu=e.get("SONYA_ALLOW_OLD_CPU", "true").lower() in TRUE,
             warm_fallback=e.get("SONYA_WARM_FALLBACK", "false").lower() in TRUE,
             stopped_retention_seconds=_int(e, "SONYA_STOPPED_RETENTION_SECONDS", 1800, lo=0, hi=7 * 86400),
             resume_timeout_seconds=_int(e, "SONYA_RESUME_TIMEOUT_SECONDS", 90, lo=30, hi=900),

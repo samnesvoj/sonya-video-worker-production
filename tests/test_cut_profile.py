@@ -62,7 +62,7 @@ def test_desktop_style_job_is_left_alone_and_there_is_no_rollback_switch(video, 
 def test_encoder_args_are_the_desktop_quality_preset_at_6mbps():
     # sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", "6M")
     assert cp.encoder_args("nvenc") == ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20",
-                                        "-b:v", "6M", "-pix_fmt", "yuv420p"]
+                                        "-b:v", "6M", "-maxrate", "6M", "-bufsize", "12M", "-pix_fmt", "yuv420p"]
     # libx264: -b:v is ignored next to -crf, so the 6 Mb/s cap is a VBV cap (streamer v2 measured 7.1 Mb/s without it)
     assert cp.encoder_args("cpu") == ["-c:v", "libx264", "-preset", "slow", "-crf", "19", "-maxrate", "6M",
                                       "-bufsize", "12M", "-pix_fmt", "yuv420p"]

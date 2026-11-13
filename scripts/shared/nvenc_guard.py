@@ -73,6 +73,9 @@ def to_cpu(cmd: Sequence[str]) -> List[str]:
             bitrate = None if nxt == "0" else nxt
             i += 2
             continue
+        if a in ("-maxrate", "-bufsize") and nxt is not None and at is not None:
+            i += 2                                   # the libx264 VBV cap is rebuilt from -b:v below
+            continue
         out.append(a)
         i += 1
     if at is None:

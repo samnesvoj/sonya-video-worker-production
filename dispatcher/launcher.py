@@ -81,14 +81,17 @@ def hourly_cost(o: Mapping[str, Any], cfg: FleetConfig) -> Decimal:
 
 
 def offer_class(o: Mapping[str, Any], cfg: FleetConfig) -> Optional[int]:
-    """0 = default class (RTX 3060 + modern CPU), 1 = fallback GPU + modern CPU, None = not acceptable."""
-    if not cpu_modern(o) or float(o.get("cpu_cores_effective") or 0) < cfg.min_cpu_cores:
+    """0 = default class (RTX 3060 + modern CPU), 1 = fallback GPU + modern CPU, 2 = either GPU on an old CPU (last
+    resort, SONYA_ALLOW_OLD_CPU; 2026-11-13 night: every offer <= $0.18 was a Xeon E5 -> no server at all for a real
+    job), None = not acceptable. Class 2 is never the warm server (warm_eligible needs 0/1)."""
+    if float(o.get("cpu_cores_effective") or 0) < cfg.min_cpu_cores:
         return None
-    if o.get("gpu_name") in cfg.default_gpus:
-        return 0
-    if o.get("gpu_name") in cfg.fallback_gpus:
-        return 1
-    return None
+    gpu = 0 if o.get("gpu_name") in cfg.default_gpus else 1 if o.get("gpu_name") in cfg.fallback_gpus else None
+    if gpu is None:
+        return None
+    if cpu_modern(o):
+        return gpu
+    return 2 if getattr(cfg, "allow_old_cpu", False) else None
 
 
 def warm_eligible(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
