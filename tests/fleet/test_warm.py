@@ -52,6 +52,21 @@ def test_warm_is_only_primed_on_the_default_class_with_cheap_storage():
     assert vast.n("create") == 0                     # 10 min back-off, no create storm
 
 
+def test_failed_prime_does_not_delay_a_real_job():
+    """Production 2026-11-12: prime_failed (no EU warm offer) set the shared 10 min back-off and a user's job
+    waited 5.5 min for a server although a burst offer was available."""
+    mgr, vast, queue, store, clock = fleet()
+    vast.offers = [offer(2, 8, storage=0.9)]          # burst-capable, not warm-eligible (pause too expensive)
+    mgr.tick()
+    assert vast.n("create") == 0 and any(e["event"] == "prime_failed" for e in store.events())
+    clock.advance(20)
+    queue.add("j1", ts=clock())
+    mgr.tick()
+    assert vast.n("create") == 1                     # the job gets a server at once
+    run_until(mgr, clock, 300)
+    assert sum(1 for e in store.events() if e["event"] == "prime_failed") == 1   # prime itself still backs off
+
+
 def test_prime_off_and_warm_off_create_nothing_without_load():
     for over in ({"warm_prime": False}, {"warm_instances": 0}):
         mgr, vast, queue, store, clock = fleet(**over)
