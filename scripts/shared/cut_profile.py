@@ -44,6 +44,20 @@ SITE_STYLES = {
     "basic": ("minimal", None),          # plain white, bottom
 }
 DEFAULT_STYLE = "viral"                  # job without settings (API / tests) → the reference look
+# owner 2026-11-12: «хочу, чтоб SONYA выкатывала автоматом 8 клипов по видео» - the site never sends max_clips;
+# fewer when the speech has fewer complete stories. SONYA_DEFAULT_MAX_CLIPS overrides (ops).
+DEFAULT_MAX_CLIPS = 8
+
+
+def default_max_clips(params: Optional[Dict[str, Any]] = None) -> int:
+    """params["max_clips"] when the job sets it, else SONYA_DEFAULT_MAX_CLIPS, else 8."""
+    v = (params or {}).get("max_clips")
+    if v in (None, "", 0):
+        v = os.environ.get("SONYA_DEFAULT_MAX_CLIPS") or DEFAULT_MAX_CLIPS
+    try:
+        return max(1, int(v))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_CLIPS
 
 
 def _sha256(path: str) -> str:
@@ -216,12 +230,13 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
         if not ok:
             logger.warning("[cut_profile] ffmpeg has no libass - subtitles cannot be burned")
     out["crop"] = crop
+    out["max_clips"] = default_max_clips(params)
     out["cut_profile"] = PROFILE_VERSION
     out.pop("llm", None)             # legacy Gemini selection switch: the story selector has its own editor
     try:
         ensure_render_args()
     except Exception as exc:         # noqa: BLE001 - the renderer's libx264 default still works
         logger.warning("[cut_profile] encoder probe failed: %s", exc)
-    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s", PROFILE_VERSION, story["strategy"],
-                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"))
+    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s max_clips=%d", PROFILE_VERSION, story["strategy"],
+                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"), out["max_clips"])
     return out

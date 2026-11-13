@@ -188,7 +188,8 @@ def select_segments(input_video_path: str, words: List[Dict], params: Dict[str, 
     import json
     warnings = enrichment.setdefault("warnings", [])
     trace: Dict[str, Any] = {"words": len(words)}
-    max_clips = int(params.get("max_clips", 6) or 6)
+    from scripts.shared.cut_profile import default_max_clips
+    max_clips = default_max_clips(params)          # 8 by default (owner 2026-11-12)
     v5_result = None
     try:
         from scripts.legacy_gpu.educational_mode_v5 import run_educational_mode_v5

@@ -226,7 +226,8 @@ def analyze(
     mc.setdefault("jump_gap", crop["jump_gap"])
     _set = params.get("settings") if isinstance(params.get("settings"), dict) else {}
     mc.setdefault("moment_types", params.get("moment_types") or _set.get("moment_types") or _set.get("momentTypes") or [])
-    want = int(params.get("max_clips", 5))
+    from scripts.shared.cut_profile import default_max_clips
+    want = default_max_clips(params)               # 8 by default (owner 2026-11-12)
     pool_n = int(params.get("pool_clips", max(want, 12)))
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
     selection["chat"] = chat_meta
@@ -507,13 +508,14 @@ def run(
     params: Optional[Dict[str, Any]] = None,
     progress_callback=None,
 ) -> Dict[str, Any]:
-    """Production entry point: analyze() once, render the top params["max_clips"] (default 5) moments,
+    """Production entry point: analyze() once, render the top params["max_clips"] (default 8) moments,
     two at a time (one analyses on the CPU while the other encodes)."""
     params = dict(params or {})
     result = analyze(input_video_path, output_dir, params, progress_callback)
     segments, hints = result["segments"], result["crop_hints"]
     warnings = list(result["warnings"])
-    max_clips = int(params.get("max_clips", 5))
+    from scripts.shared.cut_profile import default_max_clips
+    max_clips = default_max_clips(params)
     top = segments[:max_clips]                        # already in the editor's / local rank order
     out_dir = Path(output_dir)
     names = [str(out_dir / f"stream_clip_{i + 1:02d}.mp4") for i in range(len(top))]
