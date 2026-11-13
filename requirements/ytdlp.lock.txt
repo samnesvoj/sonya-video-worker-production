@@ -1,0 +1,4 @@
+# URL download on the GPU worker (YouTube is unreachable from the Moscow VPS). Pinned + hash-checked, installed --no-deps
+# (requests/urllib3/certifi/websockets already come from worker.lock.txt). yt-dlp-ejs + deno solve YouTube's JS challenge.
+yt-dlp==2026.10.26 --hash=sha256:a05c5b5d8562f7e8a62f5334348b406af4930d56d3a65f8021d14af0e22339ae
+yt-dlp-ejs==0.8.0 --hash=sha256:79300e5fca7f937a1eeede11f0456862c1b41107ce1d726871e0207424f4bdb4

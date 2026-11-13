@@ -46,6 +46,16 @@ COPY ${SPLIT_DIR}/03-rest.lock.txt /tmp/req/03.txt
 COPY tools/slim_site_packages.py /tmp/slim.py
 RUN pip install --require-hashes --no-deps -r /tmp/req/03.txt \
  && python3 /tmp/slim.py "$SP" && rm -rf /tmp/req/03.txt /tmp/slim.py /root/.cache
+# yt-dlp (pinned, hash-checked) + deno (pinned, sha256-checked): URL jobs (source_fetch) download on the GPU server, because the Moscow VPS
+# cannot reach youtube.com. Small layers at the end: the big dependency layers above stay cached.
+ARG DENO_VERSION=2.9.8
+ARG DENO_SHA256=e890975bc2549807bbcc0b584ffafda72cc7c93349dd99c80483dd784f6c4609
+COPY requirements/ytdlp.lock.txt /tmp/req/ytdlp.txt
+RUN pip install --require-hashes --no-deps -r /tmp/req/ytdlp.txt && rm -rf /tmp/req/ytdlp.txt /root/.cache \
+ && curl -fsSL -o /tmp/deno.zip "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/deno-x86_64-unknown-linux-gnu.zip" \
+ && echo "${DENO_SHA256}  /tmp/deno.zip" | sha256sum -c - \
+ && python3 -c "import zipfile;zipfile.ZipFile('/tmp/deno.zip').extract('deno','/usr/local/bin')" \
+ && chmod 0755 /usr/local/bin/deno && rm /tmp/deno.zip && deno --version && yt-dlp --version
 # The full lock (hash-checked by bootstrap against the release) stays as a tiny read-only file.
 COPY ${LOCK_FILE} /opt/sonya-bootstrap/worker.lock.txt
 

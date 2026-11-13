@@ -34,7 +34,7 @@ def test_to_cpu_is_exactly_the_desktop_cpu_encoder(bitrate):
 
 def test_to_cpu_adds_overwrite_and_pix_fmt_when_missing():
     out = ng.to_cpu(["ffmpeg", "-i", "a.mp4", "-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "5M", "b.mp4"])
-    assert out == ["ffmpeg", "-y", "-i", "a.mp4", "-c:v", "libx264", "-preset", "slow", "-crf", "19",
+    assert out == ["ffmpeg", "-y", "-i", "a.mp4", "-c:v", "libx264", "-preset", "slow", "-crf", "18",
                    "-maxrate", "5M", "-bufsize", "10M", "-pix_fmt", "yuv420p", "b.mp4"]
     assert ng.to_cpu(["ffmpeg", "-c:v", "libx264", "o.mp4"]) == ["ffmpeg", "-c:v", "libx264", "o.mp4"]
 

@@ -116,7 +116,10 @@ def applies(mode: str, params: Dict[str, Any]) -> bool:
 # ── render encoder (Desktop: sonya_desktop/media/encoders.py, quality preset, 6 Mb/s) ──────────────────
 # Same args as the Desktop probe picks: the 6 Mb/s cap keeps a 60 s clip ≈ 45 MB (Telegram's 50 MB limit,
 # CUT_PLAYBOOK). NVENC on Vast; libx264 when there is no working NVENC (CPU box, broken driver).
-RENDER_BITRATE = "6M"
+RENDER_BITRATE = "8M"      # owner 2026-11-13: ~8 Mb/s ceiling for 1080x1920 (60 s ≈ 60 MB at most); quality comes from the encoder settings, not bits
+
+
+CPU_PRESET = os.environ.get("SONYA_X264_PRESET", "slow")
 
 
 def _double(rate: str) -> str:
@@ -127,15 +130,22 @@ def _double(rate: str) -> str:
 
 def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
     """sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", bitrate) for nvenc / cpu."""
-    if family == "nvenc":
-        args = ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20"]
+    if family in ("nvenc", "nvenc_basic"):
+        if family == "nvenc":
+            # quality preset (owner 2026-11-13): p7 + hq tune, 2-pass (quarter-res) rate control, spatial+temporal AQ,
+            # 3 B-frames (middle ref) + 20-frame lookahead; -cq 19 under the VBV cap = "as good as needed, never above 8M"
+            args = ["-c:v", "h264_nvenc", "-preset", "p7", "-tune", "hq", "-rc", "vbr", "-multipass", "qres", "-cq", "19",
+                    "-spatial-aq", "1", "-temporal-aq", "1", "-aq-strength", "8", "-rc-lookahead", "20",
+                    "-bf", "3", "-b_ref_mode", "middle"]
+        else:     # older cards / drivers that refuse the options above
+            args = ["-c:v", "h264_nvenc", "-preset", "p6", "-rc", "vbr", "-cq", "20"]
         # -cq VBR treats -b:v as a target only: measured 12-16.6 Mb/s on the owner's VK clips (2026-11-13, 120 MB for
         # 57 s) -> cap it with the VBV like libx264, so a 60 s clip stays ≈ 45 MB (Telegram's 50 MB limit)
         args += ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", _double(bitrate)] if bitrate else ["-b:v", "0"]
     elif family == "cpu":
         # libx264 ignores -b:v next to -crf (measured: 7.1 Mb/s on a 1080p60 stream clip): cap it with the VBV
         # instead, so a 60 s clip stays ≈ 45 MB like the NVENC / VideoToolbox renders (Telegram's 50 MB limit)
-        args = ["-c:v", "libx264", "-preset", "slow", "-crf", "19"]
+        args = ["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18"]
         if bitrate:
             args += ["-maxrate", bitrate, "-bufsize", _double(bitrate)]
     else:
@@ -175,6 +185,10 @@ def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Op
             logger.info("[cut_profile] %s: all %d NVENC sessions busy - encoding on CPU (libx264)", what, nvenc_guard.max_sessions())
             return once(cpu_args()), "nvenc->cpu", round(time.monotonic() - t0, 1)
         r = once(args)
+        if r.returncode not in (0, 124) and "-multipass" in args:    # card/driver without the quality options: plain NVENC before CPU
+            logger.warning("[cut_profile] %s: NVENC quality preset refused (%s) - plain NVENC", what, (r.stderr or "")[-160:].strip())
+            br = args[args.index("-b:v") + 1] if "-b:v" in args else None
+            r = once(encoder_args("nvenc_basic", None if br == "0" else br))
     used = "nvenc"
     if r.returncode != 0:
         logger.warning("[cut_profile] %s: NVENC failed (%s) - re-encoding on CPU (libx264)", what, (r.stderr or "")[-200:].strip())

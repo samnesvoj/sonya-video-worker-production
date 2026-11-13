@@ -155,7 +155,7 @@ def test_render_game_layout_one_pass_absolute_paths(monkeypatch, tmp_path):
     assert cmd[-1] == str(tmp_path / "out" / "clip.mp4")
     vf = cmd[cmd.index("-vf") + 1]
     assert vf.count("flags=lanczos") == 2 and "vstack" in vf and "crop=540:480:10:10" in vf
-    assert cmd.count("-i") == 1 and cmd[cmd.index("-maxrate") + 1] == "6M"
+    assert cmd.count("-i") == 1 and cmd[cmd.index("-maxrate") + 1] == "8M"
     assert seen["cwd"] == str(sub)
 
 

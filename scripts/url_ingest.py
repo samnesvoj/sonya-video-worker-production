@@ -234,6 +234,19 @@ _YTDLP_FORMAT = (
 )
 
 
+def _ytdlp_format_opts() -> dict:
+    """<=1080p H.264 by default (VPS path, unchanged). SONYA_YTDLP_MAX_HEIGHT>1080 (the GPU worker's source_fetch sets 1440):
+    best resolution up to that, H.264 preferred only among equal resolutions - a 9:16 crop of 1440p/4K needs no upscale."""
+    try:
+        h = int(os.environ.get("SONYA_YTDLP_MAX_HEIGHT", "1080"))
+    except ValueError:
+        h = 1080
+    if h <= 1080:
+        return {"format": _YTDLP_FORMAT}
+    return {"format": f"bestvideo[height<={h}]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best",
+            "format_sort": ["res", "vcodec:h264", "fps"]}
+
+
 def probe(url: str, platform: str, mode: Optional[str] = None,
           max_duration_sec: Optional[int] = None) -> dict:
     """Metadata-only lookup (no download). Raises DownloadLimitExceeded if
@@ -373,7 +386,7 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
                     pass
 
     opts = {
-        "format": _YTDLP_FORMAT,
+        **_ytdlp_format_opts(),
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
         "noplaylist": True,
