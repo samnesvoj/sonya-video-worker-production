@@ -222,6 +222,12 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
                             "source_sha256": _sha256(input_video_path),
                             "clip_cache_dir": str(Path(work_dir) / "vision" / "clips")}
     style = str(settings.get("subtitleStyle") or DEFAULT_STYLE).lower()
+    if style in ("none", "off") and os.environ.get("SONYA_SUBTITLES_ALLOW_OFF", "").lower() not in ("1", "true", "on", "yes"):
+        # owner 2026-11-12: «субтитры всегда вшивались (как на Mac mini)». The legacy site form sent "none" whenever
+        # its toggle was left at the (old) default "off" - not a real choice; ops can restore it with the env.
+        logger.info("[cut_profile] subtitleStyle=%r from the site ignored: subtitles are always burned (%s)",
+                    style, DEFAULT_STYLE)
+        style = DEFAULT_STYLE
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
         ok = ffmpeg_has_ass() if ass_supported is None else ass_supported
