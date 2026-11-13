@@ -77,7 +77,7 @@
 			} },
 		{ id: 'gallery', name: 'Работы', title: 'Работы', group: 'library', kind: 'view', icon: 'works', accent: '#C9D3E0',
 			desc: 'Нарезки, трейлеры, клипы и генерации в одном месте',
-			module: { global: 'SonyaGallery', css: ['/trailer/trailer.css', '/gallery/gallery.css?v=1'], js: ['/gallery/gallery.js?v=1'] } },
+			module: { global: 'SonyaGallery', css: ['/trailer/trailer.css', '/gallery/gallery.css?v=2'], js: ['/gallery/gallery.js?v=2'] } },
 		{ id: 'guide', name: 'Справочник', title: 'Справочник', group: 'library', kind: 'view', icon: 'guide', accent: '#B8C4D6',
 			desc: 'Как устроены приложения и режимы SONYA',
 			// Open to everyone. Sections deep-link as #/guide/<section>.

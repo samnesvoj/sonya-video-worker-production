@@ -23,7 +23,7 @@
 				var jobs = d.jobs || [];
 				if (!jobs.length) { list.innerHTML = "<div class=\"gl-empty\">Пока нет работ. Здесь появятся ваши нарезки и генерации.</div>"; return; }
 				list.innerHTML = jobs.map(function (j) {
-					var s = ST[j.status] || ["В работе", ""];
+					var s = ST[j.status] || ["В работе", "run"];
 					return "<div class=\"gl-card\" data-id=\"" + esc(j.id) + "\" data-st=\"" + esc(j.status) + "\"><div class=\"gl-top\"><div><div class=\"gl-name\">" +
 						esc(MODES[j.mode] || j.mode || "Задание") + "</div><div class=\"gl-meta\">" + esc(fmt(j.created_at)) + (j.clip_count ? " · клипов: " + esc(j.clip_count) : "") +
 						"</div></div><span class=\"gl-badge " + s[1] + "\">" + s[0] + "</span></div><div class=\"gl-body\">" +
