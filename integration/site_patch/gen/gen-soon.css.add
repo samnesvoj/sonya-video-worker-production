@@ -1,0 +1,11 @@
+/* admin image form */
+.gn-label { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--tr-muted) !important; }
+.gn-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 0; border-radius: 12px; font: inherit; font-size: 14.5px; color: var(--tr-text); background: var(--tr-well); box-shadow: var(--tr-well-shadow); }
+textarea.gn-input { resize: vertical; min-height: 96px; }
+.gn-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.gn-status { min-height: 1.5em; color: var(--tr-muted) !important; }
+.gn-results { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.gn-fig { margin: 0; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--tr-muted); }
+.gn-img { width: 100%; height: auto; border-radius: 12px; display: block; }
+.gn-link { color: var(--tr-text); }
+@media (max-width: 700px) { .gn-row { grid-template-columns: 1fr; } }

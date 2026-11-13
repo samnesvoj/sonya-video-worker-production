@@ -191,6 +191,86 @@
    "public_sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
    "public_size": 459861,
    "role": "fallback"
+  },
+  {
+   "key": "flux_schnell_unet_q4ks",
+   "local_path": "flux/flux1-schnell-Q4_K_S.gguf",
+   "s3_path": "models/flux/flux1-schnell-Q4_K_S.gguf",
+   "used_by": [
+    "sonya_gen"
+   ],
+   "role": "primary",
+   "required_for_gpu_test": false,
+   "source": {
+    "type": "public",
+    "name": "flux1-schnell-Q4_K_S.gguf",
+    "url": "https://huggingface.co/city96/FLUX.1-schnell-gguf",
+    "license": "Apache-2.0 (FLUX.1-schnell, Black Forest Labs; GGUF city96)"
+   },
+   "notes": "SONYA Gen (FLUX.1-schnell Q4_K_S via ComfyUI-GGUF); same files/hashes as Desktop gen/workflow.py",
+   "public_sha256": "4fd16477b3a5296d0cf722c4b92a9fd7f30d09ac7495826e4465d8de9c9fd973",
+   "public_size": 6783943712,
+   "loaded_by": "modes/sonya_gen/runner.py (symlinked into the private ComfyUI models/ dirs; workflow modes/sonya_gen/workflow.py)"
+  },
+  {
+   "key": "flux_t5xxl_q5km",
+   "local_path": "flux/t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+   "s3_path": "models/flux/t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+   "used_by": [
+    "sonya_gen"
+   ],
+   "role": "primary",
+   "required_for_gpu_test": false,
+   "source": {
+    "type": "public",
+    "name": "t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+    "url": "https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf",
+    "license": "Apache-2.0"
+   },
+   "notes": "SONYA Gen (FLUX.1-schnell Q4_K_S via ComfyUI-GGUF); same files/hashes as Desktop gen/workflow.py",
+   "public_sha256": "b51cbb10b1a7aac6dd1c3b62f0ed908bfd06e0b42d2f3577d43e061361f51dae",
+   "public_size": 3386856640,
+   "loaded_by": "modes/sonya_gen/runner.py (symlinked into the private ComfyUI models/ dirs; workflow modes/sonya_gen/workflow.py)"
+  },
+  {
+   "key": "flux_clip_l",
+   "local_path": "flux/clip_l.safetensors",
+   "s3_path": "models/flux/clip_l.safetensors",
+   "used_by": [
+    "sonya_gen"
+   ],
+   "role": "primary",
+   "required_for_gpu_test": false,
+   "source": {
+    "type": "public",
+    "name": "clip_l.safetensors",
+    "url": "https://huggingface.co/comfyanonymous/flux_text_encoders",
+    "license": "MIT (OpenAI CLIP-L)"
+   },
+   "notes": "SONYA Gen (FLUX.1-schnell Q4_K_S via ComfyUI-GGUF); same files/hashes as Desktop gen/workflow.py",
+   "public_sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
+   "public_size": 246144152,
+   "loaded_by": "modes/sonya_gen/runner.py (symlinked into the private ComfyUI models/ dirs; workflow modes/sonya_gen/workflow.py)"
+  },
+  {
+   "key": "flux_vae_ae",
+   "local_path": "flux/ae.safetensors",
+   "s3_path": "models/flux/ae.safetensors",
+   "used_by": [
+    "sonya_gen"
+   ],
+   "role": "primary",
+   "required_for_gpu_test": false,
+   "source": {
+    "type": "public",
+    "name": "ae.safetensors",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+    "license": "Apache-2.0"
+   },
+   "notes": "SONYA Gen (FLUX.1-schnell Q4_K_S via ComfyUI-GGUF); same files/hashes as Desktop gen/workflow.py",
+   "public_sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+   "public_size": 335304388,
+   "loaded_by": "modes/sonya_gen/runner.py (symlinked into the private ComfyUI models/ dirs; workflow modes/sonya_gen/workflow.py)"
   }
  ],
  "alternatives_asr": {

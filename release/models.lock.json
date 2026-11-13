@@ -41,6 +41,26 @@
       "s3_path": "models/whisper-base/vocabulary.txt",
       "sha256": "34ce3fe1c5041027b3f8d42912270993f986dbc4bb34cf27f951e34a1e453913",
       "size": 459861
+    },
+    "flux_schnell_unet_q4ks": {
+      "s3_path": "models/flux/flux1-schnell-Q4_K_S.gguf",
+      "sha256": "4fd16477b3a5296d0cf722c4b92a9fd7f30d09ac7495826e4465d8de9c9fd973",
+      "size": 6783943712
+    },
+    "flux_t5xxl_q5km": {
+      "s3_path": "models/flux/t5-v1_1-xxl-encoder-Q5_K_M.gguf",
+      "sha256": "b51cbb10b1a7aac6dd1c3b62f0ed908bfd06e0b42d2f3577d43e061361f51dae",
+      "size": 3386856640
+    },
+    "flux_clip_l": {
+      "s3_path": "models/flux/clip_l.safetensors",
+      "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd",
+      "size": 246144152
+    },
+    "flux_vae_ae": {
+      "s3_path": "models/flux/ae.safetensors",
+      "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38",
+      "size": 335304388
     }
   }
 }
