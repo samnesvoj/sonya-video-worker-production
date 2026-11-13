@@ -44,7 +44,7 @@ def fetch(m):
     return f"{n/1e6:.1f} MB sha256 ok"
 
 
-public = [m for m in man["models"] if m["source"]["type"] == "public" and m.get("public_sha256")]      # verifiable ones only (GigaAM: sha256 comes from the Mac mini)
+public = [m for m in man["models"] if m["source"]["type"] == "public" and m.get("public_sha256") and not m["key"].startswith("flux_")]  # flux_*: multi-GB, source url is a HF repo page (sha256 pinned in models.lock.json, verified at publish + on the worker)      # verifiable ones only (GigaAM: sha256 comes from the Mac mini)
 for m in public:
     step("download+verify " + m["key"], lambda m=m: fetch(m))
 
