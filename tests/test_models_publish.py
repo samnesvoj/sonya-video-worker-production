@@ -44,7 +44,7 @@ def _fake_manifest(tmp_path, stock_keys=()):
 def test_manifest_matches_mode_yaml_exactly_and_covers_both_modes():
     import yaml
     declared = {}
-    for mode in ("virality", "beep"):
+    for mode in ("virality", "beep", "sonya_gen"):
         for key, spec in yaml.safe_load((ROOT / "modes" / mode / "mode.yaml").read_text())["models"].items():
             declared[key] = (spec["s3_path"], spec["local_path"])
     listed = {m["key"]: (m["s3_path"], m["local_path"]) for m in MAN["models"]}
@@ -141,7 +141,7 @@ def test_upload_is_dry_run_by_default_requires_confirmation_and_is_idempotent(tm
     with pytest.raises(SystemExit, match="confirm"):
         mp.main(["upload", "--src", str(tmp_path), "--bucket", "models-bucket", "--apply"] + sum([["--accept-custom", k] for k in custom], []))
     log = mp.upload(rows, "models-bucket", s3, apply=True)
-    assert len([l for l in log if l.startswith("uploaded")]) == 9
+    assert len([l for l in log if l.startswith("uploaded")]) == len(MAN["models"])
     head = s3.head_object(Bucket="models-bucket", Key="models/common/yolo11n.pt")
     assert head["Metadata"]["sha256"] == next(r["sha256"] for r in rows if r["key"] == "yolo11n")
     assert all(l.startswith("skip") for l in mp.upload(rows, "models-bucket", s3, apply=True))                               # second run: nothing re-uploaded

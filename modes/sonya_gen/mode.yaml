@@ -1,11 +1,26 @@
 name: sonya_gen
-version: "0.1-placeholder"
+version: "1.0"
 description: >
-  SONYA generative mode — placeholder, not production.
-  Future: AI-generated content assembly.
+  SONYA Gen (images): FLUX.1-schnell (Apache-2.0, commercial use OK) as GGUF Q4_K_S through ComfyUI + ComfyUI-GGUF,
+  text -> PNG on the GPU worker. No input video. No Gemini generation (Gemini is analysis only).
 
-models: {}
+models:
+  flux_schnell_unet_q4ks:
+    s3_path: models/flux/flux1-schnell-Q4_K_S.gguf
+    local_path: flux/flux1-schnell-Q4_K_S.gguf
+    optional: false
+  flux_t5xxl_q5km:
+    s3_path: models/flux/t5-v1_1-xxl-encoder-Q5_K_M.gguf
+    local_path: flux/t5-v1_1-xxl-encoder-Q5_K_M.gguf
+    optional: false
+  flux_clip_l:
+    s3_path: models/flux/clip_l.safetensors
+    local_path: flux/clip_l.safetensors
+    optional: false
+  flux_vae_ae:
+    s3_path: models/flux/ae.safetensors
+    local_path: flux/ae.safetensors
+    optional: false
 
 output:
-  format: mp4
-  resolution: "1080x1920"
+  format: png

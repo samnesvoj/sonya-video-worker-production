@@ -23,7 +23,8 @@ def test_lock_pins_every_model_the_gpu_test_needs_with_real_hashes():
     lock = json.loads((ROOT / "release/models.lock.json").read_text())["models"]
     man = json.loads((ROOT / "release/models.required.json").read_text())["models"]
     need = {m["key"] for m in man if m.get("required_for_gpu_test", True)}
-    assert need == set(lock) and "webcam_detector" not in lock
+    gen = {m["key"] for m in man if m.get("used_by") == ["sonya_gen"]}      # SONYA Gen models: pinned, not needed by the virality/beep test
+    assert need | gen == set(lock) and "webcam_detector" not in lock
     for m in man:
         if m["key"] in lock:
             pin = lock[m["key"]]

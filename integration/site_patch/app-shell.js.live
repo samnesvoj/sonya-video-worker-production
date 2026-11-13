@@ -1,0 +1,630 @@
+/* ============================================================
+   SONYA App Shell — App Library + workspace switching (Phase 1)
+
+   One reusable shell shared by every SONYA page. A page opts in with:
+
+     <link rel="stylesheet" href="app-shell.css?v=…">
+     <script src="app-shell.js?v=…" data-sx-page="cut" defer></script>
+
+   data-sx-page names the app that owns the page ("cut" on index.html,
+   "streamer" on streamer-mode.html). Everything else is driven by the
+   SX_APPS registry below — adding an app later means adding one entry
+   (plus an icon glyph), never copying navigation markup into a page.
+
+   App kinds:
+     view  — lives inside index.html as a hash route (#/trailer, #/gen).
+             "cut" is the default view: the existing SONYA flow, untouched.
+     page  — a separate existing page (streamer-mode.html, opencut.html).
+     soon  — visible in the library, not openable yet.
+
+   The shell never touches app.js / auth.js state: switching to another
+   view only hides .app-container (a running generation keeps polling)
+   and showing Cut again reveals it exactly as it was.
+   ============================================================ */
+(function () {
+	'use strict';
+
+	var HOST_PATH = '/';
+
+	/* Icons are the owner's final artwork (assets/apps/*.webp, *-light.webp), cropped only
+	   to the glass tile and resized — never redrawn. Served as lossless WebP at the
+	   same 384px — pixel-identical to the .png masters kept next to them, ~35%
+	   smaller. Never lossy: the glass edges and highlights are the artwork. ICON_V busts
+	   caches when an icon file is replaced. */
+	var ICON_DIR = '/assets/apps/';
+	var ICON_V = '20261006-perf1';
+	var BLANK = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+	/* ── Feature flags — the ONE place the frontend switches an app on/off ──
+	   trailer:false  →  SONYA Trailer is temporarily unavailable to everyone:
+	   its library card is inactive ("Временно недоступен"), #/trailer shows
+	   the same notice instead of loading the app, Cut's "Cinematic trailer"
+	   button is locked, and the Trailer tariffs are hidden (auth.js reads
+	   window.SONYA_FEATURES). Nothing is deleted: set it to true to bring
+	   everything back. The backend enforces the same switch independently
+	   (SONYA_TRAILER_ENABLED, scripts/feature_flags.py) — flip BOTH. */
+	var FEATURES = { trailer: false };
+	var UNAVAILABLE_LABEL = 'Временно недоступен';
+	if (typeof window !== 'undefined') window.SONYA_FEATURES = FEATURES;
+
+	var SX_APPS = [
+		{ id: 'cut', name: 'Cut', title: 'SONYA Cut', group: 'apps', kind: 'view', icon: 'cut', accent: '#B9D4FF',
+			desc: 'Нарезка лучших моментов: вирусные, обучающие и story-форматы' },
+		{ id: 'trailer', name: 'Trailer', title: 'SONYA Trailer', group: 'apps', kind: 'view', icon: 'trailer', accent: '#B3BEFF',
+			desc: 'Кинематографичные трейлеры из длинного видео',
+			feature: 'trailer',
+			// Loaded on first open, then mounted into the view's canvas.
+			module: {
+				global: 'SonyaTrailer',
+				css: ['/trailer/trailer.css'],
+				js: ['/shared/sonya-kit.js', '/trailer/trailer-config.js', '/trailer/trailer-backend.js', '/trailer/trailer-store.js',
+					'/trailer/trailer-ui.js', '/trailer/trailer-views.js', '/trailer/trailer-app.js']
+			} },
+		{ id: 'streamer', name: 'Streamer', title: 'SONYA Streamer', group: 'apps', kind: 'page', icon: 'streamer', accent: '#9D6BFF',
+			href: '/streamer-mode.html', desc: 'Хайлайты стримов, разобранные по темам' },
+		{ id: 'gen', name: 'Gen', title: 'SONYA Gen', group: 'apps', kind: 'view', icon: 'gen', accent: '#C7A9FF',
+			desc: 'Картинки и короткие видео по описанию',
+			module: { global: 'SonyaGen', css: ['/trailer/trailer.css', '/gen/gen-soon.css?v=3'], js: ['/gen/gen-soon.js?v=3'] } },
+		{ id: 'editor', name: 'Editor', title: 'SONYA Editor', group: 'apps', kind: 'page', icon: 'editor', accent: '#A9C6FF',
+			href: '/opencut.html', desc: 'Быстрая финальная доработка ролика после обработки SONYA' },
+		{ id: 'beep', name: 'BEEP', title: 'SONYA BEEP', group: 'apps', kind: 'view', icon: 'beep', accent: '#C8C8C8',
+			desc: 'Запикивает мат в видео',
+			// entitlement: not tied to any plan yet (business decision pending).
+			module: {
+				global: 'SonyaBeep',
+				css: ['/trailer/trailer.css', '/beep/beep.css'],
+				js: ['/shared/sonya-kit.js', '/beep/beep-backend.js', '/beep/beep-app.js']
+			} },
+		{ id: 'gallery', name: 'Работы', title: 'Работы', group: 'library', kind: 'view', icon: 'works', accent: '#C9D3E0',
+			desc: 'Нарезки, трейлеры, клипы и генерации в одном месте',
+			module: { global: 'SonyaGallery', css: ['/trailer/trailer.css', '/gallery/gallery.css?v=2'], js: ['/gallery/gallery.js?v=2'] } },
+		{ id: 'guide', name: 'Справочник', title: 'Справочник', group: 'library', kind: 'view', icon: 'guide', accent: '#B8C4D6',
+			desc: 'Как устроены приложения и режимы SONYA',
+			// Open to everyone. Sections deep-link as #/guide/<section>.
+			module: {
+				global: 'SonyaGuide',
+				css: ['/trailer/trailer.css', '/guide/guide.css'],
+				js: ['/guide/guide-media.js', '/guide/guide-app.js']
+			} },
+		{ id: 'usage', name: 'Лимиты', title: 'Лимиты', group: 'library', kind: 'soon', icon: 'usage', accent: '#C8C8C8',
+			desc: 'Сколько обработок осталось по тарифу' },
+		// Service / B2B entry — open to everyone, guests included (no entitlement).
+		{ id: 'pipeline', name: 'Pipeline', title: 'SONYA Pipeline', group: 'service', kind: 'view', icon: 'pipeline', accent: '#C8C8C8',
+			desc: 'Автоматизация на базе SONYA API',
+			module: {
+				global: 'SonyaPipeline',
+				css: ['/trailer/trailer.css', '/pipeline/pipeline.css'],
+				js: ['/pipeline/pipeline-app.js']
+			} }
+	];
+
+	function appById(id) {
+		for (var i = 0; i < SX_APPS.length; i++) if (SX_APPS[i].id === id) return SX_APPS[i];
+		return null;
+	}
+
+	/* An app whose feature flag is off: listed, but not openable. */
+	function isUnavailable(app) {
+		return !!(app && app.feature && !FEATURES[app.feature]);
+	}
+
+	/* "#/trailer" → "trailer". Unknown, empty, or non-view hashes resolve
+	   to Cut so a stale/typoed deep link never shows a blank screen.
+	   One sub-segment is allowed for the app's own use ("#/guide/beep"). */
+	function routeFromHash(hash) {
+		var m = /^#\/([a-z]+)(?:\/[a-z-]+)?\/?$/.exec(hash || '');
+		var app = m && appById(m[1]);
+		return app && app.kind === 'view' ? app.id : 'cut';
+	}
+
+	/* Where a library entry points, given which page we're on. View apps
+	   are only rendered by index.html, so from any other page they link
+	   back to the host with the hash route. */
+	function hrefFor(app, pageApp) {
+		if (app.kind === 'page') return app.href;
+		if (app.kind !== 'view') return null;
+		var onHost = appById(pageApp) && appById(pageApp).kind === 'view';
+		if (app.id === 'cut') return onHost ? '#/cut' : HOST_PATH;
+		return (onHost ? '' : HOST_PATH) + '#/' + app.id;
+	}
+
+	/* Each icon has a dark and a light edition (<name>.png / <name>-light.png),
+	   picked by the current theme. Pages without data-theme (streamer-mode)
+	   are dark. */
+	function isLight() {
+		return typeof document !== 'undefined' && document.documentElement.getAttribute('data-theme') === 'light';
+	}
+	/* ── App modules ────────────────────────────────────────────────
+	   A view app with `module` gets its CSS/JS injected the first time it
+	   opens (scripts in order), then window[module.global].mount(canvas).
+	   Apps without a module keep the empty Phase 1 canvas. */
+	var MODULE_V = '20261113-gentabs';
+	var moduleState = {};
+	var moduleTry = 0;
+	var MODULE_TIMEOUT = 20000;
+
+	/* nginx answers a missing path with index.html (HTTP 200), so a 200 is
+	   not proof a module file exists. Each file is fetched first and its
+	   content type checked: HTML instead of JS/CSS is rejected before it can
+	   run as a script (that used to throw SyntaxError, fire onload anyway and
+	   leave window[global] undefined). The real <script>/<link> then reuses
+	   the HTTP cache. */
+	function checkAsset(url, kind) {
+		if (typeof fetch !== 'function') return Promise.resolve();
+		return fetch(url, { credentials: 'same-origin' }).then(function (r) {
+			var type = (r.headers.get('content-type') || '').toLowerCase();
+			var ok = r.ok && (kind === 'css' ? type.indexOf('css') !== -1 : /javascript|ecmascript/.test(type));
+			if (!ok) {
+				if (window.console) console.error('[sonya-shell] module asset unavailable: ' + url + ' (status ' + r.status + ', ' + (type || 'no content-type') + ')');
+				throw new Error('asset_unavailable ' + url);
+			}
+			// Read to the end so the HTTP cache holds the whole file before the
+			// <script>/<link> asks for it.
+			return r.text().then(function () {});
+		});
+	}
+
+	function loadModule(app) {
+		if (moduleState[app.id]) return moduleState[app.id];
+		var m = app.module, added = [];
+		// a retry bypasses whatever the browser cached for the failed attempt
+		var q = '?v=' + MODULE_V + (moduleTry ? '&r=' + moduleTry : '');
+		// Every file is requested (and type-checked) at once; scripts still run
+		// strictly in order below. Serially this was one round trip per file —
+		// 7 for Trailer — before the app could mount.
+		var jsChecks = m.js.map(function (src) {
+			var p = checkAsset(src + q, 'js');
+			p.catch(function () {}); // a later file's failure is reported via the chain
+			return p;
+		});
+		var chain = Promise.all(m.css.map(function (href) { return checkAsset(href + q, 'css'); })).then(function () {
+			m.css.forEach(function (href) {
+				var l = document.createElement('link');
+				l.rel = 'stylesheet';
+				l.href = href + q;
+				l.setAttribute('data-sx-module', app.id);
+				document.head.appendChild(l);
+				added.push(l);
+			});
+		});
+		m.js.forEach(function (src, i) {
+			chain = chain.then(function () { return jsChecks[i]; }).then(function () {
+				return new Promise(function (resolve, reject) {
+					var sc = document.createElement('script');
+					var t = setTimeout(function () { reject(new Error('load_timeout ' + src)); }, MODULE_TIMEOUT);
+					sc.src = src + q;
+					sc.setAttribute('data-sx-module', app.id);
+					sc.onload = function () { clearTimeout(t); resolve(); };
+					sc.onerror = function () { clearTimeout(t); reject(new Error('load_failed ' + src)); };
+					document.head.appendChild(sc);
+					added.push(sc);
+				});
+			});
+		});
+		chain = chain.then(function () {
+			var g = window[m.global];
+			if (!g || typeof g.mount !== 'function') throw new Error('module_missing ' + m.global);
+		});
+		moduleState[app.id] = chain;
+		chain.catch(function (err) {
+			delete moduleState[app.id];
+			added.forEach(function (n) { if (n.parentNode) n.parentNode.removeChild(n); });
+			if (window.console) console.error('[sonya-shell] ' + app.title + ' did not load: ' + (err && err.message));
+		});
+		return chain;
+	}
+
+	function iconSrc(name, light) { return ICON_DIR + name + (light ? '-light' : '') + '.webp?v=' + ICON_V; }
+
+	/* Blank src until needed: the panel and hidden workspaces shouldn't cost icon bytes on
+	   first paint. loadIcons() fills them in on idle / on demand, in the
+	   theme that's showing; a theme switch re-points the ones already loaded. */
+	function iconHTML(app, extraClass) {
+		return '<span class="sx-icon' + (extraClass ? ' ' + extraClass : '') + '" aria-hidden="true">' +
+			'<img src="' + BLANK + '" data-sx-icon="' + app.icon + '" data-sx-pending alt="" width="384" height="384" decoding="async" draggable="false"></span>';
+	}
+
+	function loadIcons(scope) {
+		if (!scope) return;
+		var light = isLight();
+		Array.prototype.forEach.call(scope.querySelectorAll('img[data-sx-pending]'), function (img) {
+			img.removeAttribute('data-sx-pending');
+			img.src = iconSrc(img.getAttribute('data-sx-icon'), light);
+		});
+	}
+
+	function retintIcons() {
+		var light = isLight();
+		Array.prototype.forEach.call(document.querySelectorAll('img[data-sx-icon]:not([data-sx-pending])'), function (img) {
+			var want = iconSrc(img.getAttribute('data-sx-icon'), light);
+			if (img.getAttribute('src') !== want) img.src = want;
+		});
+	}
+
+	// Exposed for tests and future apps (deep-link helpers, registry reads).
+	var api = { apps: SX_APPS, routeFromHash: routeFromHash, hrefFor: hrefFor, appById: appById, iconSrc: iconSrc,
+		isUnavailable: isUnavailable, features: FEATURES, UNAVAILABLE_LABEL: UNAVAILABLE_LABEL };
+	if (typeof window !== 'undefined') window.SonyaShell = api;
+	if (typeof document === 'undefined' || !document.documentElement || !document.createElement) return;
+
+	var script = document.currentScript;
+	var pageApp = (script && script.getAttribute('data-sx-page')) || 'cut';
+	var isHost = !!appById(pageApp) && appById(pageApp).kind === 'view';
+	var root = document.documentElement;
+	var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)');
+	var baseTitle = document.title;
+
+	var els = {};
+	var currentApp = isHost ? routeFromHash(location.hash) : pageApp;
+	var lastFocus = null;
+
+	/* An openable row on a shelf (Справочник, Pipeline): title, one line, chevron. */
+	function shelfLink(a, i) {
+		return '<li style="--sx-i:' + i + '"><a class="sx-shelf-item sx-app sx-app--row" data-sx-app="' + a.id + '" href="' + hrefFor(a, pageApp) + '">' +
+			iconHTML(a, 'sx-icon--sm') +
+			'<span class="sx-shelf-text"><span class="sx-shelf-name">' + a.title + '</span>' +
+			'<span class="sx-shelf-desc">' + a.desc + '</span></span>' +
+			'<i class="fa-solid fa-chevron-right sx-shelf-go" aria-hidden="true"></i></a></li>';
+	}
+
+	function build() {
+		// Frosted ("pebbled") glass for the library backdrop: low-frequency
+		// noise displaces the artwork, like looking at it through rippled
+		// glass. Referenced from CSS as filter:url(#sx-frost).
+		var defs = document.createElement('div');
+		defs.setAttribute('aria-hidden', 'true');
+		defs.innerHTML = '<svg width="0" height="0" style="position:absolute" focusable="false">' +
+			'<filter id="sx-frost" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">' +
+			// Blur the artwork first, then ripple it: a soft image behind a
+			// crisp pebbled surface.
+			'<feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b"/>' +
+			'<feTurbulence type="fractalNoise" baseFrequency="0.045 0.06" numOctaves="3" seed="11" result="n"/>' +
+			'<feDisplacementMap in="b" in2="n" scale="16" xChannelSelector="R" yChannelSelector="G"/>' +
+			'</filter>' +
+			// Finer, shallower ripple for the light artwork: its smooth
+			// silver waves would turn into jagged "cracks" under the deep one.
+			'<filter id="sx-frost-fine" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">' +
+			'<feGaussianBlur in="SourceGraphic" stdDeviation="7" result="b"/>' +
+			'<feTurbulence type="fractalNoise" baseFrequency="0.14 0.17" numOctaves="2" seed="5" result="n"/>' +
+			'<feDisplacementMap in="b" in2="n" scale="6" xChannelSelector="R" yChannelSelector="G"/>' +
+			'</filter></svg>';
+		document.body.appendChild(defs);
+
+		var toggle = document.createElement('button');
+		toggle.type = 'button';
+		toggle.className = 'sx-toggle';
+		toggle.setAttribute('aria-label', 'Открыть SONYA App Library');
+		toggle.setAttribute('aria-expanded', 'false');
+		toggle.setAttribute('aria-controls', 'sx-library');
+		toggle.innerHTML =
+			'<svg viewBox="0 0 18 18" aria-hidden="true" focusable="false">' +
+			'<rect x="2" y="2" width="5.6" height="5.6" rx="1.9"/><rect x="10.4" y="2" width="5.6" height="5.6" rx="1.9"/>' +
+			'<rect x="2" y="10.4" width="5.6" height="5.6" rx="1.9"/><rect x="10.4" y="10.4" width="5.6" height="5.6" rx="1.9" class="sx-toggle-hot"/></svg>';
+
+		var scrim = document.createElement('div');
+		scrim.className = 'sx-scrim';
+		scrim.setAttribute('aria-hidden', 'true');
+
+		var apps = SX_APPS.filter(function (a) { return a.group === 'apps'; });
+		var lib = SX_APPS.filter(function (a) { return a.group === 'library'; });
+		var svc = SX_APPS.filter(function (a) { return a.group === 'service'; });
+
+		var panel = document.createElement('aside');
+		panel.className = 'sx-library';
+		panel.id = 'sx-library';
+		panel.setAttribute('aria-label', 'SONYA App Library');
+		panel.setAttribute('inert', '');
+		panel.innerHTML =
+			'<div class="sx-lib-sheen" aria-hidden="true"></div>' +
+			'<header class="sx-lib-head">' +
+				'<span class="sx-lib-mark">SONYA</span>' +
+				'<button type="button" class="sx-lib-close" aria-label="Закрыть App Library">' +
+					'<svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 4l8 8M12 4l-8 8"/></svg>' +
+				'</button>' +
+			'</header>' +
+			'<div class="sx-lib-scroll">' +
+				'<h2 class="sx-lib-label" id="sx-g-apps">Приложения</h2>' +
+				'<ul class="sx-grid" aria-labelledby="sx-g-apps">' +
+					apps.map(function (a, i) {
+						// Switched off: an inert, labelled tile — no href, so it can't be
+						// opened, middle-clicked or dragged to a new tab.
+						if (isUnavailable(a)) {
+							return '<li style="--sx-i:' + i + '"><button type="button" class="sx-app is-unavailable" data-sx-app="' + a.id + '" aria-disabled="true">' +
+								iconHTML(a) + '<span class="sx-app-name">' + a.name + '</span>' +
+								'<span class="sx-app-note">' + UNAVAILABLE_LABEL + '</span></button></li>';
+						}
+						return '<li style="--sx-i:' + i + '"><a class="sx-app" data-sx-app="' + a.id + '" href="' + hrefFor(a, pageApp) + '">' +
+							iconHTML(a) + '<span class="sx-app-name">' + a.name + '</span><span class="sx-app-dot" aria-hidden="true"></span></a></li>';
+					}).join('') +
+				'</ul>' +
+				'<h2 class="sx-lib-label" id="sx-g-lib">Библиотека</h2>' +
+				'<ul class="sx-shelf" aria-labelledby="sx-g-lib">' +
+					lib.map(function (a, i) {
+						if (a.kind === 'view') return shelfLink(a, apps.length + i);
+						return '<li style="--sx-i:' + (apps.length + i) + '"><button type="button" class="sx-shelf-item" data-sx-app="' + a.id + '" aria-disabled="true">' +
+							iconHTML(a, 'sx-icon--sm') +
+							'<span class="sx-shelf-name">' + a.name + '</span>' +
+							'<span class="sx-soon">Скоро</span></button></li>';
+					}).join('') +
+				'</ul>' +
+				(svc.length ? '<h2 class="sx-lib-label" id="sx-g-svc">Для бизнеса</h2>' +
+				'<ul class="sx-shelf sx-shelf--service" aria-labelledby="sx-g-svc">' +
+					svc.map(function (a, i) { return shelfLink(a, apps.length + lib.length + i); }).join('') +
+				'</ul>' : '') +
+			'</div>';
+
+		document.body.appendChild(scrim);
+		document.body.appendChild(panel);
+		document.body.appendChild(toggle);
+
+		els.toggle = toggle;
+		els.scrim = scrim;
+		els.panel = panel;
+		els.close = panel.querySelector('.sx-lib-close');
+		els.tiles = Array.prototype.slice.call(panel.querySelectorAll('.sx-app'));
+		els.workspaces = {};
+
+		if (isHost) {
+			SX_APPS.forEach(function (a) {
+				if (a.kind !== 'view' || a.id === 'cut') return;
+				var ws = document.createElement('main');
+				ws.className = 'sx-workspace';
+				ws.setAttribute('data-sx-workspace', a.id);
+				ws.setAttribute('aria-label', a.title);
+				ws.hidden = true;
+				// Intentionally empty: Phase 1 only establishes the app frame
+				// (title bar + canvas). No controls, no API, no mock UI.
+				ws.innerHTML =
+					'<header class="sx-ws-bar">' + iconHTML(a, 'sx-icon--xs') +
+						'<h1 class="sx-ws-title" tabindex="-1"><span>SONYA</span> ' + a.name + '</h1></header>' +
+					'<div class="sx-ws-canvas" style="--sx-accent:' + a.accent + '">' + iconHTML(a, 'sx-icon--xl') + '</div>';
+				document.body.appendChild(ws);
+				els.workspaces[a.id] = ws;
+			});
+		}
+
+		bind();
+	}
+
+	function markActive() {
+		els.tiles.forEach(function (t) {
+			// A switched-off app is never shown as "the open one".
+			var on = t.getAttribute('data-sx-app') === currentApp && !isUnavailable(appById(currentApp));
+			t.classList.toggle('is-active', on);
+			if (on) t.setAttribute('aria-current', 'page');
+			else t.removeAttribute('aria-current');
+		});
+	}
+
+	function isOpen() { return root.classList.contains('sx-lib-open'); }
+
+	function openLibrary() {
+		if (isOpen()) return;
+		lastFocus = document.activeElement;
+		loadIcons(els.panel);
+		els.panel.removeAttribute('inert');
+		root.classList.add('sx-lib-open');
+		els.toggle.setAttribute('aria-expanded', 'true');
+		var active = els.panel.querySelector('.sx-app.is-active') || els.tiles[0];
+		// Focus after the panel starts moving so the ring doesn't flash at x=-100%.
+		setTimeout(function () { if (isOpen() && active) active.focus({ preventScroll: true }); }, 60);
+	}
+
+	function closeLibrary(restoreFocus) {
+		if (!isOpen()) return;
+		root.classList.remove('sx-lib-open');
+		els.toggle.setAttribute('aria-expanded', 'false');
+		els.panel.setAttribute('inert', '');
+		els.panel.style.transform = '';
+		if (restoreFocus !== false) (lastFocus && lastFocus.focus ? lastFocus : els.toggle).focus({ preventScroll: true });
+	}
+
+	function mountModule(id) {
+		var app = appById(id);
+		var ws = els.workspaces[id];
+		if (!app || !app.module || !ws || ws.getAttribute('data-sx-mounted')) return;
+		var canvas = ws.querySelector('.sx-ws-canvas');
+		if (isUnavailable(app)) {
+			// Never fetch or run the app's files while it is switched off.
+			ws.setAttribute('data-sx-mounted', 'unavailable');
+			canvas.classList.remove('is-loading');
+			canvas.innerHTML = '<div class="sx-ws-error sx-ws-unavailable" role="status">' +
+				'<p class="sx-ws-error-title">' + app.title + '</p>' +
+				'<p class="sx-ws-unavailable-tag">' + UNAVAILABLE_LABEL + '</p>' +
+				'<p class="sx-ws-error-text">Этот режим сейчас отключён. Остальные приложения SONYA работают как обычно.</p>' +
+				'<div class="sx-ws-error-actions"><button type="button" class="sx-ws-back sx-ws-to-cut">Открыть Cut</button></div></div>';
+			canvas.querySelector('.sx-ws-to-cut').addEventListener('click', function () { navigateTo(appById('cut')); });
+			return;
+		}
+		ws.setAttribute('data-sx-mounted', 'loading');
+		canvas.classList.add('is-loading');
+		loadModule(app).then(function () {
+			canvas.classList.remove('is-loading');
+			canvas.classList.add('is-app');
+			canvas.innerHTML = '';
+			window[app.module.global].mount(canvas);
+			ws.setAttribute('data-sx-mounted', 'yes');
+		}).catch(function () {
+			ws.removeAttribute('data-sx-mounted');
+			canvas.classList.remove('is-loading', 'is-app');
+			// Recoverable fallback: retry fresh, or go back to the apps.
+			canvas.innerHTML = '<div class="sx-ws-error" role="alert">' +
+				'<p class="sx-ws-error-title">' + app.title + ' сейчас не открылся</p>' +
+				'<p class="sx-ws-error-text">Проверьте соединение и попробуйте ещё раз.</p>' +
+				'<div class="sx-ws-error-actions"><button type="button" class="sx-ws-retry">Попробовать снова</button>' +
+				'<button type="button" class="sx-ws-back">Назад в приложения</button></div></div>';
+			canvas.querySelector('.sx-ws-retry').addEventListener('click', function () { moduleTry += 1; mountModule(id); });
+			canvas.querySelector('.sx-ws-back').addEventListener('click', function () { openLibrary(); });
+		});
+	}
+
+	function showView(id, animate) {
+		currentApp = id;
+		root.setAttribute('data-sx-app', id);
+		Object.keys(els.workspaces).forEach(function (k) { els.workspaces[k].hidden = k !== id; });
+		loadIcons(els.workspaces[id]);
+		mountModule(id);
+		if (isHost) document.title = id === 'cut' ? baseTitle : appById(id).title;
+		if (animate && !(reduceMotion && reduceMotion.matches)) {
+			root.classList.remove('sx-switching');
+			void root.offsetWidth; // restart the enter transition on rapid switches
+			root.classList.add('sx-switching');
+			clearTimeout(showView._t);
+			showView._t = setTimeout(function () { root.classList.remove('sx-switching'); }, 420);
+		}
+		markActive();
+	}
+
+	function navigateTo(app) {
+		if (isHost && app.kind === 'view') {
+			if (app.id === 'cut') {
+				// Clean URL for the default app; keep ?paywall=1 etc. intact.
+				if (location.hash) history.pushState(null, '', location.pathname + location.search);
+			} else if (location.hash !== '#/' + app.id) {
+				history.pushState(null, '', location.pathname + location.search + '#/' + app.id);
+			}
+			showView(app.id, app.id !== currentApp);
+			closeLibrary(false);
+			// Move focus into the app that just opened (its title), or back to
+			// the library control for Cut, so keyboard users land somewhere real.
+			var ws = els.workspaces[app.id];
+			(ws ? ws.querySelector('.sx-ws-title') : els.toggle).focus({ preventScroll: true });
+			return true;
+		}
+		return false;
+	}
+
+	function trapTab(e) {
+		var f = Array.prototype.slice.call(els.panel.querySelectorAll('a[href], button:not([disabled])'));
+		if (!f.length) return;
+		var first = f[0], last = f[f.length - 1];
+		if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+		else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+	}
+
+	function bind() {
+		els.toggle.addEventListener('click', openLibrary);
+		// Start icon requests on press, a touch ahead of the click (no-op once warmed).
+		els.toggle.addEventListener('pointerdown', function () { loadIcons(els.panel); }, { passive: true });
+		els.close.addEventListener('click', function () { closeLibrary(); });
+		els.scrim.addEventListener('click', function () { closeLibrary(); });
+
+		document.addEventListener('keydown', function (e) {
+			if (!isOpen()) return;
+			if (e.key === 'Escape') { e.preventDefault(); closeLibrary(); }
+			else if (e.key === 'Tab') trapTab(e);
+		});
+
+		els.tiles.forEach(function (tile) {
+			var app = appById(tile.getAttribute('data-sx-app'));
+			tile.addEventListener('click', function (e) {
+				if (isUnavailable(app)) {
+					// Acknowledge the press, go nowhere.
+					e.preventDefault();
+					tile.classList.remove('is-nudged');
+					void tile.offsetWidth;
+					tile.classList.add('is-nudged');
+					return;
+				}
+				if (e.metaKey || e.ctrlKey || e.shiftKey || e.button === 1) return; // let new-tab clicks through
+				if (app.id === currentApp) { e.preventDefault(); closeLibrary(); return; }
+				if (navigateTo(app)) e.preventDefault();
+			});
+		});
+
+		// Unavailable entries: acknowledge the press without navigating.
+		Array.prototype.forEach.call(els.panel.querySelectorAll('.sx-shelf-item[aria-disabled="true"]'), function (b) {
+			b.addEventListener('click', function () {
+				b.classList.remove('is-nudged');
+				void b.offsetWidth;
+				b.classList.add('is-nudged');
+			});
+		});
+
+		if (isHost) {
+			window.addEventListener('hashchange', function () {
+				var id = routeFromHash(location.hash);
+				if (id !== currentApp) showView(id, true);
+			});
+			window.addEventListener('popstate', function () {
+				var id = routeFromHash(location.hash);
+				if (id !== currentApp) showView(id, true);
+			});
+		}
+
+		bindSwipe();
+	}
+
+	/* Touch: drag the open panel left to dismiss (distance or a quick flick). */
+	function bindSwipe() {
+		var startX = 0, startY = 0, startT = 0, dx = 0, tracking = false, locked = false;
+		els.panel.addEventListener('touchstart', function (e) {
+			if (e.touches.length !== 1) return;
+			tracking = true; locked = false; dx = 0;
+			startX = e.touches[0].clientX; startY = e.touches[0].clientY; startT = Date.now();
+		}, { passive: true });
+		els.panel.addEventListener('touchmove', function (e) {
+			if (!tracking) return;
+			var x = e.touches[0].clientX - startX, y = e.touches[0].clientY - startY;
+			if (!locked) {
+				if (Math.abs(x) < 8 && Math.abs(y) < 8) return;
+				if (Math.abs(y) > Math.abs(x)) { tracking = false; return; } // vertical scroll wins
+				locked = true;
+				root.classList.add('sx-dragging');
+			}
+			dx = x < 0 ? x : x * 0.15; // friction past the open edge
+			els.panel.style.transform = 'translate3d(' + dx + 'px,0,0)';
+		}, { passive: true });
+		els.panel.addEventListener('touchend', function () {
+			if (!tracking) return;
+			tracking = false;
+			root.classList.remove('sx-dragging');
+			var velocity = Math.abs(dx) / Math.max(1, Date.now() - startT);
+			els.panel.style.transform = '';
+			if (locked && dx < 0 && (dx < -els.panel.offsetWidth * 0.3 || velocity > 0.11)) closeLibrary();
+		});
+	}
+
+	/* Cut's "Cinematic trailer" hero option (index.html #btn-trailer). The
+	   markup ships already locked (fail-closed); this re-applies the flag so
+	   that turning Trailer back on is a one-line change here, not an HTML edit.
+	   A disabled <button> never fires `click`, so app.js's handler — which sets
+	   clipType 'filmbreaker' — cannot run. */
+	function syncCutTrailerGate() {
+		var btn = document.getElementById('btn-trailer');
+		if (!btn) return;
+		var off = !FEATURES.trailer;
+		btn.disabled = off;
+		btn.setAttribute('aria-disabled', off ? 'true' : 'false');
+		btn.classList.toggle('is-unavailable', off);
+		var eyebrow = btn.querySelector('.trailer-eyebrow');
+		if (eyebrow) {
+			if (!eyebrow.hasAttribute('data-sx-label')) eyebrow.setAttribute('data-sx-label', eyebrow.textContent);
+			eyebrow.textContent = off ? UNAVAILABLE_LABEL : 'Featured';
+		}
+		if (off) btn.classList.remove('selected');
+	}
+
+	function start() {
+		root.classList.add('sx-shell');
+		syncCutTrailerGate();
+		root.setAttribute('data-sx-page', pageApp);
+		build();
+		showView(currentApp, false);
+		// Enable transitions only after the first paint so a deep link to
+		// #/trailer doesn't animate (or flash Cut) on load.
+		requestAnimationFrame(function () { requestAnimationFrame(function () { root.classList.add('sx-ready'); }); });
+		// Warm the library icons once the page has settled, so the first open
+		// shows finished artwork rather than tiles filling in.
+		if (window.MutationObserver) {
+			new MutationObserver(retintIcons).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+		}
+		var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 1500); };
+		window.addEventListener('load', function () { idle(function () { loadIcons(els.panel); }); });
+	}
+
+	// Apply the route class before first paint so #/gen never flashes Cut.
+	root.setAttribute('data-sx-app', currentApp);
+	if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+	else start();
+})();

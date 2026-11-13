@@ -118,6 +118,8 @@ _CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".json": "application/json",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
     ".srt": "text/plain",
     ".vtt": "text/vtt",
     ".ass": "text/x-ssa",
@@ -125,6 +127,8 @@ _CONTENT_TYPES = {
 _FILE_TYPES = {
     ".mp4": "output",
     ".mov": "output",
+    ".png": "output",       # sonya_gen (images)
+    ".jpg": "output",
     ".json": "enrichment_json",
     ".srt": "subtitle",
     ".vtt": "subtitle",
@@ -643,7 +647,10 @@ def process_job(job: dict, worker_id: str) -> None:
         input_ext  = Path(s3_input).suffix or ".mp4"
         input_path = tmp_dir / f"input{input_ext}"
         sf = params.get("source_fetch")
-        if isinstance(sf, dict) and sf.get("url"):
+        if mode == "sonya_gen":
+            input_path = tmp_dir / "no_input"      # text -> image: there is no input video
+            input_path.touch()
+        elif isinstance(sf, dict) and sf.get("url"):
             # The VPS could not fetch this link (YouTube etc.): download here, upload to s3_input_key, continue as usual.
             from scripts.source_fetch import SourceFetchError, fetch_source
             try:
@@ -657,7 +664,7 @@ def process_job(job: dict, worker_id: str) -> None:
                 _fail(job_id, "SOURCE_DOWNLOAD_FAILED", "Не удалось скачать видео по ссылке. Попробуйте позже.", retry=True)
                 return
         try:
-            if not (isinstance(sf, dict) and sf.get("url")):
+            if mode != "sonya_gen" and not (isinstance(sf, dict) and sf.get("url")):
                 download_file(s3_input, input_path)
             logger.info(
                 "[worker] input downloaded: %s (%d bytes)",
@@ -747,6 +754,9 @@ def process_job(job: dict, worker_id: str) -> None:
                     crop_hints=params.get("streamer_crop_hints"),
                 )
                 result = {"clips": [out_path], "mode": "streamer", "warnings": []}
+            elif mode == "sonya_gen":
+                runner = get_runner(mode)
+                result = runner(input_video_path="", output_dir=str(output_dir), params=params, progress_callback=_progress)
             else:
                 # Desktop ingest: VFR / rotated / non-H.264 sources are normalized before the mode
                 # (scripts/shared/source_normalize.py; virality + beep only)

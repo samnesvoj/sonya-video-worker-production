@@ -1,0 +1,1505 @@
+/**
+ * SONYA Mini App - Main JavaScript
+ *
+ * Shared, unmodified, by both entry points (/ and /miniapp/) — this file
+ * must stay free of any dependency on the Telegram client or its SDK.
+ * That integration lives entirely in a separate runtime bridge file, only
+ * ever loaded by the Telegram-specific entry point.
+ */
+
+// User profile data
+const userProfile = {
+        id: null,
+        name: 'User',
+        username: '',
+        avatar: '',
+        subscription: 'free', // free, pro
+        role: null // admin_developer, admin_ceo, or null
+};
+
+// Admin users
+const ADMINS = {
+        '1750740727': { role: 'DEVELOPER', label: 'Admin (Developer)' },
+        '1027620514': { role: 'CEO', label: 'Admin (CEO)' }
+};
+
+// Subscription plans
+// NOTE: names/prices/limits of paid plans live in auth.js (SONYA_PRICING);
+// here `pro` is only the generic "paid subscription active" status.
+const SUBSCRIPTION_PLANS = {
+        free: {
+                name: 'Free Plan',
+                icon: '⭐',
+                limits: [
+                        { label: 'Бесплатных генераций', value: '1 на аккаунт' }
+                ]
+        },
+        pro: {
+                name: 'Подписка SONYA',
+                icon: '⚡',
+                limits: [
+                        { label: 'Лимиты', value: 'по выбранному тарифу' },
+                        { label: 'Приоритетная обработка', value: '✓' },
+                        { label: 'Автопродление', value: 'нет' }
+                ]
+        }
+};
+
+// Legacy profile loader (URL-param path, demo fallback) — its Telegram-SDK
+// branches were removed since this file may not depend on the Telegram
+// client object at all, but it is still, same as before this Telegram/
+// Mini-App split, never called from init(). Left as dead code rather than
+// wired back up or deleted: fixing/repurposing it is out of scope here,
+// and calling it unconditionally would invent a fake "Demo User" profile
+// on production.
+function loadUserProfile() {
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlUserId = urlParams.get('tg_user_id');
+
+        if (urlUserId) {
+                userProfile.id = urlUserId;
+                userProfile.name = urlParams.get('tg_first_name') || 'User';
+
+                const lastName = urlParams.get('tg_last_name');
+                if (lastName) {
+                        userProfile.name += ' ' + lastName;
+                }
+
+                const username = urlParams.get('tg_username');
+                if (username) {
+                        userProfile.username = '@' + username;
+                }
+
+                userProfile.avatar = generateAvatarUrl(userProfile.name);
+
+                if (userProfile.id && ADMINS[userProfile.id]) {
+                        userProfile.role = ADMINS[userProfile.id].role;
+                        userProfile.subscription = 'pro';
+                }
+
+                updateProfileAvatar();
+                return;
+        }
+
+        userProfile.id = 'demo';
+        userProfile.name = 'Demo User';
+        userProfile.username = '@demo';
+        userProfile.avatar = generateAvatarUrl('Demo User');
+        updateProfileAvatar();
+}
+
+// Generate avatar URL from initials
+function generateAvatarUrl(name) {
+        const initials = name.split(' ').map(n => n[0]).join('').toUpperCase().substring(0, 2);
+        // Красивые градиентные цвета для аватарок
+        const colors = [
+                'FF6B9D', // pink
+                '4ECDC4', // teal
+                '95E1D3', // mint
+                'F38181', // coral
+                'AA96DA', // purple
+                'FCBAD3', // light pink
+        ];
+        // Выбираем цвет на основе первой буквы имени
+        const colorIndex = name.charCodeAt(0) % colors.length;
+        const bgColor = colors[colorIndex];
+        
+        return `https://ui-avatars.com/api/?name=${encodeURIComponent(initials)}&background=${bgColor}&color=fff&size=128&bold=true&font-size=0.5`;
+}
+
+// Update profile avatar in UI
+function updateProfileAvatar() {
+        const avatarElements = [
+                document.getElementById('profile-avatar'),
+                document.getElementById('profile-modal-avatar')
+        ];
+
+        avatarElements.forEach(el => {
+                if (el) {
+                        el.src = userProfile.avatar;
+                        el.alt = userProfile.name;
+                }
+        });
+
+        // If profile failed to load, add visual indicator
+        if (userProfile.id === 'unknown') {
+                const profileBtn = document.getElementById('profile-btn');
+                if (profileBtn) {
+                        profileBtn.style.borderColor = '#ff4444';
+                        profileBtn.style.boxShadow = '0 0 10px rgba(255, 68, 68, 0.5)';
+                }
+        }
+}
+
+// =====================================================
+// Theme Management
+// =====================================================
+
+function initTheme() {
+        let savedTheme = localStorage.getItem('theme') || 'light';
+
+        document.documentElement.setAttribute('data-theme', savedTheme);
+        switchCinemaVideo(savedTheme);
+}
+
+function switchCinemaVideo(theme) {
+        const video = document.getElementById('cinema-video');
+        const source = document.getElementById('cinema-video-source');
+        if (!video || !source) return;
+        const src = theme === 'light'
+                ? (video.dataset.lightSrc || 'https://static.sonya.group/assets/video/bg-light-v1.mp4')
+                : (video.dataset.darkSrc  || "https://static.sonya.group/assets/video/bg-dark-v1.mp4");
+        if (source.getAttribute('src') !== src) {
+                source.setAttribute('src', src);
+                video.load();
+                video.play().catch(() => {});
+        }
+}
+
+function toggleTheme() {
+        const currentTheme = document.documentElement.getAttribute('data-theme');
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        
+        document.documentElement.setAttribute('data-theme', newTheme);
+        localStorage.setItem('theme', newTheme);
+
+        switchCinemaVideo(newTheme);
+}
+
+// =====================================================
+// State Management
+// =====================================================
+
+const appState = {
+        currentPage: 'source',
+        mode: 'url', // 'url' or 'upload'
+        videoUrl: '',
+        uploadedFile: null,
+        brand: 'sonya', 
+        clipType: '', // viral, educational, storytelling, hooks, filmbreaker
+        settings: {
+                subtitleStyle: 'viral', // viral, minimal, basic
+                voiceoverEnabled: false,
+                voiceType: 'male-1',
+                translation: 'none'
+        }
+};
+
+// =====================================================
+// DOM Elements
+// =====================================================
+
+const elements = {
+        // Top bar & menu
+        mainTagline: document.getElementById('main-tagline'),
+        menuToggle: document.getElementById('menu-toggle'),
+        menuOverlay: document.getElementById('menu-overlay'),
+        menuClose: document.getElementById('menu-close'),
+        menuItems: document.querySelectorAll('.menu-item'),
+        
+        // Theme toggle
+        themeToggle: document.getElementById('theme-toggle'),
+        
+        // Pages
+        pages: {
+                source: document.getElementById('page-source'),
+                type: document.getElementById('page-type'),
+                customize: document.getElementById('page-customize'),
+                processing: document.getElementById('page-processing'),
+                result: document.getElementById('page-result')
+        },
+
+        // Mode toggle
+        modeBtns: document.querySelectorAll('.mode-btn'),
+        modeUrl: document.getElementById('mode-url'),
+        modeUpload: document.getElementById('mode-upload'),
+
+        // URL input
+        videoUrlInput: document.getElementById('video-url'),
+
+        // File upload
+        uploadZone: document.getElementById('upload-zone'),
+        fileInput: document.getElementById('file-input'),
+        fileInfo: document.getElementById('file-info'),
+        fileName: document.getElementById('file-name'),
+        removeFileBtn: document.getElementById('remove-file'),
+
+        // Navigation buttons
+        btnNext1: document.getElementById('btn-next-1'),
+        btnNext2: document.getElementById('btn-next-2'),
+        btnBack2: document.getElementById('btn-back-2'),
+        btnBack3: document.getElementById('btn-back-3'),
+        btnGenerate: document.getElementById('btn-generate'),
+        btnNewProject: document.getElementById('btn-new-project'),
+        btnTrailer: document.getElementById('btn-trailer'),
+
+        // Clip type
+        clipTypeInputs: document.querySelectorAll('input[name="clip-type"]'),
+
+        // Customization
+        subtitlesToggle: document.getElementById('subtitles-toggle'),
+        subtitleStyles: document.getElementById('subtitle-styles'),
+        subtitleStyleInputs: document.querySelectorAll('input[name="subtitle-style"]'),
+        voiceoverToggle: document.getElementById('voiceover-toggle'),
+        voiceOptions: document.getElementById('voice-options'),
+        voiceSelect: document.getElementById('voice-select'),
+        languageInputs: document.querySelectorAll('input[name="language"]'),
+
+        // Processing
+        processingStatus: document.getElementById('processing-status'),
+        progressBar: document.getElementById('progress-bar'),
+
+        // Result
+        resultHeadline: document.getElementById('result-headline'),
+        resultSub: document.getElementById('result-sub'),
+        resultTags: document.getElementById('result-tags'),
+        resultClipGrid: document.getElementById('result-clip-grid'),
+        resultActions: document.getElementById('result-actions')
+};
+
+// =====================================================
+// Page Navigation
+// =====================================================
+
+function showPage(pageName) {
+        // Hide all pages
+        Object.values(elements.pages).forEach(page => {
+                page.classList.remove('active');
+        });
+
+        // Show target page
+        if (elements.pages[pageName]) {
+                elements.pages[pageName].classList.add('active');
+                appState.currentPage = pageName;
+        }
+}
+
+// =====================================================
+// Mode Toggle (URL / Upload)
+// =====================================================
+
+function setMode(mode) {
+        appState.mode = mode;
+
+        // Update buttons
+        elements.modeBtns.forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.mode === mode);
+        });
+
+        // Show/hide input modes
+        elements.modeUrl.classList.toggle('active', mode === 'url');
+        elements.modeUpload.classList.toggle('active', mode === 'upload');
+
+        // Update next button state
+        updateNextButton1State();
+}
+
+// =====================================================
+// URL Validation
+// =====================================================
+
+// Mirrors the platforms scripts/url_ingest.py::detect_platform() actually
+// accepts server-side (YouTube / VK / Twitch via yt-dlp, or a direct link
+// to a video file) -- this is a client-side pre-filter for UX (enabling
+// "Продолжить", swapping the recognized-platform icon), not the source of
+// truth. The backend re-validates and re-detects the platform itself on
+// submit; a URL that slips past this check simply gets a real error from
+// the server, same as any other rejected input.
+const DIRECT_VIDEO_EXT_RE = /\.(mp4|mov|avi|mkv|webm|mpeg|mpg|3gp|m3u8)(\?.*)?$/i;
+
+function detectPlatform(url) {
+        if (!url) return 'unknown';
+        let parsed;
+        try {
+                parsed = new URL(url.trim());
+        } catch (_) {
+                return 'unknown';
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return 'unknown';
+
+        const host = parsed.hostname.toLowerCase();
+        if (host === 'youtube.com' || host === 'www.youtube.com' || host === 'm.youtube.com' ||
+                host === 'music.youtube.com' || host === 'youtu.be' || host.endsWith('.youtube.com')) {
+                return 'youtube';
+        }
+        if (host === 'vk.com' || host === 'www.vk.com' || host === 'm.vk.com' ||
+                host === 'vkvideo.ru' || host === 'www.vkvideo.ru' ||
+                host.endsWith('.vk.com') || host.endsWith('.vkvideo.ru')) {
+                return 'vk';
+        }
+        if (host === 'twitch.tv' || host === 'www.twitch.tv' || host === 'm.twitch.tv' ||
+                host === 'clips.twitch.tv' || host.endsWith('.twitch.tv')) {
+                return 'twitch';
+        }
+        if (DIRECT_VIDEO_EXT_RE.test(parsed.pathname)) {
+                return 'direct';
+        }
+        return 'unknown';
+}
+
+function isValidVideoUrl(url) {
+        if (!url) return false;
+        return detectPlatform(url) !== 'unknown';
+}
+
+// =====================================================
+// File Upload Handling
+// =====================================================
+
+function handleFileSelect(file) {
+        if (!file) return;
+
+        // Check if it's a video file
+        if (!file.type.startsWith('video/')) {
+                alert('Пожалуйста, выберите видео файл');
+                return;
+        }
+
+        appState.uploadedFile = file;
+
+        // Show file info
+        elements.fileName.textContent = file.name;
+        elements.fileInfo.classList.remove('hidden');
+        elements.uploadZone.style.display = 'none';
+
+        updateNextButton1State();
+}
+
+function removeFile() {
+        appState.uploadedFile = null;
+        elements.fileInput.value = '';
+        elements.fileInfo.classList.add('hidden');
+        elements.uploadZone.style.display = '';
+        updateNextButton1State();
+}
+
+// =====================================================
+// Button State Management
+// =====================================================
+
+// Swaps the input's leading icon to the recognized platform's own brand
+// icon (same Font Awesome set already used by .hero2-sources below the
+// input) so a pasted link visibly registers as "recognized" -- no new
+// visual element, just reusing an icon already in the page's design.
+const URL_PLATFORM_ICON_CLASS = {
+        youtube: 'fa-brands fa-youtube',
+        vk:      'fa-brands fa-vk',
+        twitch:  'fa-brands fa-twitch',
+        direct:  'fa-solid fa-file-video',
+        unknown: 'fa-solid fa-link'
+};
+
+function updateUrlPlatformIcon() {
+        const icon = document.querySelector('#mode-url .hero2-input-icon');
+        if (!icon) return;
+        const platform = elements.videoUrlInput.value.trim()
+                ? detectPlatform(elements.videoUrlInput.value)
+                : 'unknown';
+        icon.className = URL_PLATFORM_ICON_CLASS[platform] + ' hero2-input-icon';
+}
+
+function updateNextButton1State() {
+        let isValid = false;
+
+        if (appState.mode === 'url') {
+                isValid = isValidVideoUrl(elements.videoUrlInput.value);
+                updateUrlPlatformIcon();
+        } else {
+                isValid = appState.uploadedFile !== null;
+        }
+
+        elements.btnNext1.disabled = !isValid;
+}
+
+function updateNextButton2State() {
+        const selected = document.querySelector('input[name="clip-type"]:checked');
+        const trailerSelected = appState.clipType === 'filmbreaker';
+        elements.btnNext2.disabled = !selected && !trailerSelected;
+}
+
+// =====================================================
+// Processing
+// =====================================================
+// NOTE: the actual progress UI is driven by the real backend-polling
+// implementation at the bottom of this file (SONYA_REAL_POLLING_PATCH_V2),
+// which overrides `simulateProcessing` as soon as this script loads.
+
+// =====================================================
+// Result rendering — driven entirely by what a generation
+// actually produced (clipType + real clip URL(s)). No invented
+// scores, no random counts: a field we don't have is a field
+// we don't show, not a placeholder dash.
+//
+// Every node here is built via createElement/textContent/href
+// property assignment — never innerHTML with anything derived
+// from a clip (url, in particular, only ever reaches the DOM
+// through isSafeResultUrl() + a direct .href/.src assignment,
+// the same pattern showRealResult() below already uses).
+// =====================================================
+
+// Backend-controlled URL (S3 presigned result link) must never be trusted
+// as-is: only an absolute https: URL, or a same-origin URL (any scheme
+// the page itself is already served over), is allowed. Rejects
+// javascript:, data:, vbscript:, and any malformed value -- those get an
+// opaque/null URL.origin from the URL constructor, which can never equal
+// window.location.origin, so both branches below fail closed.
+function isSafeResultUrl(rawUrl) {
+        if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+        let parsed;
+        try {
+                parsed = new URL(rawUrl, window.location.href);
+        } catch (_) {
+                return false;
+        }
+        if (parsed.protocol === 'https:') return true;
+        if (parsed.origin === window.location.origin) return true;
+        return false;
+}
+
+const RESULT_MODE_LABELS = {
+        viral: 'Вирусные клипы',
+        educational: 'Образовательные клипы',
+        storytelling: 'Сторителлинг',
+        hooks: 'Хуки',
+        streamer: 'Клипы стримера',
+        filmbreaker: 'Кинематографичный трейлер'
+};
+
+function resultModeLabel(clipType) {
+        return RESULT_MODE_LABELS[clipType] || 'Короткие клипы';
+}
+
+function resultDefaultAspect(clipType) {
+        return clipType === 'filmbreaker' ? '16:9' : '9:16';
+}
+
+function formatClipDuration(seconds) {
+        if (!Number.isFinite(seconds) || seconds < 0) return null;
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        return m + ':' + String(s).padStart(2, '0');
+}
+
+function pluralizeClips(n) {
+        const mod10 = n % 10, mod100 = n % 100;
+        if (mod10 === 1 && mod100 !== 11) return 'клип';
+        if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return 'клипа';
+        return 'клипов';
+}
+
+function renderResultHeadline({ clipType, count }) {
+        if (!elements.resultHeadline || !elements.resultSub) return;
+        const modeLabel = resultModeLabel(clipType);
+
+        if (count <= 1) {
+                elements.resultHeadline.textContent = clipType === 'filmbreaker' ? 'Трейлер готов' : 'Клип готов';
+                elements.resultSub.textContent = modeLabel + ' · готов к экспорту';
+        } else {
+                elements.resultHeadline.textContent = 'Готово: ' + count + ' ' + pluralizeClips(count);
+                elements.resultSub.textContent = modeLabel + ' · готовы к экспорту';
+        }
+}
+
+function renderResultTags({ clipType, aspect, count }) {
+        if (!elements.resultTags) return;
+        const tags = [
+                { icon: 'fa-clapperboard', label: resultModeLabel(clipType) },
+                { icon: 'fa-expand', label: aspect || resultDefaultAspect(clipType), soft: true }
+        ];
+        if (count > 1) tags.push({ icon: 'fa-layer-group', label: count + ' ' + pluralizeClips(count), soft: true });
+
+        while (elements.resultTags.firstChild) elements.resultTags.removeChild(elements.resultTags.firstChild);
+        tags.forEach(t => {
+                const span = document.createElement('span');
+                span.className = 'score-badge' + (t.soft ? ' score-badge--soft' : '');
+                const icon = document.createElement('i');
+                icon.className = 'fa-solid ' + t.icon;
+                span.appendChild(icon);
+                span.appendChild(document.createTextNode(' ' + t.label));
+                elements.resultTags.appendChild(span);
+        });
+}
+
+// clip: { url, label, duration } — url is validated here via
+// isSafeResultUrl() before it ever touches an .href, exactly like
+// showRealResult() does for the single-clip legacy box.
+function renderResultClips(clips) {
+        if (!elements.resultClipGrid) return;
+        const grid = elements.resultClipGrid;
+        grid.dataset.count = String(clips.length);
+        while (grid.firstChild) grid.removeChild(grid.firstChild);
+
+        clips.forEach((clip, i) => {
+                const safeUrl = isSafeResultUrl(clip.url) ? clip.url : '';
+                const duration = formatClipDuration(clip.duration);
+                const label = clip.label || ('Клип ' + (i + 1));
+
+                const card = document.createElement('div');
+                card.className = 'result-clip-card';
+
+                const thumb = document.createElement(safeUrl ? 'a' : 'div');
+                thumb.className = 'result-clip-thumb';
+                if (safeUrl) {
+                        thumb.href = safeUrl;
+                        thumb.target = '_blank';
+                        thumb.rel = 'noopener';
+                }
+                // Real frame from the generated clip as the thumbnail background,
+                // instead of the plain dark-gradient placeholder. `#t=0.1` is a
+                // standard media-fragment seek: with preload="metadata" this makes
+                // supporting browsers (Chrome/Safari/Firefox) decode and paint that
+                // one frame without downloading/playing the whole clip. muted +
+                // playsInline only matter if something ever calls .play() on it —
+                // this element never does; it's decorative, the real "watch" action
+                // is the surrounding <a>/play button. Falls back to the CSS
+                // gradient (see .result-clip-thumb) if the browser never paints a
+                // frame at all (preload="metadata" gives no such guarantee).
+                if (safeUrl) {
+                        const video = document.createElement('video');
+                        video.className = 'result-clip-thumb-video';
+                        video.muted = true;
+                        video.playsInline = true;
+                        video.preload = 'metadata';
+                        video.setAttribute('aria-hidden', 'true');
+                        video.tabIndex = -1;
+                        video.src = safeUrl + '#t=0.1';
+                        thumb.appendChild(video);
+                }
+                const glow = document.createElement('div');
+                glow.className = 'result-clip-thumb-glow';
+                const fx = document.createElement('div');
+                fx.className = 'result-clip-glass-fx';
+                fx.setAttribute('aria-hidden', 'true');
+                const play = document.createElement('span');
+                play.className = 'result-clip-play';
+                const playIcon = document.createElement('i');
+                playIcon.className = 'fa-solid fa-play';
+                play.appendChild(playIcon);
+                thumb.appendChild(glow);
+                thumb.appendChild(fx);
+                thumb.appendChild(play);
+                if (duration) {
+                        const durEl = document.createElement('span');
+                        durEl.className = 'result-clip-duration';
+                        durEl.textContent = duration;
+                        thumb.appendChild(durEl);
+                }
+
+                const body = document.createElement('div');
+                body.className = 'result-clip-body';
+                const labelEl = document.createElement('span');
+                labelEl.className = 'result-clip-label';
+                labelEl.textContent = label;
+                body.appendChild(labelEl);
+                if (safeUrl) {
+                        const dl = document.createElement('a');
+                        dl.className = 'result-clip-download';
+                        // attachment-presigned link: downloads the file, the site stays open
+                        // (iPhone/Telegram: new tab, never replaces the page with the video)
+                        dl.href = isSafeResultUrl(clip.dlUrl) ? clip.dlUrl : safeUrl;
+                        dl.target = '_blank';
+                        dl.rel = 'noopener';
+                        dl.setAttribute('download', 'sonya_clip_' + (i + 1) + '.mp4');
+                        dl.setAttribute('aria-label', 'Скачать ' + label);
+                        const dlIcon = document.createElement('i');
+                        dlIcon.className = 'fa-solid fa-download';
+                        dl.appendChild(dlIcon);
+                        body.appendChild(dl);
+                }
+
+                card.appendChild(thumb);
+                card.appendChild(body);
+                grid.appendChild(card);
+        });
+}
+
+function renderResultActions({ clips, archiveUrl }) {
+        if (!elements.resultActions) return;
+        while (elements.resultActions.firstChild) elements.resultActions.removeChild(elements.resultActions.firstChild);
+
+        // Only ever show a bulk-download affordance when we actually have
+        // something real (and safe) to point it at — a single validated
+        // clip URL, or a genuine, validated archive URL from the backend.
+        // Never a dead/simulated button.
+        const safeArchiveUrl = isSafeResultUrl(archiveUrl) ? archiveUrl : '';
+        const safeSingleUrl = clips.length === 1 && isSafeResultUrl(clips[0].url)
+                ? (isSafeResultUrl(clips[0].dlUrl) ? clips[0].dlUrl : clips[0].url) : '';
+
+        let href = '', iconClass = '', label = '';
+        if (safeArchiveUrl && clips.length > 1) {
+                href = safeArchiveUrl; iconClass = 'fa-file-zipper'; label = 'Скачать всё';
+        } else if (safeSingleUrl) {
+                href = safeSingleUrl; iconClass = 'fa-download'; label = 'Скачать';
+        }
+        if (!href) return;
+
+        const link = document.createElement('a');
+        link.className = 'btn-secondary result-download-all';
+        link.href = href;
+        link.target = '_blank';
+        link.rel = 'noopener';
+        if (clips.length === 1) link.setAttribute('download', 'sonya_clip_1.mp4');
+        const icon = document.createElement('i');
+        icon.className = 'fa-solid ' + iconClass;
+        const labelSpan = document.createElement('span');
+        labelSpan.textContent = label;
+        link.appendChild(icon);
+        link.appendChild(labelSpan);
+        elements.resultActions.appendChild(link);
+}
+
+// data: { clips: [{url, label, duration}], clipType, aspect, archiveUrl }
+function renderSonyaResult(data) {
+        const clips = Array.isArray(data.clips) ? data.clips : [];
+        const clipType = data.clipType || appState.clipType || '';
+        const count = clips.length;
+
+        renderResultHeadline({ clipType, count });
+        renderResultTags({ clipType, aspect: data.aspect, count });
+        renderResultClips(clips);
+        renderResultActions({ clips, archiveUrl: data.archiveUrl || null });
+}
+
+// =====================================================
+// Data Collection
+// =====================================================
+
+// Educational v4: the template picker is visible only while Educational is the chosen mode
+function syncEduTemplates() {
+        const box = document.getElementById('edu-templates');
+        if (!box) return;
+        const edu = document.querySelector('input[name="clip-type"]:checked')?.value === 'educational';
+        box.hidden = !edu;
+        syncStreamerOptions();
+}
+
+// Streamer v2: layout picker + moment-type chips, visible only while Streamer is the chosen mode
+function syncStreamerOptions() {
+        const box = document.getElementById('streamer-options');
+        if (!box) return;
+        box.hidden = document.querySelector('input[name="clip-type"]:checked')?.value !== 'streamer';
+}
+
+// «Авто · все» and concrete types exclude each other; nothing picked = auto
+function initStreamerMoments() {
+        const auto = document.querySelector('input[name="moment-auto"]');
+        const types = [...document.querySelectorAll('input[name="moment-type"]')];
+        if (!auto) return;
+        auto.addEventListener('change', () => {
+                if (auto.checked) types.forEach(t => { t.checked = false; });
+                else if (!types.some(t => t.checked)) auto.checked = true;
+        });
+        types.forEach(t => t.addEventListener('change', () => {
+                auto.checked = !types.some(x => x.checked);
+        }));
+}
+initStreamerMoments();
+
+function streamerSettings() {
+        const moment_types = [...document.querySelectorAll('input[name="moment-type"]:checked')].map(i => i.value);
+        return {
+                streamer_layout: Number(document.querySelector('input[name="streamer-layout"]:checked')?.value || 1),
+                moment_types // [] = auto / all
+        };
+}
+
+function collectFormData() {
+        // Если clipType уже установлен (например, для трейлера), использовать его
+        let clipType = appState.clipType;
+        if (!clipType) {
+                clipType = document.querySelector('input[name="clip-type"]:checked')?.value;
+        }
+
+        return {
+                source: {
+                        mode: appState.mode,
+                        url: appState.mode === 'url' ? elements.videoUrlInput.value : null,
+                        fileName: appState.uploadedFile?.name || null,
+                        platform: appState.mode === 'url' ? detectPlatform(elements.videoUrlInput.value) : 'upload'
+                },
+                brand: appState.brand || 'sonya',
+                clipType: clipType || 'viral',
+                settings: {
+                        subtitleStyle: elements.subtitlesToggle?.checked 
+                                ? (document.querySelector('input[name="subtitle-style"]:checked')?.value || 'viral')
+                                : 'none',
+                        voiceoverEnabled: elements.voiceoverToggle.checked,
+                        voiceType: elements.voiceSelect.value,
+                        translation: document.querySelector('input[name="language"]:checked')?.value,
+                        // Educational v4 look (1–4); the worker ignores it for other modes
+                        ...(clipType === 'educational'
+                                ? { edu_template: Number(document.querySelector('input[name="edu-template"]:checked')?.value || 1) }
+                                : {}),
+                        // Streamer v2: layout 1–5 and moment types (worker: settings.streamer_layout / settings.moment_types)
+                        ...(clipType === 'streamer' ? streamerSettings() : {})
+                }
+        };
+}
+
+// =====================================================
+// Job Submission — single-flight guard
+// =====================================================
+// btnNext2 and btnGenerate are two separate UI entry points that both do
+// the exact same thing: create a generation job and start polling. Without
+// a shared, synchronous lock, a fast double-click (or click + Enter) on
+// either button fires two independent async handlers, each calling
+// checkAndCreateVideoJob() -> POST /api/generation/jobs, before the first
+// one's await has a chance to resolve. submitGenerationJob() is the single
+// function every trigger (click, Enter) must go through; the lock is set
+// synchronously, before the first await, so a second call in the same
+// event-loop tick is a guaranteed no-op.
+
+let jobSubmitInFlight = false;
+
+function setGenerateButtonsBusy(busy) {
+        [elements.btnNext2, elements.btnGenerate].forEach(btn => {
+                if (!btn) return;
+                if (busy) {
+                        if (btn.dataset.origText === undefined) {
+                                btn.dataset.origText = btn.textContent;
+                        }
+                        btn.disabled = true;
+                        btn.textContent = 'Загружаем видео…';
+                } else {
+                        btn.disabled = false;
+                        if (btn.dataset.origText !== undefined) {
+                                btn.textContent = btn.dataset.origText;
+                                delete btn.dataset.origText;
+                        }
+                }
+        });
+}
+
+// Lets auth.js flip the busy label once a real response has arrived (see
+// checkAndCreateVideoJob's success branch) -- mirrors the existing
+// window.sonyaSetProcessingText hook already used for the URL-ingest
+// flow's processing-page text. Guarded by dataset.origText so this is a
+// no-op on any button that isn't currently mid-submission.
+window.sonyaSetGenerateButtonText = function (text) {
+        [elements.btnNext2, elements.btnGenerate].forEach(btn => {
+                if (btn && btn.dataset.origText !== undefined) btn.textContent = text;
+        });
+};
+
+// Called once the job reaches a terminal state (completed/failed/cancelled
+// — see SONYA_REAL_POLLING_PATCH_V2 below) or the user starts a new
+// project. Re-enables the buttons for the next submission.
+function resetGenerationLock() {
+        jobSubmitInFlight = false;
+        setGenerateButtonsBusy(false);
+}
+
+async function submitGenerationJob() {
+        if (jobSubmitInFlight) return; // synchronous check — no await above this line
+        jobSubmitInFlight = true;
+        setGenerateButtonsBusy(true);
+
+        try {
+                const formData = collectFormData();
+
+                // checkAndCreateVideoJob is defined in auth.js (loaded after app.js)
+                const result = (typeof checkAndCreateVideoJob === 'function')
+                        ? await checkAndCreateVideoJob(formData)
+                        : 'ok';
+
+                if (result !== 'ok') {
+                        // Auth/paywall modal opened, or a validation/network error —
+                        // unlock so the user can retry.
+                        resetGenerationLock();
+                        return;
+                }
+
+                showPage('processing');
+                simulateProcessing();
+                // Lock stays held on success — released by resetGenerationLock()
+                // once polling sees the job reach a terminal state, or by
+                // btnNewProject's reset handler.
+        } catch (err) {
+                console.error('[SONYA] job submission failed', err);
+                resetGenerationLock();
+        }
+}
+
+// =====================================================
+// Event Listeners
+// =====================================================
+
+function initEventListeners() {
+        // Main menu (brand modes)
+        if (elements.menuToggle && elements.menuOverlay) {
+                const openMenu = () => {
+                        elements.menuOverlay.classList.add('active');
+                };
+                const closeMenu = () => {
+                        elements.menuOverlay.classList.remove('active');
+                };
+
+                elements.menuToggle.addEventListener('click', openMenu);
+                
+                if (elements.menuClose) {
+                        elements.menuClose.addEventListener('click', closeMenu);
+                }
+
+                elements.menuOverlay.addEventListener('click', (event) => {
+                        if (event.target === elements.menuOverlay) {
+                                closeMenu();
+                        }
+                });
+
+                elements.menuItems.forEach(item => {
+                        item.addEventListener('click', () => {
+                                const brand = item.getAttribute('data-brand-option');
+
+                                appState.brand = brand;
+
+                                // Обновить активное состояние кнопок
+                                elements.menuItems.forEach(btn => {
+                                        btn.classList.toggle('active', btn === item);
+                                });
+
+                                // Обновить текст под логотипом на главной
+                                if (elements.mainTagline) {
+                                        elements.mainTagline.textContent = 'Создавайте короткие видео вместе с нами';
+                                }
+
+                                closeMenu();
+                        });
+                });
+        }
+        
+        // Theme toggle
+        if (elements.themeToggle) {
+                elements.themeToggle.addEventListener('click', toggleTheme);
+        } else {
+                console.error('❌ Кнопка переключения темы не найдена!');
+        }
+        
+        // Profile modal
+        const profileBtn = document.getElementById('profile-btn');
+        const profileModalOverlay = document.getElementById('profile-modal-overlay');
+        const profileModalClose = document.getElementById('profile-modal-close');
+
+        if (profileBtn) {
+                profileBtn.addEventListener('click', () => {
+                        openProfileModal();
+                });
+        }
+
+        if (profileModalClose) {
+                profileModalClose.addEventListener('click', () => {
+                        closeProfileModal();
+                });
+        }
+
+        if (profileModalOverlay) {
+                profileModalOverlay.addEventListener('click', (e) => {
+                        if (e.target === profileModalOverlay) {
+                                closeProfileModal();
+                        }
+                });
+        }
+
+        // "Тарифы" info button in the profile modal — opens the real
+        // (backend-connected) paywall modal instead of the old fake
+        // 3-tier plans modal. `openPaywallModal` is defined in auth.js,
+        // loaded after app.js.
+        const subscriptionInfoBtn = document.getElementById('subscription-info-btn');
+        if (subscriptionInfoBtn) {
+                subscriptionInfoBtn.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (typeof openPaywallModal === 'function') openPaywallModal();
+                });
+        }
+
+        function closeProfileModal() {
+                if (profileModalOverlay) {
+                        profileModalOverlay.classList.remove('active');
+                }
+        }
+
+        function updateProfileModal() {
+                // Update name
+                const nameEl = document.getElementById('profile-name');
+                if (nameEl) nameEl.textContent = userProfile.name;
+
+                // Update username
+                const usernameEl = document.getElementById('profile-username');
+                if (usernameEl) usernameEl.textContent = userProfile.username || '';
+
+                // Update ID
+                const idEl = document.getElementById('profile-id');
+                if (idEl) idEl.textContent = userProfile.id || '—';
+
+                // Update status badge
+                const plan = SUBSCRIPTION_PLANS[userProfile.subscription];
+                const statusIcon = document.querySelector('.status-icon');
+                const statusText = document.getElementById('profile-status-text');
+                
+                if (statusIcon && plan) statusIcon.textContent = plan.icon;
+                if (statusText) statusText.textContent = userProfile.subscription.toUpperCase();
+
+                // Update role
+                const roleEl = document.getElementById('profile-role');
+                if (roleEl) {
+                        if (userProfile.role) {
+                                const adminInfo = ADMINS[userProfile.id];
+                                roleEl.textContent = adminInfo ? adminInfo.label : '';
+                                roleEl.style.display = 'block';
+                        } else {
+                                roleEl.style.display = 'none';
+                        }
+                }
+
+                // Update subscription info
+                const planNameEl = document.getElementById('subscription-plan-name');
+                if (planNameEl && plan) {
+                        planNameEl.textContent = plan.name;
+                }
+
+                const limitsEl = document.getElementById('subscription-limits');
+                if (limitsEl && plan && plan.limits) {
+                        limitsEl.innerHTML = plan.limits.map(limit => `
+                                <div class="limit-item">
+                                        <span class="limit-label">${limit.label}:</span>
+                                        <span class="limit-value">${limit.value}</span>
+                                </div>
+                        `).join('');
+                }
+        }
+
+      
+        // Mode toggle
+        elements.modeBtns.forEach(btn => {
+                btn.addEventListener('click', () => setMode(btn.dataset.mode));
+        });
+
+        // URL input
+        elements.videoUrlInput.addEventListener('input', updateNextButton1State);
+
+        // File upload - click handled natively by <label for="file-input">
+        // No extra JS click needed — adding it caused double-open
+        elements.fileInput.addEventListener('change', (e) => {
+                handleFileSelect(e.target.files[0]);
+                updateNextButton1State();
+        });
+
+        // File upload - drag and drop
+        elements.uploadZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                elements.uploadZone.classList.add('dragover');
+        });
+
+        elements.uploadZone.addEventListener('dragleave', () => {
+                elements.uploadZone.classList.remove('dragover');
+        });
+
+        elements.uploadZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                elements.uploadZone.classList.remove('dragover');
+                handleFileSelect(e.dataTransfer.files[0]);
+        });
+
+        // Remove file
+        elements.removeFileBtn.addEventListener('click', () => {
+                removeFile();
+                updateNextButton1State();
+        });
+
+        // Navigation - Page 1 to 2
+        elements.btnNext1.addEventListener('click', () => {
+                appState.videoUrl = elements.videoUrlInput.value;
+                showPage('type');
+        });
+
+        // Trailer button
+        elements.btnTrailer.addEventListener('click', () => {
+                // Снять все выборы типов клипов
+                elements.clipTypeInputs.forEach(input => {
+                        input.checked = false;
+                });
+                syncEduTemplates();
+                
+                // Установить тип трейлера
+                appState.clipType = 'filmbreaker';
+                
+                // Визуально отметить кнопку как выбранную
+                elements.btnTrailer.classList.add('selected');
+                
+                // Обновить состояние кнопки "Продолжить"
+                updateNextButton2State();
+        });
+
+        // Navigation - Page 2 → Processing
+        // New flow: check auth + POST /api/videos/create before starting.
+        // Routed through submitGenerationJob() — the single-flight guard —
+        // so a double-click or a click racing an Enter press never fires a
+        // second POST /api/generation/jobs.
+        elements.btnNext2.addEventListener('click', submitGenerationJob);
+        elements.btnNext2.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') submitGenerationJob();
+        });
+
+        // Navigation - Back buttons
+        elements.btnBack2.addEventListener('click', () => showPage('source'));
+        elements.btnBack3.addEventListener('click', () => showPage('type'));
+
+        // Clip type selection
+        elements.clipTypeInputs.forEach(input => {
+                input.addEventListener('change', () => {
+                        syncEduTemplates();
+                        // При выборе типа клипа снимаем выбор трейлера
+                        appState.clipType = '';
+                        if (elements.btnTrailer) {
+                                elements.btnTrailer.classList.remove('selected');
+                        }
+                        updateNextButton2State();
+                });
+        });
+
+        // Subtitles toggle
+        elements.subtitlesToggle.addEventListener('change', () => {
+                elements.subtitleStyles.classList.toggle('hidden', !elements.subtitlesToggle.checked);
+        });
+
+        // Voiceover toggle
+        elements.voiceoverToggle.addEventListener('change', () => {
+                elements.voiceOptions.classList.toggle('hidden', !elements.voiceoverToggle.checked);
+        });
+
+        // Generate button (page 3 / editor flow)
+        // Same submitGenerationJob() single-flight guard as btnNext2 — both
+        // buttons lead to the exact same job-creation call.
+        elements.btnGenerate.addEventListener('click', submitGenerationJob);
+        elements.btnGenerate.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') submitGenerationJob();
+        });
+
+        // New project button
+        elements.btnNewProject.addEventListener('click', () => {
+                // Reset state
+                resetGenerationLock();
+                // clearJobIdempotencyKey is defined in auth.js (loaded after app.js)
+                if (typeof clearJobIdempotencyKey === 'function') clearJobIdempotencyKey();
+                elements.videoUrlInput.value = '';
+                appState.uploadedFile = null;
+                removeFile();
+
+                // Reset radio buttons
+                elements.clipTypeInputs.forEach(input => input.checked = false);
+                syncEduTemplates();
+                elements.subtitleStyleInputs.forEach(input => {
+                        input.checked = input.value === 'viral';
+                });
+                elements.languageInputs.forEach(input => {
+                        input.checked = input.value === 'none';
+                });
+
+                // Reset customization (subtitles ON by default, owner 2026-11-12)
+                elements.subtitlesToggle.checked = true;
+                elements.subtitleStyles.classList.remove('hidden');
+                elements.voiceoverToggle.checked = false;
+                elements.voiceOptions.classList.add('hidden');
+
+                // Reset clip type
+                appState.clipType = '';
+
+                // Reset buttons
+                updateNextButton1State();
+                updateNextButton2State();
+
+                // Go to first page
+                showPage('source');
+        });
+}
+
+// =====================================================
+// Initialization
+// =====================================================
+
+function init() {
+        initTheme();
+        initEventListeners();
+
+        appState.brand = 'sonya';
+
+        if (elements.mainTagline) {
+                elements.mainTagline.textContent = 'Создавайте короткие видео вместе с нами';
+        }
+
+        elements.menuItems.forEach(item => {
+                item.classList.toggle(
+                        'active',
+                        item.getAttribute('data-brand-option') === 'sonya'
+                );
+        });
+
+        if (elements.subtitlesToggle) {
+                elements.subtitlesToggle.checked = true;
+                elements.subtitleStyles.classList.remove('hidden');
+        }
+        if (elements.voiceoverToggle) {
+                elements.voiceoverToggle.checked = false;
+                elements.voiceOptions.classList.add('hidden');
+        }
+        
+        // При возврате на страницу 2 сбрасываем выбор трейлера если выбран тип клипа
+        // Это обрабатывается в обработчике изменения типа клипа
+
+        initLiteEditor();
+
+        // "Доработать в редакторе" on result page → open OpenCut as a separate
+        // page, carrying the just-completed job/video with it. Without this,
+        // opencut.html has no way to know which video to load (it opened with
+        // zero params before — see docs/SONYA_AUDIT.md P1-8). job_id/video_url
+        // come from window.SONYA_LAST_COMPLETED_JOB / SONYA_LAST_RESULT_URL,
+        // set by showRealResult() (SONYA_REAL_POLLING_PATCH_V2 below) the
+        // moment a job completes — same validated (isSafeResultUrl) URL the
+        // result page itself links to, never a fresh unvalidated value.
+        const btnOpenEditor = document.getElementById('btn-open-editor');
+        if (btnOpenEditor) {
+                btnOpenEditor.addEventListener('click', () => {
+                        const job = window.SONYA_LAST_COMPLETED_JOB;
+                        const jobId = job && (job.job_id || job.id);
+                        const videoUrl = window.SONYA_LAST_RESULT_URL;
+
+                        const qs = new URLSearchParams();
+                        if (jobId) qs.set('job_id', jobId);
+                        if (videoUrl) qs.set('video_url', videoUrl);
+
+                        const query = qs.toString();
+                        window.location.href = '/opencut.html' + (query ? '?' + query : '');
+                });
+        }
+
+}
+
+// =====================================================
+// Lite Editor (Page 3) — purely visual companion
+// · attaches uploaded file / URL as preview source
+// · wires play/pause + aspect ratio switcher
+// · never touches AI state or form submission
+// =====================================================
+function initLiteEditor() {
+        const preview    = document.getElementById('editor-preview');
+        const playBtn    = document.getElementById('editor-play');
+        const playIcon   = playBtn ? playBtn.querySelector('i') : null;
+        const playTool   = document.querySelector('.editor-tool[data-action="play"]');
+        const stageInner = document.querySelector('.editor-stage-inner');
+        const aspectBtns = document.querySelectorAll('.editor-aspect-btn');
+        const timeEl     = document.getElementById('editor-time');
+
+        if (!preview || !stageInner) return;
+
+        let currentObjectURL = null;
+        const setSource = (src) => {
+                if (!src) return;
+                if (preview.src === src) return;
+                if (currentObjectURL) {
+                        try { URL.revokeObjectURL(currentObjectURL); } catch {}
+                        currentObjectURL = null;
+                }
+                preview.src = src;
+                preview.load();
+        };
+
+        const syncPreview = () => {
+                if (appState.uploadedFile) {
+                        currentObjectURL = URL.createObjectURL(appState.uploadedFile);
+                        setSource(currentObjectURL);
+                } else {
+                        const cinema = document.querySelector('#cinema-video source');
+                        if (cinema && cinema.src) setSource(cinema.src);
+                }
+        };
+
+        // Observe when page-customize becomes active to (re)sync preview
+        const page = document.getElementById('page-customize');
+        if (page) {
+                const observer = new MutationObserver(() => {
+                        if (page.classList.contains('active')) syncPreview();
+                });
+                observer.observe(page, { attributes: true, attributeFilter: ['class'] });
+        }
+
+        // Play / pause
+        const togglePlay = () => {
+                if (preview.paused) { preview.play().catch(() => {}); }
+                else { preview.pause(); }
+        };
+        if (playBtn)  playBtn.addEventListener('click', togglePlay);
+        if (playTool) playTool.addEventListener('click', togglePlay);
+
+        const reflectPlayState = () => {
+                const paused = preview.paused;
+                if (playIcon) {
+                        playIcon.classList.toggle('fa-play',  paused);
+                        playIcon.classList.toggle('fa-pause', !paused);
+                }
+                if (playTool) {
+                        const i = playTool.querySelector('i');
+                        if (i) {
+                                i.classList.toggle('fa-play',  paused);
+                                i.classList.toggle('fa-pause', !paused);
+                        }
+                }
+        };
+        preview.addEventListener('play',  reflectPlayState);
+        preview.addEventListener('pause', reflectPlayState);
+
+        // Time label
+        const fmt = (sec) => {
+                if (!isFinite(sec)) return '00:00';
+                const m = Math.floor(sec / 60).toString().padStart(2, '0');
+                const s = Math.floor(sec % 60).toString().padStart(2, '0');
+                return `${m}:${s}`;
+        };
+        preview.addEventListener('timeupdate', () => {
+                if (timeEl) timeEl.textContent = `${fmt(preview.currentTime)} / ${fmt(preview.duration)}`;
+        });
+        preview.addEventListener('loadedmetadata', () => {
+                if (timeEl) timeEl.textContent = `00:00 / ${fmt(preview.duration)}`;
+        });
+
+        // Aspect ratio switcher (visual only)
+        aspectBtns.forEach(btn => {
+                btn.addEventListener('click', () => {
+                        aspectBtns.forEach(b => b.classList.remove('is-active'));
+                        btn.classList.add('is-active');
+                        const ratio = btn.dataset.ratio || '16:9';
+                        stageInner.style.aspectRatio = ratio.replace(':', ' / ');
+                });
+        });
+}
+
+// Start the app
+document.addEventListener('DOMContentLoaded', init);
+
+
+/* SONYA_REAL_POLLING_PATCH_V2 */
+(function () {
+  const API_BASE = (window.SONYA_API_BASE || '/api').replace(/\/$/, '');
+
+  function pickJobId(job) {
+    return job && (job.job_id || job.id);
+  }
+
+  function activeJobId() {
+    return pickJobId(window.SONYA_LAST_JOB) || localStorage.getItem('sonya_active_job_id');
+  }
+
+  function statusText(job) {
+    const st = String(job && job.status || '').toLowerCase();
+    if (st === 'queued') return 'Видео в очереди';
+    if (st === 'claimed') return 'GPU забрал задачу';
+    if (st === 'processing') return 'Генерация видео';
+    if (st === 'mode_running') return 'AI анализирует и монтирует';
+    if (st === 'completed') return 'Видео готово';
+    if (st === 'failed') return 'Ошибка генерации';
+    return st ? ('Статус: ' + st) : 'Подготовка задачи';
+  }
+
+  function setText(text) {
+    const selectors = [
+      '#processing-status',
+      '#processing-title',
+      '.processing-status',
+      '.processing-title',
+      '.status-text',
+      '.progress-text',
+      '[data-processing-status]'
+    ];
+
+    selectors.forEach(sel => {
+      document.querySelectorAll(sel).forEach(el => {
+        el.textContent = text;
+      });
+    });
+
+  }
+
+  // The backend doesn't report a numeric percentage, only a coarse status —
+  // so the bar advances in fixed steps per known status rather than tracking
+  // real progress. queued/claimed/processing/mode_running/completed map to
+  // 5 rungs; unknown statuses hold the last-known position instead of
+  // resetting, so the bar never visibly jumps backward.
+  function progressForStatus(job) {
+    const st = String(job && job.status || '').toLowerCase();
+    if (st === 'queued') return 12;
+    if (st === 'claimed') return 32;
+    if (st === 'processing') return 58;
+    if (st === 'mode_running') return 85;
+    if (st === 'completed') return 100;
+    return null;
+  }
+
+  function setProgress(pct) {
+    if (pct == null) return;
+    document.querySelectorAll('#progress-bar, .progress-bar').forEach(el => {
+      el.style.width = pct + '%';
+    });
+  }
+
+  async function getJson(url) {
+    const res = await fetch(url, { credentials: 'include' });
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    return { res, data };
+  }
+
+  // isSafeResultUrl() is defined once, at top level (used by both this
+  // polling patch and renderResultClips()/renderResultActions()) -- see the
+  // Result rendering section above. Every url here reaches the DOM only via
+  // the grid's own .href/.src property assignments; never innerHTML.
+  function showRealResult(result, job) {
+    localStorage.removeItem('sonya_active_job_id');
+    if (typeof resetGenerationLock === 'function') resetGenerationLock();
+
+    if (typeof showPage === 'function') {
+      showPage('result');
+    }
+
+    // The current API only ever returns one URL per job, but
+    // renderSonyaResult() and its grid already handle N clips — the moment
+    // result.clips arrives as an array (backend adds series support), this
+    // needs no change here beyond passing it through.
+    const rawSingleUrl =
+      result.url ||
+      result.result_url ||
+      result.download_url ||
+      result.presigned_url ||
+      result.signed_url ||
+      '';
+
+    const clips = Array.isArray(result.clips) && result.clips.length
+      ? result.clips.map(function (c, i) {
+          return {
+            url: c.url || c.result_url || c.download_url || '',
+            dlUrl: c.download_url || '',
+            label: c.label || null,
+            duration: c.duration || null
+          };
+        })
+      : (rawSingleUrl ? [{ url: rawSingleUrl, label: null, duration: null }] : []);
+
+    // Unsafe entries are dropped here (not just skipped at render time) so
+    // window.SONYA_LAST_RESULT_URL and the grid can never end up holding a
+    // rejected url under any code path.
+    const safeClips = clips.filter(function (c) { return isSafeResultUrl(c.url); });
+
+    window.SONYA_LAST_RESULT_URL = safeClips[0] ? safeClips[0].url : '';
+    window.SONYA_LAST_COMPLETED_JOB = job;
+
+    if (typeof renderSonyaResult === 'function') {
+      renderSonyaResult({
+        clips: safeClips,
+        clipType: (typeof appState !== 'undefined' && appState.clipType) || undefined,
+        aspect: result.aspect || result.aspect_ratio || null,
+        archiveUrl: result.archive_url || result.zip_url || null
+      });
+    }
+
+    if (!safeClips.length) {
+      // No safe clip to show: fall back to a plain-text notice in the
+      // result headline/sub area (textContent only -- never innerHTML)
+      // rather than a populated grid.
+      const msg = clips.length
+        ? 'Видео готово, но получена небезопасная ссылка на результат. Обратитесь в поддержку. Job: ' + (pickJobId(job) || '')
+        : 'Видео готово, но ссылка результата не найдена. Job: ' + (pickJobId(job) || '');
+      if (elements.resultHeadline) elements.resultHeadline.textContent = 'Видео готово';
+      if (elements.resultSub) elements.resultSub.textContent = msg;
+    }
+  }
+
+  // Reentrancy guard: btnNext2/btnGenerate (via simulateProcessing) AND the
+  // DOMContentLoaded resume-from-localStorage check below can both try to
+  // start a poll for the same (or a different) job. Never run two polling
+  // loops concurrently — the second call is a no-op while one is active.
+  let pollInFlight = false;
+
+  async function pollJob(jobId) {
+    if (!jobId) {
+      setText('Не найден job_id. Создайте задачу заново.');
+      return;
+    }
+
+    if (pollInFlight) return;
+    pollInFlight = true;
+
+    localStorage.setItem('sonya_active_job_id', jobId);
+    setText('Видео в очереди');
+    setProgress(12);
+
+    try {
+      for (let i = 0; i < 720; i++) {
+        const { res, data: job } = await getJson(API_BASE + '/generation/jobs/' + jobId);
+
+        if (!res.ok) {
+          setText('Ждём статус задачи...');
+          await new Promise(r => setTimeout(r, 5000));
+          continue;
+        }
+
+        const st = String(job.status || '').toLowerCase();
+        setText(statusText(job));
+        setProgress(progressForStatus(job));
+
+        if (st === 'completed') {
+          setProgress(100);
+          const result = await getJson(API_BASE + '/generation/jobs/' + jobId + '/result-url');
+          showRealResult(result.data || {}, job);
+          return;
+        }
+
+        if (st === 'failed' || st === 'cancelled') {
+          localStorage.removeItem('sonya_active_job_id');
+          if (typeof resetGenerationLock === 'function') resetGenerationLock();
+          setText(job.error || job.last_error || 'Ошибка генерации');
+          return;
+        }
+
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    } finally {
+      pollInFlight = false;
+    }
+
+    setText('Задача ещё выполняется. Обновите страницу позже.');
+  }
+
+  window.sonyaPollJob = pollJob;
+
+  // Exposed so the URL-ingestion flow (auth.js::apiCreateVideoJobFromUrl)
+  // can show "Проверяем ссылку" / "Получаем видео" / "Загружаем видео" on
+  // the exact same processing-page status text + progress bar this file
+  // already drives for job polling -- no separate/new UI, same elements.
+  window.sonyaSetProcessingText = setText;
+  window.sonyaSetProcessingProgress = setProgress;
+
+  try {
+    window.simulateProcessing = function () {
+      pollJob(activeJobId());
+    };
+    simulateProcessing = window.simulateProcessing;
+  } catch (e) {
+  }
+
+  // Resume after reload (phone refresh etc.): if an active job id is stored,
+  // return to the processing page / result. Unknown job (404/403) -> forget it;
+  // 401/network -> keep it and do nothing now.
+  async function resumeActiveJob() {
+    const jobId = localStorage.getItem('sonya_active_job_id');
+    if (!jobId) return;
+    try {
+      const { res, data: job } = await getJson(API_BASE + '/generation/jobs/' + jobId);
+      if (res.status === 404 || res.status === 403) { localStorage.removeItem('sonya_active_job_id'); return; }
+      if (!res.ok) return;
+      const st = String((job && job.status) || '').toLowerCase();
+      if (st === 'failed' || st === 'cancelled') { localStorage.removeItem('sonya_active_job_id'); return; }
+      if (typeof showPage === 'function') showPage('processing');
+      pollJob(jobId);
+    } catch (e) { /* offline: leave the id for the next load */ }
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', resumeActiveJob);
+  else resumeActiveJob();
+})();
