@@ -187,7 +187,12 @@ US_3060 = offer(6, 6, cpu="12th Gen Core™ i7-12700", cores=20, dph=0.135, geo=
 def test_rule_default_class_first_fallback_only_without_it():
     assert launcher.pick_offer([XEON, WEAK, B_IE, C_DE, A_UK], CFG, set())["id"] == 1
     assert launcher.pick_offer([XEON, WEAK, B_IE, C_DE], CFG, set())["id"] == 5             # cheaper of B/C
-    assert launcher.pick_offer([XEON, WEAK], CFG, set()) is None                            # old / 6-core CPUs never
+    assert launcher.pick_offer([XEON, WEAK], CFG, set())["id"] == 2                         # old CPU: last resort (class 2)
+    assert launcher.pick_offer([WEAK], CFG, set()) is None                                  # 6-core slice never
+    import dataclasses
+    assert launcher.pick_offer([XEON, WEAK], dataclasses.replace(CFG, allow_old_cpu=False), set()) is None
+    assert launcher.pick_offer([XEON, US_3060], CFG, set())["id"] == 6                      # modern beats old outside Europe
+    assert not launcher.warm_eligible(dict(XEON, geolocation="Norway, NO"), CFG)            # never the warm server
     assert launcher.pick_offer([B_IE, US_3060], CFG, set())["id"] == 4                      # Europe first (2.5x faster than Asia/US to RU S3)
     assert launcher.pick_offer([US_3060], CFG, set())["id"] == 6                            # outside Europe only when nothing in Europe
     assert not launcher.warm_eligible(US_3060, CFG) and launcher.warm_eligible(A_UK, CFG)  # the warm must be a European 3060
