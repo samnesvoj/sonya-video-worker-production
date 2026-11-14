@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
@@ -499,13 +500,17 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
         if verdicts:
             by_id = {c["id"]: (c, sc, why) for c, sc, why in qa_pool + fill_pool}
             picked: List[Tuple[Dict[str, Any], float, List[str]]] = []
-            # 1) self-contained by the editor (score ≥ 40); 2) the editor is strict about context
-            # (VSRAP run 2: 2 of 19) — its own strong picks (score ≥ 60, already self-contained by the
-            # local rules) still beat the unreviewed local order
-            for tier, ok in ((2.0, lambda v: v["self_contained"] and v["score"] >= 40),
-                             (1.5, lambda v: not v["self_contained"] and v["score"] >= 60)):
+            # Owner 2026-11-13 «моменты некачественные … лучше меньше, но сильных»: only the editor's STRONG
+            # picks fill the request; weaker ones only up to a floor of `keep` clips (min 5 by default).
+            strong = _f_env("SONYA_CUT_STRONG_SCORE", 75.0)
+            keep = min(max_clips, int(_f_env("SONYA_CUT_MIN_CLIPS", 5.0)))
+            tiers = ((2.0, max_clips, lambda v: v["self_contained"] and v["score"] >= strong),
+                     (1.8, max_clips, lambda v: not v["self_contained"] and v["score"] >= max(strong, 80.0)),
+                     (1.5, keep, lambda v: v["self_contained"] and v["score"] >= 50),
+                     (1.2, keep, lambda v: not v["self_contained"] and v["score"] >= 60))
+            for tier, cap, ok in tiers:
                 for v in verdicts:
-                    if len(picked) >= max_clips:
+                    if len(picked) >= cap:
                         break
                     if not ok(v) or v["id"] in extras or (brief and not v.get("ad_fit", True)):
                         continue
@@ -515,9 +520,10 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
                                        why + [f"editor {v['score']:.0f}"
                                               f"{'' if v['self_contained'] else ' (needs context?)'}: {v['reason']}"]))
                         extras[c["id"]] = v
-            # the editor rejected too many: top up with the local order (still never overlapping)
+            # the editor rejected too many: top up with the local order up to the floor (never overlapping)
+            meta["editor_dropped_weak"] = max(0, max_clips - max(len(picked), keep))
             for c, sc, why in chosen:
-                if len(picked) >= max_clips:
+                if len(picked) >= keep:
                     break
                 if c["id"] not in extras and all(c["end"] <= k["start"] or c["start"] >= k["end"] for k, _, _ in picked):
                     picked.append((c, sc, why + ["local (editor short)"]))
@@ -542,6 +548,13 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
              **({"ad_check": "editor" if c["id"] in extras else "local_only"} if brief else {})}
             for c, sc, why in chosen]
     return segs, meta
+
+
+def _f_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def select_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int, *, llm_opt_in: bool = False,

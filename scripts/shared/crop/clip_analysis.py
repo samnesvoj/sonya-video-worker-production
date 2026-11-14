@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
-CLIP_ANALYSIS_VERSION = "clip-yunet-cuts-text-v4"   # v4: cheaper per-frame signature
+CLIP_ANALYSIS_VERSION = "clip-yunet-cuts-text-v5"   # v5: + the source's own white captions ("captions")
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
 MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 DETECT_WIDTH = 640          # faces are detected on frames downscaled to this width
@@ -111,6 +111,33 @@ def text_boxes(frame: np.ndarray) -> List[List[int]]:
     return out
 
 
+def caption_boxes_frame(frame: np.ndarray) -> List[List[int]]:
+    """The source's OWN subtitles: white letters with a dark outline / shadow, low and centred in the frame
+    (text_boxes misses them on a bright, busy background). Source pixels [[x, y, w, h], …].
+    Thin white strokes next to dark pixels (big white areas — sky, walls, shirts — are opened away),
+    closed into lines; a line is wide, short, centred and dense in strokes.
+    Measured on job cd6916ff (2.5 h of 1440p vlog): the interviewer captions found, 0 false hits in 212 frames."""
+    H, W = frame.shape[:2]
+    k = 960.0 / W
+    small = cv2.resize(frame, (960, max(1, int(round(H * k)))), interpolation=cv2.INTER_AREA)
+    y0 = int(0.72 * small.shape[0])
+    band = small[y0:]
+    g = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+    lo, hi = band.min(axis=2), band.max(axis=2)
+    white = ((lo >= 215) & (hi.astype(np.int16) - lo <= 30)).astype(np.uint8)
+    stroke = white & cv2.dilate((g <= 90).astype(np.uint8), np.ones((5, 5), np.uint8))
+    stroke &= 1 - cv2.morphologyEx(white, cv2.MORPH_OPEN, np.ones((6, 6), np.uint8))
+    m = cv2.morphologyEx(stroke * 255, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (17, 5)))
+    n, _, st, _ = cv2.connectedComponentsWithStats(m)
+    out = []
+    for i in range(1, n):
+        x, y, w, h, _a = (int(v) for v in st[i])
+        if w >= 0.12 * 960 and 8 <= h <= 40 and w / h > 4 and abs(x + w / 2 - 480) <= 0.22 * 960 \
+                and float(stroke[y:y + h, x:x + w].mean()) >= 0.06:
+            out.append([int(x / k), int((y + y0) / k), int(w / k), int(h / k)])
+    return out
+
+
 def detect_cuts(times: List[float], dists: List[float]) -> List[float]:
     """Cut times (start of the new shot) from per-frame histogram distances."""
     if len(dists) < 3:
@@ -197,7 +224,8 @@ def analyze_clip(video: str, start: float, duration: float, *, face_fps: float =
             boxes.sort(key=lambda b: (-b[2] * b[3], b[0], b[1]))
             samples.append({"t": round(t, 3), "faces": boxes})
             if (len(samples) - 1) % TEXT_EVERY == 0:
-                texts.append({"t": round(t, 3), "boxes": [[int(v / fk) for v in b] for b in text_boxes(frame)]})
+                texts.append({"t": round(t, 3), "boxes": [[int(v / fk) for v in b] for b in text_boxes(frame)],
+                              "captions": [[int(v / fk) for v in b] for b in caption_boxes_frame(frame)]})
             next_face_t += 1.0 / face_fps
     return {"meta": {"version": CLIP_ANALYSIS_VERSION, "detector": st["detector"], "opencv": st["opencv"],
                      "width": W, "height": H, "fps": fps, "start": start, "duration": duration,

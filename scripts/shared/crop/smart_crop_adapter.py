@@ -274,7 +274,7 @@ def crop_track(analysis: Optional[Dict[str, Any]], start: float, duration: float
 
 # ── v2: shot-aware crop from a per-clip analysis (scripts/shared/crop/clip_analysis) ──
 
-CROP_VERSION_V2 = "crop-shots-v3"   # v3: wider square window on close-ups
+CROP_VERSION_V2 = "crop-shots-v5"   # v5 (crop_v5.py): tracks, real partners only, calm layouts; v3 via env
 
 
 def _clusters(dets: List[Tuple[float, List[float]]], W: int) -> List[Dict[str, Any]]:
@@ -434,6 +434,20 @@ def game_track(analysis: Optional[Dict[str, Any]], duration: float, *, width: in
 
 
 def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
+                  **kw: Any) -> Dict[str, Any]:
+    """Shot-aware crop for one clip: crop-shots-v5 (owner 2026-11-13: faces always whole, no false split,
+    no layout jumps, wide close-ups). SONYA_CROP_VERSION=v3 brings back the previous algorithm."""
+    if os.environ.get("SONYA_CROP_VERSION", "").lower() == "v3":
+        return crop_track_v3(analysis, duration, width=width, height=height, **kw)
+    from .crop_v5 import caption_boxes, crop_track_v5
+    track = crop_track_v5(analysis, duration, width=width, height=height)
+    cap = caption_boxes(analysis, duration)
+    if cap:
+        track["caption_blur"] = cap
+    return track
+
+
+def crop_track_v3(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
                   dead_zone: float = 0.12, hold_sec: float = 0.8, move_sec: float = 0.5,
                   median_window: int = 5, min_presence: float = 0.25,
                   min_score: float = 0.8, min_seg: float = 0.5) -> Dict[str, Any]:
@@ -450,7 +464,7 @@ def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width:
     max_x = W - cw
     center = max_x // 2 // 2 * 2
     meta = (analysis or {}).get("meta") or {}
-    info: Dict[str, Any] = {"crop_version": CROP_VERSION_V2, "source_width": W, "source_height": H,
+    info: Dict[str, Any] = {"crop_version": "crop-shots-v3", "source_width": W, "source_height": H,
                             "output_aspect": "9:16", "detector": meta.get("detector"),
                             "analysis_version": meta.get("version"), "crop_w": cw, "crop_h": ch,
                             "y": (H - ch) // 2 // 2 * 2}
@@ -641,6 +655,11 @@ def text_zones(analysis: Optional[Dict[str, Any]], track: Dict[str, Any], *, out
         if not boxes:
             continue
         ys: List[Tuple[float, float]] = []
+        cap = [c for c in track.get("caption_blur") or [] if c[0] <= t <= c[1]]
+        boxes = [bx for bx in boxes if not any(c[2] <= bx[0] and bx[0] + bx[2] <= c[2] + c[4] and
+                                                c[3] <= bx[1] and bx[1] + bx[3] <= c[3] + c[5] for c in cap)]
+        if not boxes:
+            continue      # the source's own captions are blurred in the render: nothing to avoid
         in_split = any(a <= t < b for a, b in sp.get("intervals") or [])
         cu = track.get("closeup") or {}
         in_cu = not in_split and any(a <= t < b for a, b in cu.get("intervals") or [])
@@ -762,6 +781,16 @@ def full_game_graph(track: Dict[str, Any]) -> str:
     return ";".join(parts)
 
 
+def _with_caption_blur(track: Dict[str, Any], vf: str, more: bool) -> str:
+    """Blur the source's own burned-in captions before any crop (crop-shots-v5 `caption_blur`). With a split
+    still to come (`more`), the blurred source must feed every branch, so the prefix goes there instead."""
+    cap = track.get("caption_blur")
+    if not cap or more:
+        return vf
+    from .crop_v5 import caption_blur_graph
+    return caption_blur_graph(cap) + "," + vf
+
+
 def track_graph(track: Dict[str, Any]) -> str:
     """The crop part of the -vf (layout → 1080x1920), without subtitles."""
     if track.get("layout") == "game" and track.get("tpl"):
@@ -800,6 +829,7 @@ def track_graph(track: Dict[str, Any]) -> str:
               f"eq=brightness=-0.15:saturation=0.85,setsar=1[cbg];"
               f"[cbg][csq]overlay=0:{top}[cwide];[cbase][cwide]overlay=0:0:enable='{enable}'")
     sp = track.get("split")
+    vf = _with_caption_blur(track, vf, bool(sp))
     if sp:
         # split screen during two-person shots: [single 9:16] with [top / bottom] overlaid
         half_h = OUTPUT_HEIGHT // 2
@@ -813,6 +843,9 @@ def track_graph(track: Dict[str, Any]) -> str:
         parts.append(f"[top][bottom]vstack=inputs=2,drawbox=x=0:y={half_h - 3}:w=iw:h=6:color=black:t=fill[pair]")
         parts.append(f"[single][pair]overlay=0:0:enable='{enable}'")
         vf = ";".join(parts)
+        if track.get("caption_blur"):
+            from .crop_v5 import caption_blur_graph
+            vf = caption_blur_graph(track["caption_blur"]) + "," + vf
     return vf
 
 
