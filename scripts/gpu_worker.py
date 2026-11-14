@@ -114,6 +114,26 @@ STALE_INTERVAL = int(os.environ.get("WORKER_STALE_REQUEUE_INTERVAL", "300"))
 # stale_minutes=30 check, so a heartbeat is always fresh when checked.
 HEARTBEAT_INTERVAL_SEC = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "120"))
 
+_PREVIEW_MODES = ("virality", "hooks", "educational", "streamer", "beep")
+
+
+def _make_preview_assets(clip: Path) -> None:
+    """Best effort: <stem>_preview.mp4 (720p, <=2.5 Mb/s, +faststart) and <stem>_poster.jpg.
+    The full-quality clip stays the download file. Never fails the job."""
+    import subprocess
+    try:
+        prev = clip.with_name(clip.stem + "_preview.mp4")
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-vf", "scale=-2:720",
+                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-maxrate", "2500k",
+                        "-bufsize", "5000k", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
+                        "-movflags", "+faststart", str(prev)], check=True, timeout=300)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", str(clip), "-frames:v", "1",
+                        "-vf", "scale=-2:720", "-q:v", "4", str(clip.with_name(clip.stem + "_poster.jpg"))],
+                       check=True, timeout=60)
+    except Exception as exc:
+        logger.warning("[worker] preview_assets_failed %s: %s", clip.name, type(exc).__name__)
+
+
 _CONTENT_TYPES = {
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -790,6 +810,13 @@ def process_job(job: dict, worker_id: str) -> None:
             _fail(job_id, "NO_OUTPUT_FILES", "Runner produced no output files", retry=False)
             return
 
+        # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
+        if mode in _PREVIEW_MODES:
+            for _clip in sorted(output_dir.rglob("*.mp4")):
+                if not _clip.stem.endswith("_preview"):
+                    _make_preview_assets(_clip)
+            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
+
         # ── 5. Upload outputs to S3 ───────────────────────────────────────────
         _update_status(job_id, JOB_STATUS_UPLOADING_RESULT)
         s3_output_key = None
@@ -800,6 +827,10 @@ def process_job(job: dict, worker_id: str) -> None:
             ext = f.suffix.lower()
             ct  = _CONTENT_TYPES.get(ext, "application/octet-stream")
             ft  = _FILE_TYPES.get(ext, "output")
+            if f.stem.endswith("_preview") and ext == ".mp4":
+                ft = "preview"          # never counted as a clip
+            elif f.stem.endswith("_poster") and ext == ".jpg":
+                ft = "thumbnail"
             s3k = build_output_key(
                 user_id=user_id, job_id=job_id, mode=mode, filename=f.name
             )
