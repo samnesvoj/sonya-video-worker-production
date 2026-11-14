@@ -502,7 +502,7 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
             picked: List[Tuple[Dict[str, Any], float, List[str]]] = []
             # Owner 2026-11-13 «моменты некачественные … лучше меньше, но сильных»: only the editor's STRONG
             # picks fill the request; weaker ones only up to a floor of `keep` clips (min 5 by default).
-            strong = _f_env("SONYA_CUT_STRONG_SCORE", 70.0)
+            strong = _f_env("SONYA_CUT_STRONG_SCORE", 75.0)
             keep = min(max_clips, int(_f_env("SONYA_CUT_MIN_CLIPS", 5.0)))
             tiers = ((2.0, max_clips, lambda v: v["self_contained"] and v["score"] >= strong),
                      (1.8, max_clips, lambda v: not v["self_contained"] and v["score"] >= max(strong, 80.0)),
