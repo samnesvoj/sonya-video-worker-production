@@ -26,7 +26,7 @@ def x_at(track, t):
     return k[-1][1]
 
 
-def face(cx, w=200, score=0.93, mouth=0.0):
+def face(cx, w=200, score=0.93, mouth=1.5):
     return [int(cx - w / 2), 300, w, int(w * 1.3), score, mouth]
 
 
