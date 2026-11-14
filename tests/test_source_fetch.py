@@ -80,3 +80,39 @@ def test_youtube_bot_check_is_its_own_code():
     from scripts.source_fetch import classify_error
     exc = Exception("ERROR: [youtube] abc: Sign in to confirm you’re not a bot. This helps protect our community.")
     assert classify_error(exc)[0] == "SOURCE_BOT_CHECK"
+
+
+def test_segment_start_end(monkeypatch, tmp_path):
+    seen, up = {}, []
+    _patch(monkeypatch, tmp_path, 600, up)
+    monkeypatch.setattr(url_ingest, "probe", lambda *a, **k: {"duration": 10800})
+    f = str(tmp_path / "dl" / "v.mp4")
+    monkeypatch.setattr(url_ingest, "download_video",
+                        lambda *a, **k: (seen.update(trim=k.get("trim_sec"), start=k.get("trim_start")), (f, ".mp4"))[1])
+    w = tmp_path / "w"
+    w.mkdir()
+    sfm.fetch_source({"url": "https://youtu.be/abc", "platform": "youtube", "max_source_sec": 3600,
+                      "trim_start_sec": 5400, "trim_end_sec": 6000}, "virality", "k", w)
+    assert seen == {"trim": 600, "start": 5400} and up
+
+
+def test_segment_start_after_end_of_video(monkeypatch, tmp_path):
+    monkeypatch.setattr(url_ingest, "assert_safe_url", lambda u: None)
+    monkeypatch.setattr(url_ingest, "probe", lambda *a, **k: {"duration": 1000})
+    with pytest.raises(sfm.SourceFetchError) as e:
+        sfm.fetch_source({"url": "https://youtu.be/abc", "platform": "youtube", "max_source_sec": 600,
+                          "trim_start_sec": 2000, "trim_end_sec": 2500}, "virality", "k", tmp_path)
+    assert e.value.code == "SOURCE_TRIM_RANGE"
+
+
+@pytest.mark.parametrize("params,cap,want", [
+    ({}, 600, (0, 0)),
+    ({"trim_first_sec": 300}, 600, (0, 300)),
+    ({"trim_first_sec": 9999}, 600, (0, 600)),
+    ({"trim_start_sec": 100, "trim_end_sec": 400}, 600, (100, 300)),
+    ({"trim_start_sec": 100, "trim_end_sec": 9000}, 600, (100, 600)),
+    ({"trim_start_sec": 100}, 600, (100, 600)),
+    ({"trim_start_sec": "x", "trim_end_sec": None}, 600, (0, 0)),
+])
+def test_trim_request(params, cap, want):
+    assert url_ingest.trim_request(params, cap) == want

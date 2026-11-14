@@ -82,16 +82,20 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
     os.environ.setdefault("SONYA_YTDLP_MAX_HEIGHT", "1440")   # GPU worker: better source for the 9:16 crop
     plan_cap = sf.get("max_source_sec")
     cap = int(plan_cap) if plan_cap else url_ingest._max_duration_sec(mode)
-    # "Process the first N minutes" (user chose it instead of a refusal): N never exceeds the cap.
-    try:
-        trim = min(int(sf.get("trim_first_sec") or 0), cap)
-    except (TypeError, ValueError):
-        trim = 0
+    # The user chose a segment (start..end, or the first N minutes) instead of a refusal: its length <= cap.
+    start, trim = url_ingest.trim_request(sf, cap)
     try:
         url_ingest.assert_safe_url(url)
-        # FIRST step, before any download: a too-long video fails here within seconds.
-        url_ingest.probe(url, platform, mode=mode, max_duration_sec=(10 ** 6 if trim else cap))
-        path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None)
+        # FIRST step, before any download: a too-long video fails here within seconds. A segment lifts the
+        # length/size checks of the whole video (only the segment is downloaded).
+        info = url_ingest.probe(url, platform, mode=mode, max_duration_sec=(10 ** 6 if trim else cap),
+                                max_bytes=(1 << 50 if trim else url_ingest.long_source_overrides(cap, mode).get("max_bytes")))
+        total = (info or {}).get("duration")
+        if trim and total and start >= total:
+            raise SourceFetchError("SOURCE_TRIM_RANGE", "Начало отрезка позже конца видео. Выберите отрезок заново.")
+        lim = url_ingest.long_source_overrides(trim or total or cap, mode)
+        path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None,
+                                               trim_start=start, **lim)
     except url_ingest.DownloadLimitExceeded as exc:
         raise SourceFetchError("SOURCE_TOO_LONG", exc.user_message) from exc
     except url_ingest.UnsafeUrlError as exc:
