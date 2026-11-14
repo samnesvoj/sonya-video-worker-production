@@ -158,6 +158,8 @@ _FILE_TYPES = {
 
 # -- Graceful shutdown (SIGTERM from docker stop / Vast destroy) ---------------
 _STOP = threading.Event()
+# Set when YouTube answered "confirm you're not a bot" to this host's IP: stop claiming, the job goes to another server.
+_HOST_BLOCKED = threading.Event()
 _ACTIVE_JOB: Dict[str, Optional[str]] = {"id": None}
 
 
@@ -677,6 +679,11 @@ def process_job(job: dict, worker_id: str) -> None:
                 got = fetch_source(sf, mode, s3_input, tmp_dir)
                 input_path = got["path"]
             except SourceFetchError as exc:
+                if exc.code == "SOURCE_BOT_CHECK":
+                    _HOST_BLOCKED.set()          # before _fail: never re-claim the requeued job on this host
+                    logger.error("[worker] youtube_bot_check on this host: requeue job_id=%s, stop claiming", job_id)
+                    _fail(job_id, exc.code, exc.message, retry=True)
+                    return
                 _fail(job_id, exc.code, exc.message, retry=False)
                 return
             except Exception as exc:
@@ -938,6 +945,10 @@ def run_poll(worker_id: str, modes: Optional[List[str]] = None) -> None:
                 except Exception as exc:
                     logger.warning("[worker] requeue_stale_jobs failed: %s", exc)
                 last_stale_check = now
+
+        if _HOST_BLOCKED.is_set():           # YouTube blocks this IP: the dispatcher replaces the instance
+            _STOP.wait(POLL_INTERVAL)
+            continue
 
         # Claim next job
         try:

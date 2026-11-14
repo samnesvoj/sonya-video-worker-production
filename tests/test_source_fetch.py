@@ -74,3 +74,9 @@ def test_trim_never_exceeds_cap(monkeypatch, tmp_path):
     work = tmp_path / "w"; work.mkdir()
     sfm.fetch_source({"url": "https://youtu.be/abc", "platform": "youtube", "max_source_sec": 3600, "trim_first_sec": 99999}, "virality", "k", work)
     assert seen["trim"] == 3600
+
+
+def test_youtube_bot_check_is_its_own_code():
+    from scripts.source_fetch import classify_error
+    exc = Exception("ERROR: [youtube] abc: Sign in to confirm you’re not a bot. This helps protect our community.")
+    assert classify_error(exc)[0] == "SOURCE_BOT_CHECK"

@@ -483,3 +483,17 @@ def test_machine_that_failed_to_resume_twice_is_banned():
     clock.advance(95)
     mgr.tick()
     assert 7 in store.banned_machines(clock())
+
+
+def test_youtube_bot_check_bans_machine_and_replaces_instance():
+    mgr, vast, queue, store, clock = make()
+    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.12, "dph_base": 0.12})
+    iid, label = boot_one(mgr, vast, queue, clock)
+    banned_machine = store.get(iid).machine_id
+    # the worker hit "confirm you're not a bot": job requeued, worker_id still names this host
+    queue.add("j1", status="queued", worker_id=label, ts=clock(), last_error="SOURCE_BOT_CHECK")
+    mgr.tick()
+    assert vast.n("destroy") == 1 and any(e["event"] == "youtube_bot_check" for e in store.events(iid))
+    assert banned_machine in store.banned_machines(clock())
+    mgr.tick(); mgr.tick()
+    assert vast.n("create") == 2                           # replacement on another machine picks the job up

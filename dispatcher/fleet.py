@@ -194,6 +194,15 @@ class FleetManager:
     def _maybe_stop(self, inst: Inst, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         busy = snap.active_by_worker.get(inst.label, 0) > 0
         terminal = snap.last_terminal_by_worker.get(inst.label)
+        if inst.label in snap.bot_check_workers:
+            # YouTube answered "confirm you're not a bot" to this host's IP; its worker requeued the job and stopped
+            # claiming. Ban the machine for a week (other hosts download the same link fine) and replace the instance.
+            if inst.machine_id:
+                self.store.ban_machine(inst.machine_id, now + 7 * 86400, "youtube_bot_check")
+            if not busy:
+                self.store.event(now, inst.id, "youtube_bot_check", pending=snap.pending)
+                self._destroy(inst, now, actions, reason="youtube_bot_check")
+                return
         if busy:
             self.store.touch(inst.id, last_work_at=now)
             return

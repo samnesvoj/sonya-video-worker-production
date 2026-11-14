@@ -25,6 +25,10 @@ class SourceFetchError(Exception):
 
 # (substring of the yt-dlp error, lower-cased) -> (code, message for the user)
 _REASONS = (
+    # YouTube flags some data-centre IPs: the same link works from another server. The worker requeues the job and
+    # stops claiming; the dispatcher bans this machine and starts another one (dispatcher/queue.py bot_check_workers).
+    (("confirm you’re not a bot", "confirm you're not a bot", "not a bot"),
+     ("SOURCE_BOT_CHECK", "YouTube не отдал видео серверу обработки (проверка «не бот»). Попробуйте ещё раз через несколько минут или загрузите файл.")),
     (("private video", "this video is private", "sign in to view", "login required"),
      ("SOURCE_PRIVATE", "Видео приватное или закрыто по ссылке. Откройте доступ (публичное видео) и попробуйте снова.")),
     (("confirm your age", "age-restricted", "age restricted"),
