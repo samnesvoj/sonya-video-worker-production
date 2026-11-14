@@ -24,6 +24,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from . import translate
 from . import workflow as wf
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,7 @@ def run(input_video_path: str = "", output_dir: str = "", params: Optional[Dict[
         raise GenError(f"bad parameters: {e}") from e
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    gen_prompt, warn = translate.to_english(prompt)
 
     def prog(p: float, msg: str) -> None:
         if progress_callback:
@@ -180,12 +182,12 @@ def run(input_video_path: str = "", output_dir: str = "", params: Optional[Dict[
     lock = open(_root() / "gen.lock", "w")
     fcntl.flock(lock, fcntl.LOCK_EX)
     try:
-        return _run_locked(out, prompt, aspect, size, w, h, steps, count, seed0, prog)
+        return _run_locked(out, prompt, gen_prompt, warn, aspect, size, w, h, steps, count, seed0, prog)
     finally:
         lock.close()
 
 
-def _run_locked(out: Path, prompt: str, aspect: str, size: str, w: int, h: int, steps: int, count: int, seed0: int, prog) -> Dict[str, Any]:
+def _run_locked(out: Path, prompt: str, gen_prompt: str, warn, aspect: str, size: str, w: int, h: int, steps: int, count: int, seed0: int, prog) -> Dict[str, Any]:
     cdir, py = ensure_comfy()
     _link_models(cdir)
     port = _free_port()
@@ -210,7 +212,7 @@ def _run_locked(out: Path, prompt: str, aspect: str, size: str, w: int, h: int, 
         seeds = []
         for i in range(count):
             seed = (seed0 + i) % (2**31)
-            png = _generate_one(base, prompt, seed, w, h, steps)
+            png = _generate_one(base, gen_prompt, seed, w, h, steps)
             if len(png) < 1000 or png[:8] != b"\x89PNG\r\n\x1a\n":
                 raise GenError("generated file is not a PNG")
             p = out / f"gen_{i + 1}.png"
@@ -229,5 +231,9 @@ def _run_locked(out: Path, prompt: str, aspect: str, size: str, w: int, h: int, 
     meta = {"mode": "sonya_gen", "ai_generated": True, "model": wf.MODEL["id"], "license": wf.MODEL["license"],
             "workflow": wf.WORKFLOW_VERSION, "aspect": aspect, "size": size, "width": w, "height": h, "steps": steps,
             "seeds": seeds, "prompt": prompt, "negative_applied": False}
+    if gen_prompt != prompt:
+        meta["prompt_en"] = gen_prompt
+    if warn:
+        meta["warning"] = warn
     (out / "gen_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
     return {"clips": files, "mode": "sonya_gen", "status": "ok", "meta": meta}
