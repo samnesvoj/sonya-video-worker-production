@@ -235,13 +235,15 @@ _YTDLP_FORMAT = (
 )
 
 
-def _ytdlp_format_opts() -> dict:
+def _ytdlp_format_opts(max_height: Optional[int] = None) -> dict:
     """<=1080p H.264 by default (VPS path, unchanged). SONYA_YTDLP_MAX_HEIGHT>1080 (the GPU worker's source_fetch sets 1440):
     best resolution up to that, H.264 preferred only among equal resolutions - a 9:16 crop of 1440p/4K needs no upscale."""
     try:
         h = int(os.environ.get("SONYA_YTDLP_MAX_HEIGHT", "1080"))
     except ValueError:
         h = 1080
+    if max_height:
+        h = min(h, int(max_height))
     if h <= 1080:
         return {"format": _YTDLP_FORMAT}
     return {"format": f"bestvideo[height<={h}]+bestaudio[ext=m4a]/bestvideo[height<={h}]+bestaudio/best[height<={h}]/best",
@@ -249,7 +251,7 @@ def _ytdlp_format_opts() -> dict:
 
 
 def probe(url: str, platform: str, mode: Optional[str] = None,
-          max_duration_sec: Optional[int] = None) -> dict:
+          max_duration_sec: Optional[int] = None, max_bytes: Optional[int] = None) -> dict:
     """Metadata-only lookup (no download). Raises DownloadLimitExceeded if
     the video is already known to exceed the duration cap; raises
     DownloadFailed if the video can't be resolved at all.
@@ -295,10 +297,11 @@ def probe(url: str, platform: str, mode: Optional[str] = None,
         )
 
     filesize = info.get("filesize") or info.get("filesize_approx")
-    if filesize and filesize > _max_bytes(mode):
+    limit = max_bytes or _max_bytes(mode)
+    if filesize and filesize > limit:
         raise DownloadLimitExceeded(
             f"Видео слишком большое ({filesize // (1024 * 1024)} МБ). "
-            f"Максимум — {_max_bytes(mode) // (1024 * 1024)} МБ."
+            f"Максимум — {limit // (1024 * 1024)} МБ."
         )
 
     return {"title": info.get("title"), "duration": duration, "filesize": filesize}
@@ -348,10 +351,15 @@ def download_video(
     progress_cb: Optional[Callable[[float], None]] = None,
     mode: Optional[str] = None,
     trim_sec: Optional[int] = None,
+    trim_start: int = 0,
+    max_bytes: Optional[int] = None,
+    max_height: Optional[int] = None,
 ) -> tuple[str, str]:
     """
-    Downloads the video to a fresh temp file. trim_sec: fetch only the first N
-    seconds (yt-dlp download_ranges; direct files are cut afterwards by the caller via trim_file()).
+    Downloads the video to a fresh temp file. trim_sec: fetch only trim_sec seconds starting at trim_start
+    (the user's chosen segment; yt-dlp download_ranges, direct files are cut here after the download). The result
+    starts at ~trim_start (keyframe) -- callers cut the exact length with trim_file(path, trim_sec).
+    max_bytes / max_height: per-job overrides (long admin videos) of the MAX_UPLOAD_SIZE_MB / SONYA_YTDLP_MAX_HEIGHT.
 
     Returns (local_path, extension). Caller owns the returned file and MUST
     remove it (try/finally) once done — this function never cleans up its
@@ -362,16 +370,21 @@ def download_video(
     tmp_dir = tempfile.mkdtemp(prefix="sonya_url_ingest_")
 
     if platform in ("youtube", "vk", "twitch"):
-        return _download_via_ytdlp(url, platform, tmp_dir, progress_cb, mode=mode, trim_sec=trim_sec)
+        return _download_via_ytdlp(url, platform, tmp_dir, progress_cb, mode=mode, trim_sec=trim_sec,
+                                   trim_start=trim_start, max_bytes=max_bytes, max_height=max_height)
     if platform == "direct":
-        return _download_direct(url, tmp_dir, progress_cb, mode=mode)
+        path, ext = _download_direct(url, tmp_dir, progress_cb, mode=mode, max_bytes=max_bytes)
+        if trim_sec and trim_start:
+            path = trim_file(path, int(trim_sec), start=int(trim_start))
+        return path, ext
     raise UnsupportedUrlError()
 
 
 def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
                          progress_cb: Optional[Callable[[float], None]],
                          mode: Optional[str] = None,
-                         trim_sec: Optional[int] = None) -> tuple[str, str]:
+                         trim_sec: Optional[int] = None, trim_start: int = 0,
+                         max_bytes: Optional[int] = None, max_height: Optional[int] = None) -> tuple[str, str]:
     if not YT_DLP_AVAILABLE:
         raise DownloadFailed("yt-dlp is not installed")
 
@@ -390,7 +403,7 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
                     pass
 
     opts = {
-        **_ytdlp_format_opts(),
+        **_ytdlp_format_opts(max_height),
         "merge_output_format": "mp4",
         "outtmpl": outtmpl,
         "noplaylist": True,
@@ -400,7 +413,7 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         "overwrites": True,
         "retries": 3,
         "socket_timeout": 30,
-        "max_filesize": _max_bytes(mode),
+        "max_filesize": max_bytes or _max_bytes(mode),
         "http_headers": {"User-Agent": _UA},
         "progress_hooks": [_hook],
         # Deliberately no cookiefile / proxy / POT-provider — only public,
@@ -409,7 +422,8 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
 
     if trim_sec and trim_sec > 0:
         from yt_dlp.utils import download_range_func
-        opts["download_ranges"] = download_range_func(None, [(0, int(trim_sec))])
+        st = max(0, int(trim_start or 0))
+        opts["download_ranges"] = download_range_func(None, [(st, st + int(trim_sec))])
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -447,8 +461,8 @@ def _find_downloaded_file(info: Optional[dict], tmp_dir: str) -> Optional[str]:
 
 def _download_direct(url: str, tmp_dir: str,
                       progress_cb: Optional[Callable[[float], None]],
-                      mode: Optional[str] = None) -> tuple[str, str]:
-    limit = _max_bytes(mode)
+                      mode: Optional[str] = None, max_bytes: Optional[int] = None) -> tuple[str, str]:
+    limit = max_bytes or _max_bytes(mode)
     ext = Path(urlparse(url).path).suffix.lower()
     if ext not in _DIRECT_VIDEO_EXT:
         ext = ".mp4"
@@ -543,12 +557,40 @@ def validate_downloaded_file(local_path: str, hint_name: str, mode: Optional[str
     return content, safe_name
 
 
-def trim_file(path: str, sec: int) -> str:
-    """Cut the first `sec` seconds into a sibling file (stream copy, no re-encode). Returns the new path
-    (the original is removed). Falls back to the original on ffmpeg failure."""
+def trim_request(params: dict, cap_sec: int) -> tuple:
+    """(start_sec, length_sec) of the segment the user chose for a too-long video; (0, 0) = the whole video.
+    params.trim_start_sec / trim_end_sec (segment picker) or the older trim_first_sec (= the first N seconds).
+    The length never exceeds cap_sec (the tariff limit)."""
+    def num(key):
+        try:
+            return max(0, int(float((params or {}).get(key) or 0)))
+        except (TypeError, ValueError):
+            return 0
+    start, end, first = num("trim_start_sec"), num("trim_end_sec"), num("trim_first_sec")
+    length = (end - start) if end > start else (first or (int(cap_sec) if start else 0))
+    if length <= 0:
+        return 0, 0
+    return start, min(length, int(cap_sec))
+
+
+def long_source_overrides(seconds: Optional[float], mode: Optional[str] = None) -> dict:
+    """Per-job download limits for long sources (admin up to hours): bytes scale with the length
+    (~1.25 MB/s, never below MAX_UPLOAD_SIZE_MB) and > 90 min is fetched at <=1080p."""
+    if not seconds:
+        return {}
+    out = {"max_bytes": max(_max_bytes(mode), int(seconds * 1_250_000))}
+    if seconds > 5400:
+        out["max_height"] = 1080
+    return out
+
+
+def trim_file(path: str, sec: int, start: int = 0) -> str:
+    """Cut `sec` seconds from `start` into a sibling file (stream copy, no re-encode; the start snaps to the
+    keyframe before it). Returns the new path (the original is removed). Falls back to the original on ffmpeg failure."""
     out = str(Path(path).with_name(f"trim_{uuid.uuid4().hex[:8]}{Path(path).suffix or '.mp4'}"))
     try:
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", path, "-t", str(int(sec)), "-c", "copy",
+        seek = ["-ss", str(int(start))] if start and int(start) > 0 else []
+        subprocess.run(["ffmpeg", "-y", "-v", "error", *seek, "-i", path, "-t", str(int(sec)), "-c", "copy",
                         "-map", "0:v:0", "-map", "0:a:0?", "-movflags", "+faststart", out],
                        check=True, capture_output=True, timeout=900)
     except Exception as exc:
