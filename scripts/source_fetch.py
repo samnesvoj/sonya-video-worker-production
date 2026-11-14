@@ -78,10 +78,16 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
     os.environ.setdefault("SONYA_YTDLP_MAX_HEIGHT", "1440")   # GPU worker: better source for the 9:16 crop
     plan_cap = sf.get("max_source_sec")
     cap = int(plan_cap) if plan_cap else url_ingest._max_duration_sec(mode)
+    # "Process the first N minutes" (user chose it instead of a refusal): N never exceeds the cap.
+    try:
+        trim = min(int(sf.get("trim_first_sec") or 0), cap)
+    except (TypeError, ValueError):
+        trim = 0
     try:
         url_ingest.assert_safe_url(url)
-        url_ingest.probe(url, platform, mode=mode, max_duration_sec=cap)
-        path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode)
+        # FIRST step, before any download: a too-long video fails here within seconds.
+        url_ingest.probe(url, platform, mode=mode, max_duration_sec=(10 ** 6 if trim else cap))
+        path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None)
     except url_ingest.DownloadLimitExceeded as exc:
         raise SourceFetchError("SOURCE_TOO_LONG", exc.user_message) from exc
     except url_ingest.UnsafeUrlError as exc:
@@ -93,6 +99,9 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
         raise SourceFetchError(*classify_error(exc)) from exc
     try:
         dur = _duration(path)
+        if trim and dur is not None and dur > trim + 3:    # keyframe-rounded section came out longer: cut exactly
+            path = url_ingest.trim_file(path, trim)
+            dur = _duration(path)
         if dur is None:
             raise SourceFetchError("SOURCE_DURATION_UNKNOWN", "Не удалось определить длительность видео. Попробуйте другую ссылку или загрузите файл.")
         if dur > cap:

@@ -51,3 +51,26 @@ def test_unsupported(tmp_path):
     with pytest.raises(sfm.SourceFetchError) as e:
         sfm.fetch_source({"url": "ftp://x"}, "virality", "k", tmp_path)
     assert e.value.code == "SOURCE_UNSUPPORTED"
+
+
+def test_trim_first_minutes_instead_of_refusal(monkeypatch, tmp_path):
+    up, seen = [], {}
+    _patch(monkeypatch, tmp_path, 3660.0, up)          # downloaded section came out 61 min (keyframe rounding)
+    monkeypatch.setattr(url_ingest, "probe", lambda *a, **k: seen.setdefault("probe_cap", k["max_duration_sec"]) and {})
+    orig = url_ingest.download_video
+    monkeypatch.setattr(url_ingest, "download_video", lambda *a, **k: (seen.setdefault("trim", k.get("trim_sec")), orig(*a, **k))[1])
+    durs = iter([3660.0, 3600.0])
+    monkeypatch.setattr(sfm, "_duration", lambda p: next(durs))
+    monkeypatch.setattr(url_ingest, "trim_file", lambda p, s: seen.setdefault("cut", s) and p)
+    work = tmp_path / "w"; work.mkdir()
+    sfm.fetch_source({"url": "https://youtu.be/abc", "platform": "youtube", "max_source_sec": 3600, "trim_first_sec": 3600}, "virality", "k", work)
+    assert seen["trim"] == 3600 and seen["cut"] == 3600 and seen["probe_cap"] > 3600 and up
+
+
+def test_trim_never_exceeds_cap(monkeypatch, tmp_path):
+    seen = {}
+    _patch(monkeypatch, tmp_path, 100.0, [])
+    monkeypatch.setattr(url_ingest, "download_video", lambda *a, **k: (seen.setdefault("trim", k.get("trim_sec")), (str(tmp_path / "dl" / "v.mp4"), ".mp4"))[1])
+    work = tmp_path / "w"; work.mkdir()
+    sfm.fetch_source({"url": "https://youtu.be/abc", "platform": "youtube", "max_source_sec": 3600, "trim_first_sec": 99999}, "virality", "k", work)
+    assert seen["trim"] == 3600

@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import socket
+import subprocess
 import tempfile
 import time
 import uuid
@@ -346,9 +347,11 @@ def download_video(
     platform: str,
     progress_cb: Optional[Callable[[float], None]] = None,
     mode: Optional[str] = None,
+    trim_sec: Optional[int] = None,
 ) -> tuple[str, str]:
     """
-    Downloads the video to a fresh temp file.
+    Downloads the video to a fresh temp file. trim_sec: fetch only the first N
+    seconds (yt-dlp download_ranges; direct files are cut afterwards by the caller via trim_file()).
 
     Returns (local_path, extension). Caller owns the returned file and MUST
     remove it (try/finally) once done — this function never cleans up its
@@ -359,7 +362,7 @@ def download_video(
     tmp_dir = tempfile.mkdtemp(prefix="sonya_url_ingest_")
 
     if platform in ("youtube", "vk", "twitch"):
-        return _download_via_ytdlp(url, platform, tmp_dir, progress_cb, mode=mode)
+        return _download_via_ytdlp(url, platform, tmp_dir, progress_cb, mode=mode, trim_sec=trim_sec)
     if platform == "direct":
         return _download_direct(url, tmp_dir, progress_cb, mode=mode)
     raise UnsupportedUrlError()
@@ -367,7 +370,8 @@ def download_video(
 
 def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
                          progress_cb: Optional[Callable[[float], None]],
-                         mode: Optional[str] = None) -> tuple[str, str]:
+                         mode: Optional[str] = None,
+                         trim_sec: Optional[int] = None) -> tuple[str, str]:
     if not YT_DLP_AVAILABLE:
         raise DownloadFailed("yt-dlp is not installed")
 
@@ -403,6 +407,9 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         # unauthenticated content is supported.
     }
 
+    if trim_sec and trim_sec > 0:
+        from yt_dlp.utils import download_range_func
+        opts["download_ranges"] = download_range_func(None, [(0, int(trim_sec))])
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -534,6 +541,21 @@ def validate_downloaded_file(local_path: str, hint_name: str, mode: Optional[str
 
     safe_name = validate_video_bytes(content, hint_name, max_size_bytes=_max_bytes(mode))
     return content, safe_name
+
+
+def trim_file(path: str, sec: int) -> str:
+    """Cut the first `sec` seconds into a sibling file (stream copy, no re-encode). Returns the new path
+    (the original is removed). Falls back to the original on ffmpeg failure."""
+    out = str(Path(path).with_name(f"trim_{uuid.uuid4().hex[:8]}{Path(path).suffix or '.mp4'}"))
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", path, "-t", str(int(sec)), "-c", "copy",
+                        "-map", "0:v:0", "-map", "0:a:0?", "-movflags", "+faststart", out],
+                       check=True, capture_output=True, timeout=900)
+    except Exception as exc:
+        logger.warning("[url_ingest] trim_failed path=%s: %s", path, exc)
+        return path
+    os.remove(path)
+    return out
 
 
 def cleanup(local_path: str) -> None:
