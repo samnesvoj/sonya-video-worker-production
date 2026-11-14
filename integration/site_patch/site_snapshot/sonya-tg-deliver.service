@@ -1,0 +1,12 @@
+[Unit]
+Description=SONYA: send finished clips to linked Telegram (needs TELEGRAM_BOT_TOKEN in .env.local)
+After=sonya-api.service
+[Service]
+WorkingDirectory=/opt/sonya
+EnvironmentFile=/opt/sonya/.env.local
+ExecStart=/opt/sonya/.venv/bin/python -m scripts.tg_deliver
+Restart=on-failure
+RestartPreventExitStatus=2
+User=root
+[Install]
+WantedBy=multi-user.target
