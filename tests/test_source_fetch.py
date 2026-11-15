@@ -116,3 +116,22 @@ def test_segment_start_after_end_of_video(monkeypatch, tmp_path):
 ])
 def test_trim_request(params, cap, want):
     assert url_ingest.trim_request(params, cap) == want
+
+
+def test_long_sources_are_1080p_h264_short_keep_1440(monkeypatch):
+    from scripts import url_ingest
+    assert url_ingest.long_source_overrides(1199).get("max_height") is None
+    assert url_ingest.long_source_overrides(1201)["max_height"] == 1080
+    monkeypatch.setenv("SONYA_YTDLP_MAX_HEIGHT", "1440")
+    assert url_ingest._ytdlp_format_opts(1080)["format"].startswith("bestvideo[vcodec^=avc1][height<=1080]")
+    assert "1440" in url_ingest._ytdlp_format_opts(None)["format"]
+
+
+def test_low_disk_fails_before_download(monkeypatch, tmp_path):
+    import pytest
+    from scripts import source_fetch
+    monkeypatch.setattr(source_fetch.shutil, "disk_usage", lambda p: type("U", (), {"free": 2 << 30})())
+    source_fetch._check_free_space(tmp_path, 600)                 # 600 s needs ~1.7 GB: ok
+    with pytest.raises(source_fetch.SourceFetchError) as e:
+        source_fetch._check_free_space(tmp_path, 4740)            # 79 min needs ~6.7 GB
+    assert e.value.code == "SOURCE_NO_SPACE"
