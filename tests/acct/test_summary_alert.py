@@ -39,5 +39,5 @@ def test_real_charges_row_shape():
            "items": [{"type": "gpu", "amount": 0.025}, {"type": "disk", "amount": 0.007}, {"type": "bwd", "amount": 0.03}, {"type": "bwu", "amount": 0.001}]}
     led = Ledger()
     assert import_charges(led, [row], 1.0) == 3 and import_charges(led, [row], 2.0) == 3      # idempotent upsert
-    s = led.sum_costs("confirmed", date(2026, 11, 13))
+    s = led.sum_costs("confirmed", date(2026, 11, 14))
     assert (s["gpu"], s["disk"], s["other"]) == (Decimal("0.025"), Decimal("0.007"), Decimal("0.031"))
