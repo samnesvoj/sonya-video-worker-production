@@ -68,7 +68,7 @@ def test_ranking_europe_class_cache_price_and_no_banned_hosts():
 
 
 def test_power_ranking_and_reserve_storage_cap():
-    cfg = FleetConfig(power_reserve=True)
+    cfg = FleetConfig(power_reserve=True, disk_gb=30)          # numbers below are for a 30 GB disk
     assert [o["id"] for o in launcher.rank_power_offers(POWER, cfg, set())] == [52, 50, 51]   # price per video slot
     assert [o["id"] for o in launcher.rank_power_offers(POWER, cfg, set(), reserve=True)] == [50, 51]   # 52: 738 RUB > 500
     assert launcher.pause_rub_month(POWER[0], cfg) == Decimal("369.00")                       # 30 GB x $0.15 x 82

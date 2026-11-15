@@ -223,16 +223,16 @@ def test_cpu_families():
 def test_search_query_and_payload():
     q = launcher.search_query(CFG)
     assert "RTX 3060" in q["gpu_name"]["in"] and q["inet_down"]["gte"] == 800 and q["gpu_ram"]["gte"] <= 12288
-    assert q["disk_space"]["gte"] == 30 and q["dph_total"]["lte"] == 0.18 and q["cpu_ram"]["gte"] == 16000
+    assert q["disk_space"]["gte"] == 40 and q["dph_total"]["lte"] == 0.18 and q["cpu_ram"]["gte"] == 16000
     p = launcher.create_payload(CFG, "sonya-pool-x", "tok", ENV)
-    assert p["disk"] == 30
+    assert p["disk"] == 40
     assert p["env"]["NVIDIA_DRIVER_CAPABILITIES"] == "compute,utility,video"            # NVENC inside the container
     assert p["env"]["SONYA_WORKER_CONCURRENCY"] == str(CFG.jobs_per_instance)
 
 
 def test_production_defaults():
     c = FleetConfig.from_env({})
-    assert (c.warm_instances, c.warm_prime, c.max_instances, c.jobs_per_instance, c.max_resume_failures, c.disk_gb) == (1, True, 3, 2, 1, 30)
+    assert (c.warm_instances, c.warm_prime, c.max_instances, c.jobs_per_instance, c.max_resume_failures, c.disk_gb) == (1, True, 3, 2, 1, 40)
     c = FleetConfig.from_env({"SONYA_WARM_INSTANCES": "0", "SONYA_JOBS_PER_INSTANCE": "3", "SONYA_DISK_GB": "35"})
     assert (c.warm_instances, c.jobs_per_instance, c.disk_gb) == (0, 3, 35)
 
