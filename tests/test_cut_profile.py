@@ -148,15 +148,15 @@ def test_run_encode_all_nvenc_sessions_busy_goes_straight_to_libx264(monkeypatch
     assert used == "nvenc->cpu" and calls == [make(cp.encoder_args("cpu", "8M"))]
 
 
-def test_site_job_gets_eight_clips_by_default(video, tmp_path, monkeypatch):
-    """Owner 2026-11-12: «8 клипов по видео» without any max_clips from the site; an explicit value wins."""
+def test_site_job_gets_ten_clips_by_default(video, tmp_path, monkeypatch):
+    """CEO 2026-11-16: «от 10 клипов» (was 8) without any max_clips from the site; an explicit value wins."""
     monkeypatch.delenv("SONYA_DEFAULT_MAX_CLIPS", raising=False)
     out = cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS), video, str(tmp_path), ass_supported=True, editor=False)
-    assert out["max_clips"] == 8
+    assert out["max_clips"] == 10
     out = cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS, max_clips=2), video, str(tmp_path),
                            ass_supported=True, editor=False)
     assert out["max_clips"] == 2
-    assert cp.default_max_clips({}) == 8 and cp.default_max_clips({"max_clips": "x"}) == 8
+    assert cp.default_max_clips({}) == 10 and cp.default_max_clips({"max_clips": "x"}) == 10
     monkeypatch.setenv("SONYA_DEFAULT_MAX_CLIPS", "5")
     assert cp.default_max_clips({}) == 5
 

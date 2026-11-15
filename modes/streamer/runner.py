@@ -228,7 +228,7 @@ def analyze(
     _set = params.get("settings") if isinstance(params.get("settings"), dict) else {}
     mc.setdefault("moment_types", params.get("moment_types") or _set.get("moment_types") or _set.get("momentTypes") or [])
     from scripts.shared.cut_profile import default_max_clips
-    want = default_max_clips(params)               # 8 by default (owner 2026-11-12)
+    want = default_max_clips(params)               # 10 by default (CEO 2026-11-16)
     pool_n = int(params.get("pool_clips", max(want, 12)))
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
     selection["chat"] = chat_meta
@@ -509,7 +509,7 @@ def run(
     params: Optional[Dict[str, Any]] = None,
     progress_callback=None,
 ) -> Dict[str, Any]:
-    """Production entry point: analyze() once, render the top params["max_clips"] (default 8) moments,
+    """Production entry point: analyze() once, render the top params["max_clips"] (default 10) moments,
     two at a time (one analyses on the CPU while the other encodes)."""
     params = dict(params or {})
     result = analyze(input_video_path, output_dir, params, progress_callback)
@@ -530,7 +530,8 @@ def run(
             return None
 
     from concurrent.futures import ThreadPoolExecutor
-    workers = max(1, int(os.environ.get("SONYA_CLIP_WORKERS", "2")))
+    from scripts.shared.clip_parallel import clip_workers      # 2 before 2026-11-16; more on an idle server
+    workers = clip_workers(len(top))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         done = list(pool.map(one, range(len(top))))
     from scripts.shared.ad_banner import kind_of as _ad_banner

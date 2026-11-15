@@ -44,13 +44,14 @@ SITE_STYLES = {
     "basic": ("minimal", None),          # plain white, bottom
 }
 DEFAULT_STYLE = "viral"                  # job without settings (API / tests) → the reference look
-# owner 2026-11-12: «хочу, чтоб SONYA выкатывала автоматом 8 клипов по видео» - the site never sends max_clips;
-# fewer when the speech has fewer complete stories. SONYA_DEFAULT_MAX_CLIPS overrides (ops).
-DEFAULT_MAX_CLIPS = 8
+# owner 2026-11-12: «хочу, чтоб SONYA выкатывала автоматом 8 клипов по видео» -> CEO 2026-11-16: «количество клипов не 8,
+# а от 10». The site never sends max_clips; fewer when the speech has fewer complete stories (short sources).
+# SONYA_DEFAULT_MAX_CLIPS overrides (ops; =8 restores the old default without a rollback).
+DEFAULT_MAX_CLIPS = 10
 
 
 def default_max_clips(params: Optional[Dict[str, Any]] = None) -> int:
-    """params["max_clips"] when the job sets it, else SONYA_DEFAULT_MAX_CLIPS, else 8."""
+    """params["max_clips"] when the job sets it, else SONYA_DEFAULT_MAX_CLIPS, else 10."""
     v = (params or {}).get("max_clips")
     if v in (None, "", 0):
         v = os.environ.get("SONYA_DEFAULT_MAX_CLIPS") or DEFAULT_MAX_CLIPS
