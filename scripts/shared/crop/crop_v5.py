@@ -168,7 +168,7 @@ def _cx(tr: Dict[str, Any]) -> float:
 # ── window path ──────────────────────────────────────────────────────────────────────────────────────
 
 def lazy_path(boxes: List[Tuple[float, List[float]]], s0: float, s1: float, win: int, max_x: int,
-              smooth_sec: float = 0.4) -> List[List[float]]:
+              smooth_sec: float = 0.4, soft_margin: bool = False) -> List[List[float]]:
     """Window x keyframes over [s0, s1] that keep every face box inside [x + m, x + win - m].
     Forward lazy pass + backward lazy pass, averaged (stays feasible: both are inside each sample's
     interval), light moving average, re-clamped to the feasible interval, then simplified."""
@@ -180,6 +180,8 @@ def lazy_path(boxes: List[Tuple[float, List[float]]], s0: float, s1: float, win:
     iv = []
     for t, b in pts:
         m = MARGIN_FRAC * b[2]
+        if soft_margin:       # fill mode, big face: the full margin would pin the window to every detection (jitter);
+            m = max(0.0, min(m, 0.25 * (win - b[2])))   # keep half the spare room as a dead zone instead
         lo, hi = b[0] + b[2] + m - win, b[0] - m           # window x range that contains the padded face
         if lo > hi:                                          # face (+ margin) wider than the window: centre it
             lo = hi = b[0] + b[2] / 2.0 - win / 2.0
@@ -439,9 +441,10 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             for who, r0, r1 in sh["speakers"]:
                 r0, r1 = max(a, r0), min(b, r1)
                 if r1 - r0 > 1e-3:
-                    k += lazy_path(who["boxes"], r0, r1, win, mx) or [[round(r0, 3), last_x], [round(r1, 3), last_x]]
+                    k += lazy_path(who["boxes"], r0, r1, win, mx, soft_margin=True) or \
+                        [[round(r0, 3), last_x], [round(r1, 3), last_x]]
         else:
-            k = lazy_path(sh.get("pair") or main["boxes"], a, b, win, mx) if main else []
+            k = lazy_path(sh.get("pair") or main["boxes"], a, b, win, mx, soft_margin=fill) if main else []
         if not k:
             x0 = (last_cx if lay == "closeup" else last_x) if a > 0 and b - a < 1.0 else \
                 ((sq_max // 2) // 2 * 2 if lay == "closeup" else center)
