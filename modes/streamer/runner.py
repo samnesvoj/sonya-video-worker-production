@@ -533,8 +533,10 @@ def run(
     workers = max(1, int(os.environ.get("SONYA_CLIP_WORKERS", "2")))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         done = list(pool.map(one, range(len(top))))
+    from scripts.shared.ad_banner import kind_of as _ad_banner
+    keep_ass = _ad_banner(params) is not None         # the worker's ad banner step reads it, then deletes it
     for n in names:                                   # subtitles are burned in: no side files in the upload
-        for ext in (".ass", ".glass.json", ".glassmask.ass"):
+        for ext in ((".glass.json", ".glassmask.ass") if keep_ass else (".ass", ".glass.json", ".glassmask.ass")):
             p = Path(n).with_suffix(ext)
             if p.exists():
                 p.unlink()
