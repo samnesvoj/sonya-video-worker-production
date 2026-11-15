@@ -44,6 +44,10 @@ ASD_SMOOTH_SEC = 0.5         # fill mode + speaker model: scores are averaged ov
 ASD_ON = 0.5                 # … a person «talks» when the smoothed score is above this
 ASD_MARGIN = 1.0             # … and takes the window only when ahead of the current one by this much …
 ASD_HOLD_SEC = 0.6           # … for this long (hysteresis: a listener's smile or a short «да» never wins)
+ASD_MIN_FACE = 90            # fill mode: faces narrower than this (source px) are too small for the speaker model
+                             # (VSRAP wide two-shot, 60 px profiles: it picked the listener; Nagiev 125 px: right)
+FACE_SAME = 0.40             # fill mode: face-embedding cosine that says «same person» across a cut …
+FACE_MARGIN = 0.15           # … and by this much more than the other candidate
 FILL_MIN_SCORE = 0.72        # fill mode: lowest detector score of a second person the speaker model may pick
 EAR_FRAC = 0.10              # fill mode: the head (ears) reaches this × face width beyond the detector box
 BACK_K = 0.7                 # … plus this × |yaw| × width on the back side of a turned head (≤ 0.25 w)
@@ -383,12 +387,14 @@ def _merge_runs(runs: List[List[Any]], min_sec: float, strength=None) -> List[Li
 
 
 def speaker_runs_asd(cands: List[Dict[str, Any]], ts: Any, scores: List[Any], s0: float, s1: float,
-                     min_sec: float = FILL_SPEAKER_MIN_SEC) -> Optional[List[List[Any]]]:
+                     min_sec: float = FILL_SPEAKER_MIN_SEC, prefer_fn=None) -> Optional[List[List[Any]]]:
     """Fill mode with the audio-visual speaker model: who talks over [s0, s1] → [[track, t0, t1]].
     Scores (one per 25 fps frame, NaN = face not seen) are smoothed; the window changes person only when the
     other one clearly talks (> ASD_ON and ASD_MARGIN ahead) for ASD_HOLD_SEC; when nobody clearly talks
     (a pause, an off-screen voice, doubt) the current person KEEPS the window — never a jump to a listener.
-    Runs shorter than min_sec are absorbed. None → no usable scores (caller falls back)."""
+    Runs shorter than min_sec are absorbed. None → no usable scores (caller falls back).
+    prefer_fn() → index of the person to start with when nobody clearly talks in the first 2 s (the one who was
+    on screen before the cut, by face identity) or None; called only then."""
     import numpy as np
     ts = np.asarray(ts, dtype=float)
     if len(ts) < 5 or len(scores) != len(cands):
@@ -414,7 +420,13 @@ def speaker_runs_asd(cands: List[Dict[str, Any]], ts: Any, scores: List[Any], s0
     head = int(round(2.0 * fps))
     first = [mean(j, 0, head) for j in range(len(cands))]
     whole = [mean(j, 0, len(ts)) for j in range(len(cands))]
-    cur = int(np.argmax(first)) if max(first) > ASD_ON else int(np.argmax(whole))
+    cur = None
+    if max(first) > ASD_ON:
+        cur = int(np.argmax(first))
+    elif prefer_fn is not None:
+        cur = prefer_fn()
+    if cur is None:
+        cur = int(np.argmax(whole))
     hold = max(1, int(round(ASD_HOLD_SEC * fps)))
     who, pend, cnt = [], None, 0
     for i in range(len(ts)):
@@ -484,8 +496,27 @@ def fill_candidate(main: Dict[str, Any], other: Dict[str, Any], W: int) -> bool:
     return inside >= 0.8 and abs(_cx(main) - _cx(other)) >= 0.8 * max(main["w"], other["w"])
 
 
+def _same_person(prev: Optional[Dict[str, Any]], people: List[Dict[str, Any]], s0: float,
+                 identity_fn) -> Optional[int]:
+    """Fill mode, the speaker model is unsure at the start of a shot: which of `people` was on screen at the end of
+    the previous shot (face identity across the cut)? None when unknown / not clear."""
+    if identity_fn is None or prev is None or prev.get("kind") == "none":
+        return None
+    who = prev["speakers"][-1][0] if prev.get("speakers") else prev.get("main")
+    if who is None or prev.get("pair"):
+        return None
+    ref = [(t, b) for t, b in who["boxes"] if t >= prev["end"] - 2.0] or who["boxes"]
+    sims = identity_fn(ref, [p["boxes"] for p in people])
+    if not sims:
+        return None
+    order = sorted(range(len(sims)), key=lambda i: -sims[i])
+    best = order[0]
+    second = sims[order[1]] if len(order) > 1 else -1.0
+    return best if sims[best] >= FACE_SAME and sims[best] - second >= FACE_MARGIN else None
+
+
 def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
-                  fill: bool = False, speaker_fn=None) -> Dict[str, Any]:
+                  fill: bool = False, speaker_fn=None, identity_fn=None) -> Dict[str, Any]:
     """speaker_fn (fill mode): (list of track boxes, s0, s1) → (times, [scores per track]) | None — the
     audio-visual speaker model (active_speaker.score_tracks bound to the clip); None → mouth-motion cue."""
     from .smart_crop_adapter import crop_window, split_window
@@ -557,11 +588,21 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             # no split: follow whoever talks, jump (never pan) between them
             people = [main, partner] if partner is not None else cands
             runs, cue = None, "mouth"
-            if speaker_fn is not None:
+            if speaker_fn is not None and min(p["w"] for p in people) < ASD_MIN_FACE:
+                j = _same_person(shots[-1] if shots else None, people, s0, identity_fn)
+                if j is not None:      # too small to tell who talks: hold the person from before the cut
+                    runs, cue = [[people[j], s0, s1]], "hold+face"
+            if runs is None and speaker_fn is not None:
                 res = speaker_fn([tr["boxes"] for tr in people], s0, s1)
                 if res is not None:
-                    runs = speaker_runs_asd(people, res[0], res[1], s0, s1, min_sec=MIN_LAYOUT_SEC)
-                    cue = "asd" if runs else cue
+                    used: List[bool] = []
+
+                    def prefer(people=people, prev=shots[-1] if shots else None, s0=s0, used=used):
+                        j = _same_person(prev, people, s0, identity_fn)
+                        used.append(j is not None)
+                        return j
+                    runs = speaker_runs_asd(people, res[0], res[1], s0, s1, min_sec=MIN_LAYOUT_SEC, prefer_fn=prefer)
+                    cue = ("asd+face" if any(used) else "asd") if runs else cue
             if runs is None:
                 runs = speaker_runs(people[0], people[1], s0, s1)
             shot["speakers"] = runs

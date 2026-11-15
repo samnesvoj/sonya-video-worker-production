@@ -274,14 +274,19 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         elif per_clip:
             clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
             fill = crop.get("layout") == FILL_LAYOUT
-            speaker_fn = None
+            speaker_fn = identity_fn = None
             if fill and clip_an is not None:      # who talks: audio-visual speaker model on this clip (optional)
                 from scripts.shared.crop import active_speaker
 
                 def speaker_fn(boxes, a, b, _s=start):
                     return active_speaker.score_tracks(input_video_path, _s, a, b, boxes)
+
+                def identity_fn(ref, cands, _s=start):
+                    from scripts.shared.crop import face_id
+                    return face_id.similarities(input_video_path, _s, ref, cands)
             track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
-                or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn)
+                or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn,
+                                 identity_fn=identity_fn)
             if speaker_fn is not None:
                 seg["crop_speaker_model"] = active_speaker.status()
             if clip_an is None:

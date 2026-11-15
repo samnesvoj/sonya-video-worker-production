@@ -434,7 +434,7 @@ def game_track(analysis: Optional[Dict[str, Any]], duration: float, *, width: in
 
 
 def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
-                  fill: bool = False, speaker_fn: Any = None, **kw: Any) -> Dict[str, Any]:
+                  fill: bool = False, speaker_fn: Any = None, identity_fn: Any = None, **kw: Any) -> Dict[str, Any]:
     """Shot-aware crop for one clip: crop-shots-v5 (owner 2026-11-13: faces always whole, no false split,
     no layout jumps, wide close-ups). SONYA_CROP_VERSION=v3 brings back the previous algorithm.
     fill=True (crop layout "fill_9x16"): always one full 9:16 window that follows the speaker (crop_v5);
@@ -442,7 +442,8 @@ def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width:
     if os.environ.get("SONYA_CROP_VERSION", "").lower() == "v3" and not fill:
         return crop_track_v3(analysis, duration, width=width, height=height, **kw)
     from .crop_v5 import caption_boxes, crop_track_v5
-    track = crop_track_v5(analysis, duration, width=width, height=height, fill=fill, speaker_fn=speaker_fn)
+    track = crop_track_v5(analysis, duration, width=width, height=height, fill=fill, speaker_fn=speaker_fn,
+                          identity_fn=identity_fn)
     cap = caption_boxes(analysis, duration)
     if cap:
         track["caption_blur"] = cap

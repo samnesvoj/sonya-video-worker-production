@@ -373,3 +373,43 @@ def test_active_speaker_model_loads_and_scores():
         assert net(a, v).shape == (25,)
     m = asd.mfcc((torch.randn(16000) * 1000).numpy())
     assert m.shape == (99, 13)
+
+
+def test_fill_tiny_faces_hold_the_person_from_before_the_cut():
+    """VSRAP wide two-shot (faces 60 px): the speaker model is not trusted; the window holds whoever was on screen
+    before the cut (face identity), for the whole shot — even if the model «sees» the other one talk."""
+    def f(t):
+        return [face(1300, 360)] if t < 4 else [face(400, 64), face(1500, 62)]
+    seen = {}
+
+    def identity_fn(ref, cands):
+        seen["n"] = len(cands)
+        return [0.1, 0.7]          # the close-up person is the right one
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0),
+               identity_fn=identity_fn)
+    assert seen["n"] == 2
+    sh = tr["shots"][1]
+    assert sh["speaker_cue"] == "hold+face" and not sh.get("speaker_switch")
+    assert all(_on(tr, t, 1500) for t in (5.0, 7.0, 9.5))
+
+
+def test_fill_tiny_faces_unknown_identity_uses_the_model():
+    f = lambda t: [face(1300, 360)] if t < 4 else [face(400, 64), face(1500, 62)]          # noqa: E731
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0),
+               identity_fn=lambda ref, cands: [0.3, 0.32])
+    assert tr["shots"][1]["speaker_cue"] == "asd" and _on(tr, 7.0, 400)
+
+
+def test_fill_unsure_start_holds_the_same_person_across_the_cut():
+    """Big enough faces, but nobody clearly talks in the first 2 s after the cut: start with the person from
+    before the cut (identity), not with whoever happens to score higher."""
+    f = lambda t: [face(1300, 300)] if t < 4 else [face(400, 160), face(1500, 160)]        # noqa: E731
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 0.2 if j == 0 else 0.0),
+               identity_fn=lambda ref, cands: [0.05, 0.8])
+    assert tr["shots"][1]["speaker_cue"] == "asd+face" and _on(tr, 7.0, 1500)
+
+
+def test_face_id_model_pinned():
+    pytest.importorskip("cv2")
+    from scripts.shared.crop import face_id
+    assert face_id.available()
