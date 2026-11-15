@@ -133,7 +133,10 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
             for a in fleet.tick():
                 log.info("fleet_action %s", a)
             if svc:
-                import_confirmed(fleet, ledger)
+                try:
+                    import_confirmed(fleet, ledger)   # a charges-API hiccup must not stop the reports
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("import_confirmed_error %s", type(exc).__name__)
                 for k in svc.run_due(time.time()):
                     log.info("report_built %s", k)
                 from accounting.summary import check_alert

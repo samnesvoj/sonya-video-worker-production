@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from decimal import Decimal
@@ -143,11 +144,11 @@ class VastClient:
         out: List[dict] = []
         token = None
         while True:
-            q = {"select_filters": {"day": {"gte": start_ts, "lte": end_ts}, "type": {"in": list(charge_types)}},
-                 "limit": 100, "format": "table"}
+            q = {"select_filters": json.dumps({"day": {"gte": start_ts, "lte": end_ts}, "type": {"in": list(charge_types)}})}
             if token:
                 q["after_token"] = token
-            data = self._call("GET", "/api/v0/charges/?q=" + urllib.request.quote(json.dumps(q)))
+            # the live API takes select_filters as a plain query parameter (`q=` is rejected with HTTP 400; verified 2026-11-15)
+            data = self._call("GET", "/api/v0/charges/?" + urllib.parse.urlencode(q))
             out += list(data.get("results", []))
             token = data.get("next_token")
             if not token:
