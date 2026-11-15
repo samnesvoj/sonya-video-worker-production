@@ -248,6 +248,8 @@ def apply_overlays(base_clip: str, out_clip: str, words_abs: List[Dict[str, Any]
         cp.composite(base_clip, out_clip, layers, subtitle_path=subtitle, fonts_dir=str(FONTS_DIR))
     elif str(base_clip) != str(out_clip):
         shutil.copyfile(base_clip, out_clip)
+    if subtitle and opts.get("keep_ass"):
+        shutil.copyfile(subtitle, Path(out_clip).with_suffix(".ass"))
     prof["composite_encode_sec"] = time.monotonic() - t
     prof["total_sec"] = time.monotonic() - t_all
     report.update(drawn=len(drawn), rejected=sum(1 for i in items if i.get("status") == "rejected"),

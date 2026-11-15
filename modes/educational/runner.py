@@ -289,6 +289,8 @@ def _apply_overlays(clip_path: str, input_video_path: str, words: List[Dict], se
     options.setdefault("llm_opt_in", _llm_on(params))
     options.setdefault("ledger_path", params.get("edu_ledger_path"))
     options.setdefault("video_id", Path(input_video_path).stem)
+    from scripts.shared.ad_banner import kind_of as _ad_banner
+    options["keep_ass"] = _ad_banner(params) is not None   # the worker's ad banner step reads <clip>.ass, then deletes it
     try:
         from modes.educational.overlays import apply_overlays
         from modes.educational.overlays.compose import render_base
@@ -303,6 +305,8 @@ def _apply_overlays(clip_path: str, input_video_path: str, words: List[Dict], se
         sidecar = Path(tmp).with_suffix(".overlays.json")
         if sidecar.exists():
             os.replace(sidecar, Path(clip_path).with_suffix(".overlays.json"))
+        if Path(tmp).with_suffix(".ass").exists():
+            os.replace(Path(tmp).with_suffix(".ass"), Path(clip_path).with_suffix(".ass"))
         if base != clip_path:
             os.unlink(base)
         enrichment.setdefault("warnings", []).extend(report.get("warnings", []))

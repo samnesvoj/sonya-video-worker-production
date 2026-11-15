@@ -242,10 +242,30 @@ class _BackendAPIClient:
             "Authorization": f"Bearer {self._secret}",
         }
 
+    _local = threading.local()
+
+    def _session(self):
+        """One keep-alive HTTPS connection per thread (poll loop / heartbeat): a fresh TCP+TLS handshake to the API every
+        5 s per worker process was where the Vast -> Moscow path dropped SYNs (poll_error ConnectTimeout, 2026-11-15)."""
+        import requests  # type: ignore
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = self._local.session = requests.Session()
+        return s
+
     def _post(self, path: str, body: Dict[str, Any], timeout: int = 15) -> Dict[str, Any]:
         import requests  # type: ignore
         url = f"{self._base}{path}"
-        resp = requests.post(url, json=body, headers=self._headers, timeout=timeout)
+        connect = float(os.environ.get("WORKER_API_CONNECT_TIMEOUT_SEC", "6"))
+        try:
+            resp = self._session().post(url, json=body, headers=self._headers, timeout=(connect, timeout))
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            # a dropped keep-alive connection / a lost SYN: one fresh connection right away (all worker calls are
+            # idempotent or harmless to repeat: claim of a job that was not returned is requeued by the stale check)
+            if isinstance(exc, requests.ReadTimeout):
+                raise
+            self._local.session = None
+            resp = self._session().post(url, json=body, headers=self._headers, timeout=(connect, timeout))
         if not resp.ok:
             raise RuntimeError(
                 f"API {path} returned HTTP {resp.status_code}: {resp.text[:200]}"
@@ -636,6 +656,112 @@ def _fail(job_id: str, error_code: str, error_message: str, retry: bool) -> None
         logger.error("[worker] fail_job_backend_error job_id=%s: %s", job_id, exc)
 
 
+# -- Disk hygiene (2026-11-15: a 55-min 1440p YouTube source filled the 30 GB disk -> NVENC "No space left" -> hours of CPU) --
+_TMP_STATE: Dict[str, Optional[str]] = {}
+
+
+def _job_tmp_enter(tmp_dir: Path) -> None:
+    """Every temp file of this job (tempfile.* in the modes, ffmpeg/yt-dlp children via $TMPDIR) goes INSIDE the job
+    folder, so the rmtree at the end removes all of it - nothing piles up between jobs at concurrency 2."""
+    t = tmp_dir / "t"
+    t.mkdir(exist_ok=True)
+    _TMP_STATE.update(tempdir=tempfile.tempdir, env=os.environ.get("TMPDIR"))
+    tempfile.tempdir = str(t)
+    os.environ["TMPDIR"] = str(t)
+
+
+def _job_tmp_exit() -> None:
+    if not _TMP_STATE:
+        return
+    tempfile.tempdir = _TMP_STATE.get("tempdir")
+    if _TMP_STATE.get("env") is None:
+        os.environ.pop("TMPDIR", None)
+    else:
+        os.environ["TMPDIR"] = _TMP_STATE["env"]
+    _TMP_STATE.clear()
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep_stale_tmp(root: Optional[str] = None, max_age_untagged_h: float = 12.0) -> int:
+    """Remove job folders of worker processes that are gone (crash / OOM kill mid-job): sonya_<job>_p<pid>_* whose pid is
+    dead; untagged sonya_* folders (older releases) only when older than max_age_untagged_h. The other worker of the
+    server keeps its live folder. -> number removed."""
+    base = Path(root or _TMP_STATE.get("env") or os.environ.get("TMPDIR") or tempfile.gettempdir())
+    n = 0
+    now = time.time()
+    try:
+        entries = list(base.glob("sonya_*"))
+    except OSError:
+        return 0
+    for d in entries:
+        m = re.search(r"_p(\d+)_", d.name)
+        try:
+            if m:
+                if int(m.group(1)) == os.getpid() or _pid_alive(int(m.group(1))):
+                    continue
+            elif now - d.stat().st_mtime < max_age_untagged_h * 3600:
+                continue
+            shutil.rmtree(d, ignore_errors=True) if d.is_dir() else d.unlink()
+            n += 1
+        except OSError:
+            continue
+    if n:
+        logger.info("[worker] removed %d stale temp folder(s) from %s", n, base)
+    return n
+
+
+def _free_bytes(path: Optional[str] = None) -> int:
+    p = path or _TMP_STATE.get("env") or os.environ.get("TMPDIR") or tempfile.gettempdir()
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return 1 << 62
+
+
+_LOW_DISK_LOGGED = {"t": 0.0}
+
+
+def _disk_ok_to_claim() -> bool:
+    """Claim only with SONYA_MIN_FREE_GB_TO_CLAIM (default 6) free: a long source + its normalize copy + clips."""
+    need = float(os.environ.get("SONYA_MIN_FREE_GB_TO_CLAIM", "6")) * (1 << 30)
+    if _free_bytes() >= need:
+        return True
+    sweep_stale_tmp()
+    free = _free_bytes()
+    if free >= need:
+        return True
+    if time.monotonic() - _LOW_DISK_LOGGED["t"] > 300:
+        _LOW_DISK_LOGGED["t"] = time.monotonic()
+        logger.warning("[worker] low disk: %.1f GB free < %.1f GB - not claiming new jobs until it frees up",
+                       free / (1 << 30), need / (1 << 30))
+    return False
+
+
+def _input_space_short(s3_key: str, work_dir: Path) -> bool:
+    """True when the uploaded source will not fit: size x 2.5 (source + normalized copy + audio/clips) + 1 GB.
+    Unknown size (HEAD failed) -> False (the download itself reports a real error)."""
+    try:
+        from scripts.prod_s3_storage import _bucket, _client
+        size = int(_client().head_object(Bucket=_bucket(), Key=s3_key)["ContentLength"])
+    except Exception:
+        return False
+    need = int(size * 2.5) + (1 << 30)
+    free = _free_bytes(str(work_dir))
+    if free < need:
+        logger.error("[worker] low disk for input: free %d MB < need %d MB (source %d MB)", free >> 20, need >> 20, size >> 20)
+        return True
+    return False
+
+
 def process_job(job: dict, worker_id: str) -> None:
     job_id  = job["id"]
     mode    = job["mode"]
@@ -657,7 +783,9 @@ def process_job(job: dict, worker_id: str) -> None:
         return
 
     t_start = time.monotonic()
-    tmp_dir = Path(tempfile.mkdtemp(prefix=f"sonya_{job_id}_"))
+    sweep_stale_tmp()
+    tmp_dir = Path(tempfile.mkdtemp(prefix=f"sonya_{job_id}_p{os.getpid()}_"))
+    _job_tmp_enter(tmp_dir)
     _ACTIVE_JOB["id"] = job_id
     if not _FIRST_JOB["claimed"]:
         _FIRST_JOB["claimed"] = True
@@ -689,6 +817,12 @@ def process_job(job: dict, worker_id: str) -> None:
             except Exception as exc:
                 logger.exception("[worker] source_fetch crashed job_id=%s", job_id)
                 _fail(job_id, "SOURCE_DOWNLOAD_FAILED", "Не удалось скачать видео по ссылке. Попробуйте позже.", retry=True)
+                return
+        if mode != "sonya_gen" and not (isinstance(sf, dict) and sf.get("url")):
+            short = _input_space_short(s3_input, tmp_dir)
+            if short:
+                _fail(job_id, "WORKER_NO_SPACE", "На сервере сейчас не хватает места для этого видео. "
+                      "Задание передано другому серверу.", retry=True)
                 return
         try:
             if mode != "sonya_gen" and not (isinstance(sf, dict) and sf.get("url")):
@@ -822,6 +956,13 @@ def process_job(job: dict, worker_id: str) -> None:
             _fail(job_id, "NO_OUTPUT_FILES", "Runner produced no output files", retry=False)
             return
 
+        # ── 4a. SONYA mini ad banner under the subtitles (per user: params.ad_banner, set by the API) ─
+        from scripts.shared import ad_banner
+        if ad_banner.kind_of(params) and mode in ad_banner.MODES:
+            _update_status(job_id, "assembling")
+            ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=mode in ("streamer", "educational"))
+            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
+
         # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
         if mode in _PREVIEW_MODES:
             for _clip in sorted(output_dir.rglob("*.mp4")):
@@ -885,6 +1026,7 @@ def process_job(job: dict, worker_id: str) -> None:
 
     finally:
         _ACTIVE_JOB["id"] = None
+        _job_tmp_exit()
         shutil.rmtree(tmp_dir, ignore_errors=True)
         logger.debug("[worker] cleaned up tmp_dir=%s", tmp_dir)
 
@@ -955,6 +1097,10 @@ def run_poll(worker_id: str, modes: Optional[List[str]] = None) -> None:
             _STOP.wait(POLL_INTERVAL)
             continue
 
+        if not _disk_ok_to_claim():         # another job on this server holds the disk: let other servers take new work
+            _STOP.wait(max(POLL_INTERVAL, 15))
+            continue
+
         # Claim next job
         try:
             if _WORKER_MODE == "api":
@@ -968,7 +1114,10 @@ def run_poll(worker_id: str, modes: Optional[List[str]] = None) -> None:
                 _STOP.wait(POLL_INTERVAL)
 
         except Exception as exc:
-            logger.error("[worker] poll_error: %s", exc)
+            if type(exc).__name__ in ("ConnectTimeout", "ConnectionError", "ReadTimeout", "SSLError"):
+                logger.warning("[worker] poll_error (network to API, retry in %ss): %s", POLL_INTERVAL, type(exc).__name__)
+            else:
+                logger.error("[worker] poll_error: %s", exc)
             _STOP.wait(POLL_INTERVAL)
 
 

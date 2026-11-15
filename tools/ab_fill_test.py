@@ -48,7 +48,8 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     ap.add_argument("--stub-port", type=int, default=8787)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--extra", action="append", default=[],
-                    help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY (files go to OUT/NAME)")
+                    help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY[|PARAMS_JSON] (files go to OUT/NAME)")
+    ap.add_argument("--params", default="", help="JSON merged into the first job's params (e.g. {\"ad_banner\": \"mini\"})")
     a = ap.parse_args()
 
     def job_params(seg_path: pathlib.Path, only: str) -> Dict[str, Any]:
@@ -62,10 +63,10 @@ def main() -> int:  # pragma: no cover - real Vast/S3
                  for s in segs]
         # no crop_mode: since 2026-11-15 fill_9x16 is the worker default (this checks the default path)
         return dict(SITE_VIRALITY_PARAMS, fixed_segments=fixed)
-    jobs_in = [("", a.source_key, job_params(a.segments, a.only))]
+    jobs_in = [("", a.source_key, dict(job_params(a.segments, a.only), **json.loads(a.params or "{}")))]
     for e in a.extra:
-        name, src, segp, only = (e.split("|") + [""])[:4]
-        jobs_in.append((name, src, job_params(pathlib.Path(segp), only)))
+        name, src, segp, only, extra = (e.split("|") + ["", ""])[:5]
+        jobs_in.append((name, src, dict(job_params(pathlib.Path(segp), only), **json.loads(extra or "{}"))))
     params = jobs_in[0][2]
     print(f"release {a.release_sha[:12]} | {[len(j[2].get('fixed_segments') or []) or 'full' for j in jobs_in]} fixed moments | "
           f"max ${a.max_usd} | {'APPLY' if a.apply else 'dry'}")

@@ -1,0 +1,24 @@
+{
+ "version": 1,
+ "note": "SONYA mini ad banner (scripts/shared/ad_banner.py). Own render: sonya-creative-pipeline 91f4034 campaigns/ad-mini/renders (reel/src/ad/AdMini.tsx), ProRes 4444 with alpha, 1072x592 (card 960x480), 4.5 s, 30 fps, no audio. New objects under worker-v2/assets/ad-mini/ (sha in the name, never overwritten).",
+ "items": [
+  {
+   "id": "ad_mini_dark",
+   "theme": "dark",
+   "file": "sonya-ad-mini-7107b7650216.mov",
+   "license": "own-generated",
+   "size": 35616706,
+   "sha256": "7107b7650216d752c7c080f9dc815c5fa5fb530b9bc29232e1854259a21eb2c3",
+   "s3_key": "worker-v2/assets/ad-mini/sonya-ad-mini-7107b7650216.mov"
+  },
+  {
+   "id": "ad_mini_light",
+   "theme": "light",
+   "file": "sonya-ad-mini-light-ad0ec755edd6.mov",
+   "license": "own-generated",
+   "size": 28902706,
+   "sha256": "ad0ec755edd608ea2e7f455d6d1ff810586da5b8369d9480978ab6c69b0ca29a",
+   "s3_key": "worker-v2/assets/ad-mini/sonya-ad-mini-light-ad0ec755edd6.mov"
+  }
+ ]
+}
