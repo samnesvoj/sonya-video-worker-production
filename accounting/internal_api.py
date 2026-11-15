@@ -1,6 +1,7 @@
 """
 Signed internal API the EXISTING accounting bot polls (same pattern as /api/internal/fiscal/*: outbound-only bot, HMAC, nonce).
   POST /api/internal/accounting/vast/claim            -> {"reports":[{report_key, kind, period, text, attempt}]}
+  POST /api/internal/accounting/vast/summary          -> {"text": "..."}   (bot's /vast command)
   POST /api/internal/accounting/vast/{key}/sent       body {"message_id": "..."}
   POST /api/internal/accounting/vast/{key}/failed     body {"error": "..."}
 X-Accounting-Timestamp / -Nonce / -Signature = hex HMAC-SHA256(secret, "<ts>\n<nonce>\n<METHOD>\n<path>\n<sha256(body)>").
@@ -16,7 +17,7 @@ import time
 from typing import Callable, Dict, Optional, Tuple
 
 SKEW = 120
-KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2})$")
+KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})$")
 
 
 def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes) -> str:
@@ -25,8 +26,8 @@ def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes
 
 
 class AccountingApi:
-    def __init__(self, service, secret: str, clock: Callable[[], float] = time.time):
-        self.svc, self._secret, self.clock = service, secret.encode(), clock
+    def __init__(self, service, secret: str, clock: Callable[[], float] = time.time, summary: Optional[Callable[[float], str]] = None):
+        self.svc, self._secret, self.clock, self._summary = service, secret.encode(), clock, summary
         self._nonces: Dict[str, float] = {}
 
     def _verify(self, headers: Dict[str, str], method: str, path: str, body: bytes) -> bool:
@@ -50,6 +51,11 @@ class AccountingApi:
         base = "/api/internal/accounting/vast/"
         if method == "POST" and path == base + "claim":
             return 200, {"reports": self.svc.claim(now, limit=1)}
+        if method == "POST" and path == base + "summary" and self._summary:
+            try:
+                return 200, {"text": self._summary(now)}
+            except Exception:  # noqa: BLE001 - never leak internals
+                return 502, {"error": "summary_failed"}
         m = re.fullmatch(re.escape(base) + r"(.+)/(sent|failed)", path)
         if method == "POST" and m and KEY_RE.match(m.group(1)):
             try:

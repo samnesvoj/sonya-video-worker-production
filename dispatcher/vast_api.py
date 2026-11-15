@@ -133,6 +133,12 @@ class VastClient:
         data = self._call("POST", "/api/v0/bundles/", query)
         return list(data.get("offers", [])) if isinstance(data, dict) else []
 
+    def balance_usd(self) -> Optional[str]:
+        """Account credit in USD (read-only GET /api/v0/users/current/); None if the field is absent."""
+        data = self._call("GET", "/api/v0/users/current/")
+        v = data.get("credit", data.get("balance")) if isinstance(data, dict) else None
+        return None if v is None else str(v)
+
     def charges(self, start_ts: int, end_ts: int, charge_types: Tuple[str, ...] = ("instance", "volume")) -> List[dict]:
         out: List[dict] = []
         token = None

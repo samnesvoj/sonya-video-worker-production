@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2})$")
+KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})$")
 BASE = "/api/internal/accounting/vast/"
 MAX_TEXT = 3900                        # Telegram limit is 4096
 
@@ -49,6 +49,14 @@ class VastReportPuller:
         self._open = opener or urllib.request.urlopen
         self.timeout, self._next = timeout, 0.0
         self.log = logging.getLogger("receipt_worker.vast_reports")
+
+    def summary(self) -> str:
+        """Text for the /vast command (SONYA computes it; the bot only relays)."""
+        status, data = self._post(BASE + "summary", {})
+        text = data.get("text") if status == 200 else None
+        if not isinstance(text, str) or not text:
+            raise VastReportError("summary HTTP %s" % status)
+        return text[:MAX_TEXT]
 
     # ---------------------------------------------------------------- state
     def _load(self) -> Dict[str, Any]:

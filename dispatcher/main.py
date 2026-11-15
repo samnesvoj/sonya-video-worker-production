@@ -9,6 +9,7 @@ SONYA_FLEET_ENABLED=false (default) makes everything a no-op; SONYA_FLEET_DRY_RU
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
@@ -73,7 +74,50 @@ def build_accounting(fleet: FleetManager, env=os.environ):
         return {k: r[k] for k in ("gpu", "disk", "other")}
 
     first = date.fromisoformat(env.get("SONYA_ACCOUNTING_FIRST_DAY", date.today().isoformat()))
-    return ReportService(ledger, fleet.store, CbrRates(ledger), SqlJobsSource(counter), utc_cost, first), ledger
+    svc = ReportService(ledger, fleet.store, CbrRates(ledger), SqlJobsSource(counter), utc_cost, first)
+    return svc, ledger
+
+
+def _accounting_secret(env=os.environ) -> str:
+    f = env.get("SONYA_ACCOUNTING_SECRET_FILE", "/etc/sonya-fleet/accounting_api_secret")
+    if Path(f).stat().st_mode & 0o077:
+        raise RuntimeError("accounting secret file must be chmod 600")
+    return Path(f).read_text().strip()
+
+
+def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: no cover - thread on the VPS
+    """Signed internal API for the accounting bot on 127.0.0.1 (nginx proxies /api/internal/accounting/vast/ here)."""
+    import threading
+    from decimal import Decimal
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from accounting.internal_api import AccountingApi
+    from accounting.summary import build_summary
+
+    def summary(now: float) -> str:
+        try:
+            bal = fleet.vast.balance_usd()
+            bal = Decimal(bal) if bal is not None else None
+        except Exception:  # noqa: BLE001
+            bal = None
+        return build_summary(fleet.store, svc.rates, now, bal)
+
+    api = AccountingApi(svc, _accounting_secret(env), summary=summary)
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            n = min(int(self.headers.get("Content-Length") or 0), 65536)
+            status, data = api.handle("POST", self.path.split("?")[0], dict(self.headers), self.rfile.read(n) if n else b"")
+            out = json.dumps(data).encode()
+            self.send_response(status); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
+
+        def log_message(self, *a):  # no request logging (headers carry signatures)
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", int(env.get("SONYA_ACCOUNTING_API_PORT", "8765"))), H)
+    threading.Thread(target=srv.serve_forever, name="accounting-api", daemon=True).start()
+    log.info("accounting_api_listening 127.0.0.1:%s", srv.server_address[1])
+    return srv
 
 
 def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
@@ -82,6 +126,8 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
     svc = ledger = None
     if os.environ.get("SONYA_ACCOUNTING_ENABLED", "false").lower() == "true":
         svc, ledger = build_accounting(fleet)
+        if os.environ.get("VAST_REPORTS_ENABLED", "false").lower() == "true":
+            start_accounting_api(fleet, svc)
     while True:
         try:
             for a in fleet.tick():
@@ -89,6 +135,11 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
             if svc:
                 import_confirmed(fleet, ledger)
                 for k in svc.run_due(time.time()):
+                    log.info("report_built %s", k)
+                from accounting.summary import check_alert
+                from decimal import Decimal
+                k = check_alert(ledger, fleet.store, svc.rates, time.time(), Decimal(os.environ.get("SONYA_ACCOUNTING_ALERT_RUB_DAY", "500")))
+                if k:
                     log.info("report_built %s", k)
         except Exception as exc:  # noqa: BLE001
             log.error("tick_error %s", type(exc).__name__)
