@@ -83,3 +83,15 @@ def test_long_source_timeout_and_disk_are_clear_errors(monkeypatch, tmp_path):
     with pytest.raises(sn.NormalizeError) as e:
         sn.normalize_source(src, str(tmp_path / "ing"), "virality")
     assert e.value.code == "NORMALIZE_NO_SPACE"
+
+
+def test_fast_normalize_gpu_decode_and_fast_preset(monkeypatch):
+    """Load test 2026-11-16: 19-min 1440p VP9 took 382 s with the clip preset + CPU decode -> NVDEC + p4 at cq 17."""
+    monkeypatch.delenv("SONYA_NORMALIZE_FAST", raising=False)
+    a = sn.fast_nvenc_args()
+    assert a[a.index("-preset") + 1] == "p4" and a[a.index("-cq") + 1] == "17" and "-multipass" not in a
+    cmd = sn.normalize_cmd("ffmpeg", Path("a.webm"), Path("b.mp4"), sn.summarize_probe(_raw(avg="30/1")), a, hw_decode=True)
+    assert cmd[cmd.index("-hwaccel") + 1] == "cuda" and cmd.index("-hwaccel") < cmd.index("-i")
+    assert "-hwaccel" not in sn.normalize_cmd("ffmpeg", Path("a"), Path("b"), sn.summarize_probe(_raw(avg="30/1")), a)
+    monkeypatch.setenv("SONYA_NORMALIZE_FAST", "0")
+    assert not sn.fast_enabled()

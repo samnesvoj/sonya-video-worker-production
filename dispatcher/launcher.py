@@ -98,7 +98,12 @@ def warm_eligible(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
     """May this host be the warm (paused) server: default class IN EUROPE and cheap storage (pause cost = disk x storage).
     Europe is required: the same RTX 3060 in Vietnam took 260 s per video vs ~105 s in Europe (S3 is in Russia)."""
     cls = offer_class(o, cfg)
-    return (cls == 0 or (cls == 1 and cfg.warm_fallback)) and in_europe(o) and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
+    # load test 2026-11-16: every European offer was class 2 (Ryzen 3000 / Xeon E5 / EPYC slices) for days, so NO warm
+    # existed and every first job waited a cold start (real users: 8.6 min in the queue on average). SONYA_WARM_OLD_CPU:
+    # such a host may be the warm too when it gives us >= warm_min_cpu_cores (ranking still prefers class 0/1).
+    old_ok = cls == 2 and cfg.warm_old_cpu and float(o.get("cpu_cores_effective") or 0) >= cfg.warm_min_cpu_cores
+    return (cls == 0 or (cls == 1 and cfg.warm_fallback) or old_ok) and in_europe(o) \
+        and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
 
 
 def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[int] = ()) -> Tuple:
@@ -160,13 +165,15 @@ def offer_slots(o: Mapping[str, Any], cfg: FleetConfig, *, power: bool = False, 
     environ: the dispatcher env - the per-video budget overrides (SONYA_VRAM_PER_JOB_MB ...) it passes to the worker too."""
     if not power:
         return cfg.jobs_per_instance
-    if cfg.power_jobs_per_instance:
-        return cfg.power_jobs_per_instance
     from scripts.ops.gpu_plan import Budget, capacity   # stdlib-only module; one formula for worker and fleet
     n = num_gpus(o)
     per_card = total_vram_mb(o) // n
-    return capacity([per_card] * n, float(o.get("cpu_cores_effective") or 0), int(float(o.get("cpu_ram") or 0)),
-                    Budget.from_env(dict(environ or {})))["total"]
+    hw = capacity([per_card] * n, float(o.get("cpu_cores_effective") or 0), int(float(o.get("cpu_ram") or 0)),
+                  Budget.from_env(dict(environ or {})))["total"]
+    # SONYA_POWER_JOBS_PER_INSTANCE is a CEILING, never more than the offer's hardware: load test 2026-11-16 counted a
+    # 2x RTX A6000 host with 30.7 threads as 32 slots (the value tuned for a 123-core 2x A40); its worker ran 7, so 2 of
+    # 9 jobs waited in the queue while the fleet saw "enough capacity" and created nothing.
+    return min(cfg.power_jobs_per_instance, hw) if cfg.power_jobs_per_instance else hw
 
 
 def power_search_query(cfg: FleetConfig) -> dict:

@@ -424,13 +424,22 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         from yt_dlp.utils import download_range_func
         st = max(0, int(trim_start or 0))
         opts["download_ranges"] = download_range_func(None, [(st, st + int(trim_sec))])
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-    except Exception as exc:
-        _rmtree(tmp_dir)
-        logger.warning("[url_ingest] download_failed platform=%s: %s", platform, exc)
-        raise DownloadFailed(str(exc)) from exc
+    tries = 1 + max(0, int(os.environ.get("SONYA_YTDLP_403_RETRIES", "2")))
+    for attempt in range(1, tries + 1):
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            break
+        except Exception as exc:
+            # Load test 2026-11-16: YouTube answered "HTTP Error 403: Forbidden" to one fresh server for a public video
+            # that downloads fine a minute later / elsewhere. A new extract_info gets new signed URLs: retry.
+            if attempt < tries and _is_transient_403(exc):
+                logger.warning("[url_ingest] youtube 403, retry %d/%d platform=%s", attempt, tries - 1, platform)
+                time.sleep(3 * attempt)
+                continue
+            _rmtree(tmp_dir)
+            logger.warning("[url_ingest] download_failed platform=%s: %s", platform, exc)
+            raise DownloadFailed(str(exc)) from exc
 
     path = _find_downloaded_file(info, tmp_dir)
     if not path:
@@ -444,6 +453,11 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
             pass
 
     return path, Path(path).suffix or ".mp4"
+
+
+def _is_transient_403(exc: BaseException) -> bool:
+    t = str(exc).lower()
+    return "403" in t and "forbidden" in t
 
 
 def _find_downloaded_file(info: Optional[dict], tmp_dir: str) -> Optional[str]:

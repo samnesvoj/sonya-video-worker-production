@@ -41,7 +41,7 @@ def build_fleet(env=os.environ) -> FleetManager:
     cfg = FleetConfig.from_env(dict(env))
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return FleetManager(cfg, FleetStore(str(STATE_DIR / "fleet.db")), VastClient(_vast_key(env), dry_run=cfg.dry_run),
-                        PostgresQueueView(env["DATABASE_URL"]), release_token_provider(cfg.release_repo, env), env)
+                        PostgresQueueView(env["DATABASE_URL"], dedicated=cfg.dedicated), release_token_provider(cfg.release_repo, env), env)
 
 
 def build_accounting(fleet: FleetManager, env=os.environ):
@@ -60,9 +60,11 @@ def build_accounting(fleet: FleetManager, env=os.environ):
         try:
             conn.set_session(readonly=True, autocommit=True)
             cur = conn.cursor()
+            # test accounts (…@sonya.invalid: load tests, cutover tests) are not videos of the business
             cur.execute("SELECT COUNT(*) FROM generation_jobs WHERE status='completed' AND mode = ANY(%s) AND worker_id LIKE %s "
-                        "AND completed_at >= to_timestamp(%s) AND completed_at < to_timestamp(%s)",
-                        (list(fleet.cfg.pool_modes), fleet.cfg.label_prefix + "%", lo, hi))
+                        "AND completed_at >= to_timestamp(%s) AND completed_at < to_timestamp(%s) "
+                        "AND user_id::text NOT IN (SELECT id::text FROM users WHERE email LIKE %s)",
+                        (list(fleet.cfg.pool_modes), fleet.cfg.label_prefix + "%", lo, hi, "%@sonya.invalid"))
             return int(cur.fetchone()[0])
         finally:
             conn.close()

@@ -55,7 +55,7 @@ PRICE_IN_RUB_PER_M = 40.0
 PRICE_OUT_RUB_PER_M = 240.0
 OUT_TOKENS_PER_CAND = 70          # one verdict line (id, score, flags, hook, keywords, reason)
 TEXT_CHARS = 700                  # candidate text sent (≈ 60 s of speech)
-DEFAULT_POOL = 24                 # 3x the default 8 clips
+DEFAULT_POOL = 24                 # 3x the old default 8 clips (kept at 24 for 10: a bigger pool made Gemini drop liked clips)
 
 
 def _f(name: str, default: float) -> float:

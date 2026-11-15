@@ -40,6 +40,8 @@ class FleetConfig:
     allow_old_cpu: bool = True               # SONYA_ALLOW_OLD_CPU - last-resort class 2 (Xeon E5 etc.) when no modern-CPU offer
     warm_fallback: bool = False              # SONYA_WARM_FALLBACK - no European RTX 3060 offered: may a European fallback class
                                              # (4060 Ti / A4000 ..., same storage cap) be the warm? Owner decided 3060 -> off
+    warm_old_cpu: bool = False               # SONYA_WARM_OLD_CPU - no class 0/1 host in Europe: a class-2 (old CPU) one may be the warm
+    warm_min_cpu_cores: float = 12.0         # SONYA_WARM_MIN_CPU_CORES - ... if it gives us at least this many effective cores
     warm_prime: bool = True                  # SONYA_WARM_PRIME - no warm at all (first start / lost / stale) -> create one, let it boot, stop it
     stopped_retention_seconds: int = 1800    # a stopped NON-warm instance older than this -> DESTROY (storage keeps billing)
     resume_timeout_seconds: int = 90         # 'scheduling' longer than this -> GPU likely taken (Vast docs: ~30 s)
@@ -99,6 +101,13 @@ class FleetConfig:
     power_reserve_wake_at: int = 0           # SONYA_POWER_RESERVE_WAKE_AT: jobs (queued + running); 0 = max_instances x jobs_per_instance + 1
     power_reserve_max_storage_rub: int = 500  # SONYA_POWER_RESERVE_MAX_STORAGE_RUB: pause cost cap per month (disk_gb x storage price)
     usd_rub: Decimal = Decimal("82")         # SONYA_USD_RUB: only for that cap (30 GB x $0.20 = $6 = ~492 RUB)
+    # DEDICATED servers (CEO 2026-11-16, off by default): users with an active cut_pro / cut_studio / streamer_start
+    # subscription, admins and active legacy Pro (SONYA_DEDICATED_PLANS / _ADMINS / _LEGACY_PRO, the same env names as the
+    # API claim rule) get a server of their own: each such user with work counts as ONE WHOLE server (jobs_per_instance
+    # slots) and never shares it. The API must have SONYA_DEDICATED=on too (it enforces who claims what).
+    dedicated: bool = False                  # SONYA_DEDICATED
+    dedicated_max_instances: int = 4         # SONYA_DEDICATED_MAX_INSTANCES: at most this many users on own servers at once
+                                             # (inside max_instances); the next one waits for a free server, first in line
     pin_machine_id: int = 0                  # LOAD TESTS ONLY (tools/load_test.py phase G): rent exactly this Vast machine, class rule
                                              # not applied (e.g. an L40S + EPYC host). Never read from the env: production stays 0
     # Release identity (passed to the worker as env; the token is minted per instance)
@@ -128,6 +137,8 @@ class FleetConfig:
             jobs_per_instance=_int(e, "SONYA_JOBS_PER_INSTANCE", 2, lo=1, hi=4),
             warm_instances=_int(e, "SONYA_WARM_INSTANCES", 1, lo=0, hi=1),
             warm_prime=e.get("SONYA_WARM_PRIME", "true").lower() in TRUE,
+            warm_old_cpu=e.get("SONYA_WARM_OLD_CPU", "false").lower() in TRUE,
+            warm_min_cpu_cores=float(_int(e, "SONYA_WARM_MIN_CPU_CORES", 12, lo=4, hi=256)),
             allow_old_cpu=e.get("SONYA_ALLOW_OLD_CPU", "true").lower() in TRUE,
             warm_fallback=e.get("SONYA_WARM_FALLBACK", "false").lower() in TRUE,
             stopped_retention_seconds=_int(e, "SONYA_STOPPED_RETENTION_SECONDS", 1800, lo=0, hi=7 * 86400),
@@ -159,6 +170,8 @@ class FleetConfig:
             power_reserve_wake_at=_int(e, "SONYA_POWER_RESERVE_WAKE_AT", 0, lo=0, hi=1000),
             power_reserve_max_storage_rub=_int(e, "SONYA_POWER_RESERVE_MAX_STORAGE_RUB", 500, lo=0, hi=100000),
             usd_rub=Decimal(e.get("SONYA_USD_RUB", "82")),
+            dedicated=e.get("SONYA_DEDICATED", "off").lower() in TRUE,
+            dedicated_max_instances=_int(e, "SONYA_DEDICATED_MAX_INSTANCES", 4, lo=0, hi=8),
             image=e.get("SONYA_WORKER_IMAGE", ""),
             release_sha=e.get("SONYA_RELEASE_SHA", ""),
             release_repo=e.get("SONYA_RELEASE_REPO", "samnesvoj/sonya-video-worker-production"),
