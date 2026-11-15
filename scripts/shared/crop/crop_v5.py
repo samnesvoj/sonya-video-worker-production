@@ -44,6 +44,7 @@ ASD_SMOOTH_SEC = 0.5         # fill mode + speaker model: scores are averaged ov
 ASD_ON = 0.5                 # … a person «talks» when the smoothed score is above this
 ASD_MARGIN = 1.0             # … and takes the window only when ahead of the current one by this much …
 ASD_HOLD_SEC = 0.6           # … for this long (hysteresis: a listener's smile or a short «да» never wins)
+FILL_MIN_SCORE = 0.72        # fill mode: lowest detector score of a second person the speaker model may pick
 EAR_FRAC = 0.10              # fill mode: the head (ears) reaches this × face width beyond the detector box
 BACK_K = 0.7                 # … plus this × |yaw| × width on the back side of a turned head (≤ 0.25 w)
 HEAD_SLACK = 0.04            # … head wider than the window: the window may wander this × width (no jitter)
@@ -475,7 +476,8 @@ def presence_cuts(samples: List[Dict[str, Any]], bounds: List[float], H: int, ga
 def fill_candidate(main: Dict[str, Any], other: Dict[str, Any], W: int) -> bool:
     """Fill mode: may `other` get the window when it talks? A comparable, confident face fully in frame, not on
     top of the main one. Unlike real_partner no «alive» test: the speaker model decides who talks."""
-    if other["w"] < SPLIT_SIZE * main["w"] or other["score"] < SPLIT_SCORE:
+    # small faces in a wide shot score lower (VSRAP two-shot: 0.78–0.85): the bar follows the main face's own score
+    if other["w"] < SPLIT_SIZE * main["w"] or other["score"] < min(SPLIT_SCORE, max(FILL_MIN_SCORE, main["score"] - 0.12)):
         return False
     bs = [b for _, b in other["boxes"]]
     inside = sum(1 for b in bs if b[0] >= 0.005 * W and b[0] + b[2] <= 0.995 * W) / len(bs)
@@ -503,6 +505,11 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
                     keyframes=[[0.0, center], [round(duration, 3), center]], shots=[], cuts=[])
     samples = analysis.get("samples") or []
     cuts = [c for c in analysis.get("cuts") or [] if 0.0 < c < duration]
+    if fill:
+        # the analysis stamps a cut ~10 ms after the rendered frame's pts: the first frame of the new shot got the
+        # OLD window (one frame of a half face at every cut, Vast 2026-11-15). Jump a little more than half a frame early.
+        fps = float(meta.get("fps") or 25.0) or 25.0
+        cuts = [round(max(0.001, c - 0.6 / fps), 3) for c in cuts]
     bounds = [0.0] + cuts + [duration]
     if fill:
         extra = presence_cuts(samples, bounds, H)
