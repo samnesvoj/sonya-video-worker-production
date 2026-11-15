@@ -9,6 +9,8 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -41,6 +43,9 @@ _REASONS = (
      ("SOURCE_GEO", "Видео недоступно в стране сервера обработки. Загрузите файл.")),
     (("live event", "is live", "premiere"),
      ("SOURCE_LIVE", "Это идущая трансляция или премьера — дождитесь окончания и повторите.")),
+    # still 403 after the in-place retries (url_ingest): requeued once (retry=True in gpu_worker), may land on another host
+    (("http error 403", "403: forbidden"),
+     ("SOURCE_FORBIDDEN", "YouTube временно не отдал видео серверу обработки. Попробуйте ещё раз через несколько минут или загрузите файл.")),
     (("unsupported url",), ("SOURCE_UNSUPPORTED", "Ссылка не поддерживается. Поддерживаются YouTube, VK, Twitch.")),
 )
 _GENERIC = ("SOURCE_DOWNLOAD_FAILED", "Не удалось скачать видео по ссылке. Проверьте, что она рабочая и видео публичное.")
@@ -86,11 +91,23 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return one if n % 10 == 1 else few if 2 <= n % 10 <= 4 else many
 
 
+def upload_done(got: Optional[Dict[str, Any]], timeout: float = 900.0) -> Optional[str]:
+    """Wait for the background S3 copy of fetch_source(background_upload=True). -> None, or the error text."""
+    box = (got or {}).get("upload")
+    if not box:
+        return None
+    box["thread"].join(timeout)
+    if box["thread"].is_alive():
+        return "timeout"
+    return str(box["error"])[:200] if box["error"] else None
+
+
 def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
-                 progress: Optional[Callable[[float], None]] = None) -> Dict[str, Any]:
+                 progress: Optional[Callable[[float], None]] = None, background_upload: bool = False) -> Dict[str, Any]:
     """Download sf['url'], enforce limits, upload to s3_key. Returns {"path": local file, "duration": sec, "bytes": n}.
     Raises SourceFetchError with a message meant for the user."""
     from scripts.prod_s3_storage import upload_file
+    t0 = time.monotonic()
 
     url = str(sf.get("url") or "").strip()
     platform = str(sf.get("platform") or "") or url_ingest.detect_platform(url)
@@ -137,11 +154,30 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
         size = os.path.getsize(path)
         dest = work_dir / f"input{Path(path).suffix or '.mp4'}"
         shutil.move(path, dest)
+        t_dl = time.monotonic() - t0
+        if background_upload:
+            # Load test 2026-11-16: the S3 copy of a 3 h source (2 GB) blocked the job before ASR. The copy is a record
+            # (a requeued job fetches the link again), so it runs next to the processing; the worker joins it before
+            # the job completes (upload_done()).
+            box: Dict[str, Any] = {"error": None}
+
+            def _up():
+                try:
+                    upload_file(dest, s3_key, content_type="video/mp4")
+                except Exception as exc:   # noqa: BLE001 - reported by upload_done()
+                    box["error"] = exc
+            th = threading.Thread(target=_up, name="source-s3-copy", daemon=True)
+            th.start()
+            box["thread"] = th
+            logger.info("[source_fetch] ok platform=%s duration=%.0fs bytes=%d download=%.0fs (S3 copy in background)",
+                        platform, dur, size, t_dl)
+            return {"path": dest, "duration": dur, "bytes": size, "upload": box, "download_s": round(t_dl, 1)}
         try:
             upload_file(dest, s3_key, content_type="video/mp4")
         except Exception as exc:
             raise SourceFetchError("SOURCE_STORAGE", "Не удалось сохранить скачанное видео. Попробуйте позже.") from exc
-        logger.info("[source_fetch] ok platform=%s duration=%.0fs bytes=%d", platform, dur, size)
-        return {"path": dest, "duration": dur, "bytes": size}
+        logger.info("[source_fetch] ok platform=%s duration=%.0fs bytes=%d download=%.0fs upload=%.0fs", platform, dur, size,
+                    t_dl, time.monotonic() - t0 - t_dl)
+        return {"path": dest, "duration": dur, "bytes": size, "download_s": round(t_dl, 1)}
     finally:
         url_ingest.cleanup(path)

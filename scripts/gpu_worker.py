@@ -176,6 +176,7 @@ def _on_sigterm(signum, _frame) -> None:
 
 
 _FIRST_JOB = {"claimed": False, "processing": False}
+_SRC_COPY: Dict[str, Any] = {}       # this process's background S3 copy of a fetched source (one job per process)
 
 
 def _timeline(name: str, **kw) -> None:
@@ -804,7 +805,9 @@ def process_job(job: dict, worker_id: str) -> None:
             # The VPS could not fetch this link (YouTube etc.): download here, upload to s3_input_key, continue as usual.
             from scripts.source_fetch import SourceFetchError, fetch_source
             try:
-                got = fetch_source(sf, mode, s3_input, tmp_dir)
+                got = fetch_source(sf, mode, s3_input, tmp_dir,
+                                   background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
+                _SRC_COPY["got"] = got
                 input_path = got["path"]
             except SourceFetchError as exc:
                 if exc.code == "SOURCE_BOT_CHECK":
@@ -812,7 +815,7 @@ def process_job(job: dict, worker_id: str) -> None:
                     logger.error("[worker] youtube_bot_check on this host: requeue job_id=%s, stop claiming", job_id)
                     _fail(job_id, exc.code, exc.message, retry=True)
                     return
-                _fail(job_id, exc.code, exc.message, retry=False)
+                _fail(job_id, exc.code, exc.message, retry=exc.code in ("SOURCE_FORBIDDEN",))
                 return
             except Exception as exc:
                 logger.exception("[worker] source_fetch crashed job_id=%s", job_id)
@@ -976,7 +979,7 @@ def process_job(job: dict, worker_id: str) -> None:
         enrichment_keys = result.get("enrichment_keys", []) if isinstance(result, dict) else []
         clip_count = 0
 
-        for f in output_files:
+        def _upload_one(f: Path):
             ext = f.suffix.lower()
             ct  = _CONTENT_TYPES.get(ext, "application/octet-stream")
             ft  = _FILE_TYPES.get(ext, "output")
@@ -992,8 +995,19 @@ def process_job(job: dict, worker_id: str) -> None:
                 logger.info("[worker] uploaded %s → %s", f.name, s3k)
             except Exception as exc:
                 logger.error("[worker] upload_failed file=%s: %s", f.name, exc)
-                continue
+                return None
+            return f, ft, s3k, ct
 
+        # Load test 2026-11-16: 8 clips + previews + posters one after another took ~30 s; S3 PUTs in parallel, the
+        # API records (add_file) stay in the original order (the first output = s3_output_key, as before)
+        from concurrent.futures import ThreadPoolExecutor
+        output_files = sorted(output_files)
+        with ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("SONYA_UPLOAD_WORKERS", "6")))) as _pool:
+            uploaded = list(_pool.map(_upload_one, output_files))
+        for item in uploaded:
+            if item is None:
+                continue
+            f, ft, s3k, ct = item
             _do_add_file(
                 job_id=job_id, user_id=user_id,
                 file_type=ft, s3_key=s3k,
@@ -1011,6 +1025,10 @@ def process_job(job: dict, worker_id: str) -> None:
             return
 
         # ── 6. Complete job ───────────────────────────────────────────────────
+        from scripts.source_fetch import upload_done
+        err = upload_done(_SRC_COPY.get("got"))
+        if err:      # the clips are fine; only the record copy of the source is missing
+            logger.warning("[worker] job_id=%s background S3 copy of the source failed: %s", job_id, err)
         processing_ms = int((time.monotonic() - t_start) * 1000)
         _do_complete_job(
             job_id=job_id,
@@ -1025,6 +1043,11 @@ def process_job(job: dict, worker_id: str) -> None:
         )
 
     finally:
+        try:                                   # never delete the source while its S3 copy is still reading it
+            from scripts.source_fetch import upload_done
+            upload_done(_SRC_COPY.pop("got", None))
+        except Exception:  # noqa: BLE001
+            pass
         _ACTIVE_JOB["id"] = None
         _job_tmp_exit()
         shutil.rmtree(tmp_dir, ignore_errors=True)

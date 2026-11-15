@@ -37,6 +37,9 @@ except ImportError:
 
 
 # ── Client factory —————————————————————————————————————————————————————————————
+import threading as _threading
+_CLIENT_LOCK = _threading.Lock()
+
 
 def _make_client(bucket_env_keys: tuple[str, ...] = ("S3_BUCKET_NAME", "S3_BUCKET")):
     """Create a fully-configured boto3 S3 client (always with endpoint_url)."""
@@ -48,13 +51,14 @@ def _make_client(bucket_env_keys: tuple[str, ...] = ("S3_BUCKET_NAME", "S3_BUCKE
             "S3_ENDPOINT_URL is required. Set it to your S3-compatible endpoint "
             "(e.g. https://s3.timeweb.cloud or https://s3.amazonaws.com)"
         )
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=os.environ.get("S3_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY"),
-        region_name=os.environ.get("S3_REGION", "ru-1"),
-    )
+    with _CLIENT_LOCK:      # boto3's default session is not thread-safe while it creates clients (parallel uploads)
+        return boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=os.environ.get("S3_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY"),
+            region_name=os.environ.get("S3_REGION", "ru-1"),
+        )
 
 
 def _bucket() -> str:
