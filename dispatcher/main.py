@@ -60,9 +60,11 @@ def build_accounting(fleet: FleetManager, env=os.environ):
         try:
             conn.set_session(readonly=True, autocommit=True)
             cur = conn.cursor()
+            # test accounts (…@sonya.invalid: load tests, cutover tests) are not videos of the business
             cur.execute("SELECT COUNT(*) FROM generation_jobs WHERE status='completed' AND mode = ANY(%s) AND worker_id LIKE %s "
-                        "AND completed_at >= to_timestamp(%s) AND completed_at < to_timestamp(%s)",
-                        (list(fleet.cfg.pool_modes), fleet.cfg.label_prefix + "%", lo, hi))
+                        "AND completed_at >= to_timestamp(%s) AND completed_at < to_timestamp(%s) "
+                        "AND user_id::text NOT IN (SELECT id::text FROM users WHERE email LIKE %s)",
+                        (list(fleet.cfg.pool_modes), fleet.cfg.label_prefix + "%", lo, hi, "%@sonya.invalid"))
             return int(cur.fetchone()[0])
         finally:
             conn.close()
