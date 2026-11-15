@@ -376,7 +376,7 @@ def test_active_speaker_model_loads_and_scores():
 
 
 def test_fill_tiny_faces_hold_the_person_from_before_the_cut():
-    """VSRAP wide two-shot (faces 60 px): the speaker model is not trusted; the window holds whoever was on screen
+    """VSRAP wide two-shot (faces 60 px < ASD_MIN_FACE): the speaker model is not trusted; the window holds whoever was on screen
     before the cut (face identity), for the whole shot — even if the model «sees» the other one talk."""
     def f(t):
         return [face(1300, 360)] if t < 4 else [face(400, 64), face(1500, 62)]

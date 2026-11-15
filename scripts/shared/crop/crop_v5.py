@@ -44,8 +44,9 @@ ASD_SMOOTH_SEC = 0.5         # fill mode + speaker model: scores are averaged ov
 ASD_ON = 0.5                 # … a person «talks» when the smoothed score is above this
 ASD_MARGIN = 1.0             # … and takes the window only when ahead of the current one by this much …
 ASD_HOLD_SEC = 0.6           # … for this long (hysteresis: a listener's smile or a short «да» never wins)
-ASD_MIN_FACE = 90            # fill mode: faces narrower than this (source px) are too small for the speaker model
-                             # (VSRAP wide two-shot, 60 px profiles: it picked the listener; Nagiev 125 px: right)
+ASD_MIN_FACE = 72            # fill mode: faces narrower than this (source px) are too small for the speaker model
+                             # (VSRAP wide two-shot, 60–67 px profiles: it picked the listener; Nagiev far shots
+                             # 80–97 px and two-shots 125 px: right, and holding by identity there showed a cutaway)
 FACE_SAME = 0.40             # fill mode: face-embedding cosine that says «same person» across a cut …
 FACE_MARGIN = 0.15           # … and by this much more than the other candidate
 FILL_MIN_SCORE = 0.72        # fill mode: lowest detector score of a second person the speaker model may pick
