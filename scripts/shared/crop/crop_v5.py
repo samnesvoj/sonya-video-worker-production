@@ -17,6 +17,12 @@ v5 rules (also in docs CUT_PLAYBOOK, section «Кроп v5»):
      much as needed, forward+backward average so it starts moving a little early) — never a lagging follow.
   6. Aspect is never changed: every window is scaled uniformly.
 The returned dict has the v3 shape (keyframes / closeup / split / shots / cuts) so render + text_zones are unchanged.
+
+fill=True — crop-fill-9x16-v1 (owner 2026-11-15 «всегда 9:16, растягивается на весь экран, как было»): every
+moment is ONE full 9:16 window, never a close-up square, a split or blurred bars. Rules 1, 3, 5 still hold
+(tracks, calm, the whole face inside). Two real people who do not fit one window → the window follows the one
+who TALKS (mouth motion, smoothed), switches only by a hard jump (like an editor's cut), each speaker run
+≥ FILL_SPEAKER_MIN_SEC — never a pan between them, never the same face twice.
 """
 from __future__ import annotations
 
@@ -31,6 +37,10 @@ SPLIT_COVER = 0.7            # … in at least this share of the samples of that
 MIN_LAYOUT_SEC = 1.6         # no layout shorter than this (except a whole clip shorter than it)
 CLOSEUP_FRAC = 0.45          # median face width ≥ this × 9:16 window width → close-up layout
 MARGIN_FRAC = 0.22           # face keeps this × its width free on both sides inside the window
+FILL_SPEAKER_MIN_SEC = 2.5   # fill mode: the window stays on one speaker at least this long
+FILL_SPEAKER_WIN = 1.5       # fill mode: mouth motion is summed over this window to tell who talks
+FILL_SWITCH_GAIN = 1.4       # fill mode: the other person must talk this much more to take the window
+CROP_VERSION_FILL = "crop-fill-9x16-v1"
 CAPTION_BAND = 0.70          # burned-in captions: text boxes whose top is below this × source height …
 CAPTION_CENTER = 0.22        # … centred within this × width of the middle
 
@@ -250,7 +260,63 @@ def _runs(flags: List[Tuple[float, bool]], s0: float, s1: float, min_sec: float,
     return join([[r[0] and r[2] - r[1] >= min_sec, r[1], r[2]] for r in runs])
 
 
-def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int) -> Dict[str, Any]:
+def speaker_runs(a: Dict[str, Any], b: Dict[str, Any], s0: float, s1: float,
+                 min_sec: float = FILL_SPEAKER_MIN_SEC) -> List[List[Any]]:
+    """Fill mode: who talks over [s0, s1] → [[track, t0, t1]] covering it. Mouth motion of each person is summed
+    over FILL_SPEAKER_WIN around every sample; the current speaker keeps the window until the other one talks
+    FILL_SWITCH_GAIN × more; runs shorter than min_sec go to a neighbour (no ping-pong)."""
+    def mouth(tr: Dict[str, Any]) -> Dict[float, float]:
+        return {t: float(bb[5]) if len(bb) > 5 and bb[5] is not None else 0.0 for t, bb in tr["boxes"]}
+    ma, mb = mouth(a), mouth(b)
+    ts = sorted(t for t in set(ma) | set(mb) if s0 - 1e-6 <= t < s1 + 1e-6)
+    if not ts:
+        return [[a, s0, s1]]
+    half = FILL_SPEAKER_WIN / 2.0
+    cur = a if sum(ma.get(t, 0.0) for t in ts[:15]) >= sum(mb.get(t, 0.0) for t in ts[:15]) else b
+    who: List[Tuple[float, Dict[str, Any]]] = []
+    for t in ts:
+        near = [u for u in ts if abs(u - t) <= half]
+        va, vb = sum(ma.get(u, 0.0) for u in near), sum(mb.get(u, 0.0) for u in near)
+        if t not in (ma if cur is a else mb):        # the current one is not seen here: the other one, if seen
+            cur = b if cur is a else a
+        elif cur is a and vb > FILL_SWITCH_GAIN * va + 0.3 and t in mb:
+            cur = b
+        elif cur is b and va > FILL_SWITCH_GAIN * vb + 0.3 and t in ma:
+            cur = a
+        who.append((t, cur))
+    runs: List[List[Any]] = []
+    for t, tr in who:
+        if runs and runs[-1][0] is tr:
+            runs[-1][2] = t
+        else:
+            runs.append([tr, t, t])
+    # edges on the 1 ms grid: lazy_path rounds its first key to 3 decimals and drops keys before s0
+    edges = [s0] + [round((x[2] + y[1]) / 2.0, 3) for x, y in zip(runs, runs[1:])] + [s1]
+    runs = [[r[0], e0, e1] for r, e0, e1 in zip(runs, edges, edges[1:])]
+    changed = True
+    while changed and len(runs) > 1:
+        changed = False
+        for k, r in enumerate(runs):
+            if r[2] - r[1] >= min_sec:
+                continue
+            prev = runs[k - 1] if k > 0 else None
+            nxt = runs[k + 1] if k + 1 < len(runs) else None
+            src = prev if prev and (not nxt or prev[2] - prev[1] >= nxt[2] - nxt[1]) else nxt
+            r[0] = src[0]
+            changed = True
+            break
+        out: List[List[Any]] = []
+        for r in runs:
+            if out and out[-1][0] is r[0]:
+                out[-1][2] = r[2]
+            else:
+                out.append(list(r))
+        runs = out
+    return runs
+
+
+def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
+                  fill: bool = False) -> Dict[str, Any]:
     from .smart_crop_adapter import crop_window, split_window
     W, H = int(width), int(height)
     cw, ch = crop_window(W, H)
@@ -259,7 +325,7 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
     sq = (min(W, H) // 2) * 2
     sq_max = W - sq
     meta = (analysis or {}).get("meta") or {}
-    info: Dict[str, Any] = {"crop_version": CROP_VERSION_V5, "source_width": W, "source_height": H,
+    info: Dict[str, Any] = {"crop_version": CROP_VERSION_FILL if fill else CROP_VERSION_V5, "source_width": W, "source_height": H,
                             "output_aspect": "9:16", "detector": meta.get("detector"),
                             "analysis_version": meta.get("version"), "crop_w": cw, "crop_h": ch,
                             "y": (H - ch) // 2 // 2 * 2}
@@ -293,9 +359,15 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             k9 = lazy_path(main["boxes"], s0, s1, cw, max_x)
             big = path_travel(k9) > max(0.6 * cw, 0.35 * cw * (s1 - s0))
         shot["kind"] = "closeup" if big or shot.get("group") else "single"
+        if fill:                     # one full 9:16 window always; a group → the main (largest) person
+            shot["kind"] = "single"
+            shot.pop("group", None)
         if partner is not None and pair_fits(main, partner, cw):
             shot["pair"] = pair_boxes(main, partner)
             shot["pair_w"] = max(main["w"], partner["w"])
+            partner = None
+        if partner is not None and fill:   # no split: follow whoever talks, jump (never pan) between them
+            shot["speakers"] = speaker_runs(main, partner, s0, s1)
             partner = None
         if partner is not None:
             ts = sorted({x["t"] for x in ins})
@@ -318,7 +390,7 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
         if sh["kind"] == "none":
             prev = next((s for s in reversed(shots[:i]) if s["kind"] != "none"), None)
             nxt = next((s for s in shots[i + 1:] if s["kind"] != "none"), None)
-            lay = prev["parts"][-1][0] if prev else nxt["parts"][0][0] if nxt else "closeup"
+            lay = prev["parts"][-1][0] if prev else nxt["parts"][0][0] if nxt else ("single" if fill else "closeup")
             sh["parts"] = [["closeup" if lay == "split" else lay, sh["start"], sh["end"]]]
     seq = [[p[0], p[1], p[2], i] for i, sh in enumerate(shots) for p in sh["parts"]]
     changed = True
@@ -362,7 +434,14 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             keys += [[round(a, 3), last_x], [round(b, 3), last_x]]
             continue
         win, mx = (sq, sq_max) if lay == "closeup" else (cw, max_x)
-        k = lazy_path(sh.get("pair") or main["boxes"], a, b, win, mx) if main else []
+        if sh.get("speakers"):
+            k = []
+            for who, r0, r1 in sh["speakers"]:
+                r0, r1 = max(a, r0), min(b, r1)
+                if r1 - r0 > 1e-3:
+                    k += lazy_path(who["boxes"], r0, r1, win, mx) or [[round(r0, 3), last_x], [round(r1, 3), last_x]]
+        else:
+            k = lazy_path(sh.get("pair") or main["boxes"], a, b, win, mx) if main else []
         if not k:
             x0 = (last_cx if lay == "closeup" else last_x) if a > 0 and b - a < 1.0 else \
                 ((sq_max // 2) // 2 * 2 if lay == "closeup" else center)
@@ -377,11 +456,14 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             last_x = k[-1][1]
     for sh in shots:
         sh["target"] = {"none": "none", "closeup": "closeup", "single": "pair" if sh.get("pair") else "person"}[sh["kind"]]
+        if sh.get("speakers"):
+            sh["target"] = "speaker"
+            sh["speaker_switch"] = [round(r[1], 3) for r in sh["speakers"][1:]]
         if any(p[0] == "split" for p in sh["parts"]):
             sh["target"] = "split"
         sh["segments"] = [{"start": round(p[1], 3), "end": round(p[2], 3), "layout": p[0]}
                           for p in seq if p[3] == shots.index(sh)]
-        for k in ("main", "partner", "parts", "kind", "pair", "pair_w", "group"):
+        for k in ("main", "partner", "parts", "kind", "pair", "pair_w", "group", "speakers"):
             sh.pop(k, None)
     clean: List[List[float]] = []
     for k in keys:

@@ -98,6 +98,11 @@ def editor_available(env: Optional[Dict[str, str]] = None) -> bool:
     return bool(llm_provider.configured_providers(env))
 
 
+# Opt-in job param crop_mode="fill_9x16" (owner 2026-11-15, A/B test): every moment is one full 9:16 window
+# following the speaker — no close-up square, no split, no bars. The site never sends it; default stays "smart".
+FILL_LAYOUT = "fill_9x16"
+
+
 def applies(mode: str, params: Dict[str, Any]) -> bool:
     """Every production virality job runs the Mac mini recipe (owner 2026-11-08: «старое это не надо»).
     Left untouched only: a job that already carries the Desktop settings itself (selection=story or
@@ -246,7 +251,8 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
         story["editor"] = True
     out["selection"] = "story"
     out["story"] = dict(params.get("story") or {}, **story)
-    crop: Dict[str, Any] = {"mode": "tracked", "analysis": "per_clip", "layout": "smart",
+    crop: Dict[str, Any] = {"mode": "tracked", "analysis": "per_clip",
+                            "layout": FILL_LAYOUT if params.get("crop_mode") == FILL_LAYOUT else "smart",
                             "source_sha256": _sha256(input_video_path),
                             "clip_cache_dir": str(Path(work_dir) / "vision" / "clips")}
     style = site_subtitle_style(settings)

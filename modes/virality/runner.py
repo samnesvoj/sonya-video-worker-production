@@ -86,6 +86,19 @@ def _select_and_compose(
     words = apply_glossary(words, params.get("glossary"))
     enrichment["word_timestamps"] = words
 
+    # opt-in (A/B tests, owner 2026-11-15): re-render EXACTLY the moments of an earlier job — its final render
+    # bounds, hook and keywords (selected_segments.json) — no new selection, no new boundaries
+    fixed = params.get("fixed_segments")
+    if fixed:
+        selected = []
+        for s in fixed[:max_clips]:
+            st, en = float(s["start"]), float(s["end"])
+            selected.append({"start": round(st, 3), "duration": round(en - st, 3), "end": round(en, 3),
+                             "boundary_status": "fixed", "source": "fixed_segments",
+                             **{k: s[k] for k in ("hook", "keywords", "editor_score", "selection_reason") if k in s}})
+        return _compose(input_video_path, enrichment, selected, output_dir, params), \
+            {"selection": "fixed_segments", "count": len(selected)}
+
     # Desktop: whole stories / question + answer, 20–90 s (cut-local-rank-v3)
     from scripts.shared.cut_selection import StoryConfig, select_story_clips
     story = dict(params.get("story") or {})
@@ -236,6 +249,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     from scripts.shared.mode_output import write_selected_segments
 
     from scripts.shared.subtitles import subtitles_for_clip
+    from scripts.shared.cut_profile import FILL_LAYOUT
 
     from scripts.shared import split_filler
     from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
@@ -260,7 +274,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         elif per_clip:
             clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
             track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
-                or crop_track_v2(clip_an, dur, width=W, height=H)
+                or crop_track_v2(clip_an, dur, width=W, height=H, fill=crop.get("layout") == FILL_LAYOUT)
             if clip_an is None:
                 track["fallback_reason"] = err.split(":", 1)[0] if err else "analysis_failed"
                 seg["crop_detector_error"] = err

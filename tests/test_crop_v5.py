@@ -195,3 +195,72 @@ def test_weak_editor_picks_are_dropped_but_five_are_kept(monkeypatch):
     monkeypatch.setenv("SONYA_CUT_MIN_CLIPS", "3")
     segs3, _ = select_story_clips(raw, 8, StoryConfig(min_duration=10, editor=True), chat=chat)
     assert len(segs3) == 3
+
+
+# ── fill_9x16 (owner 2026-11-15: «всегда 9:16 вертикально, как было, только без ошибок») ───────────────────
+
+def _fill(a, d=10.0, **kw):
+    return crop_track_v2(a, d, width=a["meta"]["width"], height=a["meta"]["height"], fill=True, **kw)
+
+
+@pytest.mark.parametrize("clip", ["clip4", "clip1"])
+def test_fill_real_clips_one_full_window(clip):
+    """Her clips: fill mode never makes a close-up square or a split."""
+    a = real(clip)
+    tr = _fill(a, a["meta"]["duration"])
+    assert tr["crop_version"] == crop_v5.CROP_VERSION_FILL
+    assert not tr.get("split") and not tr.get("closeup")
+    assert {lay for lay, _, _ in tr["layouts"]} <= {"single"}
+
+
+def test_fill_big_face_is_not_closeup():
+    tr = _fill(an(faces=lambda t: [face(900, 420)]))
+    assert not tr.get("closeup") and tr["crop_w"] == CW
+
+
+@pytest.mark.parametrize("fps", [10.0, 12.0])   # 12 fps: run edges off the 1 ms grid (the window panned 4 s)
+def test_fill_two_people_apart_follow_the_talker_with_a_jump(fps):
+    """Interviewer left talks 0–5 s, guest right talks 5–10 s, too far apart for one window: no split; the
+    window is on the left person, then JUMPS (same time, two x) to the right one; each face whole; no pan."""
+    def f(t):
+        return [face(400, 160, mouth=3.0 if t < 5 else 0.1), face(1500, 160, mouth=0.1 if t < 5 else 3.0)]
+    tr = _fill(an(faces=f, fps=fps))
+    assert not tr.get("split") and not tr.get("closeup")
+    x1, x2 = val(tr["keyframes"], 2.0), val(tr["keyframes"], 8.0)
+    assert x1 <= 400 - 80 and 400 + 80 <= x1 + CW
+    assert x2 <= 1500 - 80 and 1500 + 80 <= x2 + CW
+    k = tr["keyframes"]
+    jumps = [(a, b) for a, b in zip(k, k[1:]) if abs(a[0] - b[0]) < 1e-6 and a[1] != b[1]]
+    assert len(jumps) == 1 and 4.0 <= jumps[0][0][0] <= 6.0
+    assert all(abs(b[1] - a[1]) <= 8 for a, b in zip(k, k[1:]) if b[0] - a[0] > 1e-6)   # no pan
+    assert tr["shots"][0]["target"] == "speaker"
+
+
+def test_fill_speaker_ping_pong_is_calm():
+    """Mouth noise flipping every 0.5 s must not make the window ping-pong: no speaker run < 2.5 s."""
+    def f(t):
+        odd = int(t * 2) % 2
+        return [face(400, 160, mouth=2.0 if odd else 1.0), face(1500, 160, mouth=1.0 if odd else 2.0)]
+    tr = _fill(an(faces=f))
+    edges = [0.0] + (tr["shots"][0].get("speaker_switch") or []) + [10.0]
+    assert all(b - a >= crop_v5.FILL_SPEAKER_MIN_SEC - 1e-6 for a, b in zip(edges, edges[1:]))
+
+
+def test_fill_pair_that_fits_is_framed_together():
+    tr = _fill(an(faces=lambda t: [face(800, 150), face(1150, 150)]))
+    assert tr["shots"][0]["target"] == "pair" and not tr.get("split")
+
+
+def test_fill_off_by_default_is_v5():
+    tr = crop_track_v2(an(faces=lambda t: [face(900, 420)]), 10.0, width=W, height=H)
+    assert tr["crop_version"] == "crop-shots-v5" and tr.get("closeup")
+
+
+def test_fill_job_param_sets_the_layout(tmp_path):
+    from scripts.shared import cut_profile as cp
+    v = tmp_path / "v.mp4"
+    v.write_bytes(b"x")
+    p = cp.apply_profile("virality", {"crop_mode": "fill_9x16"}, str(v), str(tmp_path), ass_supported=True, editor=False)
+    assert p["crop"]["layout"] == "fill_9x16"
+    p = cp.apply_profile("virality", {}, str(v), str(tmp_path), ass_supported=True, editor=False)
+    assert p["crop"]["layout"] == "smart"
