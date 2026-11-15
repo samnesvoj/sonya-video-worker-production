@@ -30,13 +30,11 @@ def parse_row(row: dict) -> List[tuple]:
     typ = str(row.get("type") or "instance")
     if isinstance(row.get("items"), list) and row["items"]:
         # REAL /api/v0/charges/ shape (verified 2026-11-15): one row per instance per UTC day, items gpu / disk / bwd / bwu
-        out: List[tuple] = []
+        agg: Dict[str, Decimal] = {}
         for it in row["items"]:
-            amount = D(it.get("amount", 0))
-            if amount:
-                cat = {"gpu": "gpu", "disk": "disk"}.get(str(it.get("type")), "other")
-                out.append((day, cat, amount, {"raw": it, "instance": row.get("source")}))
-        return out
+            cat = {"gpu": "gpu", "disk": "disk"}.get(str(it.get("type")), "other")
+            agg[cat] = agg.get(cat, Decimal(0)) + D(it.get("amount", 0))
+        return [(day, c, a, {"raw": row["items"], "instance": row.get("source")}) for c, a in agg.items() if a]
     total = D(row.get("amount", row.get("cost", row.get("total", 0))))
     parts = {"gpu": D(row.get("gpu") or row.get("compute") or 0), "disk": D(row.get("storage") or row.get("disk") or 0),
              "other": D(row.get("bandwidth") or row.get("network") or row.get("other") or 0)}
