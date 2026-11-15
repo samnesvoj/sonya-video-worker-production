@@ -40,7 +40,14 @@ MARGIN_FRAC = 0.22           # face keeps this × its width free on both sides i
 FILL_SPEAKER_MIN_SEC = 2.5   # fill mode: the window stays on one speaker at least this long
 FILL_SPEAKER_WIN = 1.5       # fill mode: mouth motion is summed over this window to tell who talks
 FILL_SWITCH_GAIN = 1.4       # fill mode: the other person must talk this much more to take the window
-CROP_VERSION_FILL = "crop-fill-9x16-v1"
+ASD_SMOOTH_SEC = 0.5         # fill mode + speaker model: scores are averaged over this window
+ASD_ON = 0.5                 # … a person «talks» when the smoothed score is above this
+ASD_MARGIN = 1.0             # … and takes the window only when ahead of the current one by this much …
+ASD_HOLD_SEC = 0.6           # … for this long (hysteresis: a listener's smile or a short «да» never wins)
+EAR_FRAC = 0.10              # fill mode: the head (ears) reaches this × face width beyond the detector box
+BACK_K = 0.7                 # … plus this × |yaw| × width on the back side of a turned head (≤ 0.25 w)
+HEAD_SLACK = 0.04            # … head wider than the window: the window may wander this × width (no jitter)
+CROP_VERSION_FILL = "crop-fill-9x16-v2"   # v2: audio-visual speaker model, hold on doubt, head-centred close-ups
 CAPTION_BAND = 0.70          # burned-in captions: text boxes whose top is below this × source height …
 CAPTION_CENTER = 0.22        # … centred within this × width of the middle
 
@@ -180,9 +187,10 @@ def lazy_path(boxes: List[Tuple[float, List[float]]], s0: float, s1: float, win:
     iv = []
     for t, b in pts:
         m = MARGIN_FRAC * b[2]
-        if soft_margin:       # fill mode, big face: the full margin would pin the window to every detection (jitter);
-            m = max(0.0, min(m, 0.25 * (win - b[2])))   # keep half the spare room as a dead zone instead
-        lo, hi = b[0] + b[2] + m - win, b[0] - m           # window x range that contains the padded face
+        if soft_margin:
+            lo, hi = head_interval(b, win)
+        else:
+            lo, hi = b[0] + b[2] + m - win, b[0] - m           # window x range that contains the padded face
         if lo > hi:                                          # face (+ margin) wider than the window: centre it
             lo = hi = b[0] + b[2] / 2.0 - win / 2.0
         iv.append((t, max(0.0, min(max_x, lo)), max(0.0, min(max_x, hi))))
@@ -209,6 +217,31 @@ def lazy_path(boxes: List[Tuple[float, List[float]]], s0: float, s1: float, win:
     if keys[-1][0] < s1:
         keys.append([round(s1, 3), keys[-1][1]])
     return [k for k in keys if s0 - 1e-6 <= k[0] <= s1 + 1e-6]
+
+
+def head_extent(b: List[float]) -> Tuple[float, float]:
+    """Fill mode: the detector box is the face (brows … chin, cheek to cheek); the head reaches further — the ears,
+    and on a turned head the back of it, on the side away from the nose (b[6] = yaw: nose offset from the eye
+    midpoint / face width, + = nose to the right)."""
+    w = float(b[2])
+    yaw = float(b[6]) if len(b) > 6 and b[6] is not None else 0.0
+    back = EAR_FRAC * w + min(0.25, BACK_K * abs(yaw)) * w
+    if yaw >= 0:
+        return b[0] - back, b[0] + w + EAR_FRAC * w
+    return b[0] - EAR_FRAC * w, b[0] + w + back
+
+
+def head_interval(b: List[float], win: int) -> Tuple[float, float]:
+    """Fill mode: window x range for one sample. The whole head (ears) with a margin when it fits; half of the
+    spare room is a dead zone (a big face would otherwise pin the window to every detection = jitter). A head
+    wider than the window is centred (both ears lose the same), with a small slack. The face box itself
+    never leaves the window."""
+    hx0, hx1 = head_extent(b)
+    spare = win - (hx1 - hx0)
+    m = min(MARGIN_FRAC * b[2], 0.25 * spare) if spare > 0 else 0.0
+    d = max(spare / 2.0 - m, HEAD_SLACK * b[2])
+    c = (hx0 + hx1) / 2.0 - win / 2.0
+    return max(c - d, b[0] + b[2] - win), min(c + d, b[0])
 
 
 def _simplify(p: List[List[float]], tol: float) -> List[List[float]]:
@@ -317,8 +350,142 @@ def speaker_runs(a: Dict[str, Any], b: Dict[str, Any], s0: float, s1: float,
     return runs
 
 
+def _merge_runs(runs: List[List[Any]], min_sec: float, strength=None) -> List[List[Any]]:
+    """[[track, t0, t1]] → runs shorter than min_sec go to a neighbour (the one that talks more there, else the
+    longer one); equal neighbours are joined."""
+    def join(rs: List[List[Any]]) -> List[List[Any]]:
+        out: List[List[Any]] = []
+        for r in rs:
+            if out and out[-1][0] is r[0]:
+                out[-1][2] = r[2]
+            else:
+                out.append(list(r))
+        return out
+    runs = join(runs)
+    changed = True
+    while changed and len(runs) > 1:
+        changed = False
+        k = min((i for i, r in enumerate(runs) if r[2] - r[1] < min_sec),
+                key=lambda i: runs[i][2] - runs[i][1], default=None)
+        if k is None:
+            break
+        r = runs[k]
+        nb = [x for x in (runs[k - 1] if k > 0 else None, runs[k + 1] if k + 1 < len(runs) else None) if x]
+        if strength is not None and len(nb) == 2 and nb[0][0] is not nb[1][0]:
+            src = max(nb, key=lambda x: (strength(x[0], r[1], r[2]), x[2] - x[1]))
+        else:
+            src = max(nb, key=lambda x: x[2] - x[1])
+        r[0] = src[0]
+        changed = True
+        runs = join(runs)
+    return runs
+
+
+def speaker_runs_asd(cands: List[Dict[str, Any]], ts: Any, scores: List[Any], s0: float, s1: float,
+                     min_sec: float = FILL_SPEAKER_MIN_SEC) -> Optional[List[List[Any]]]:
+    """Fill mode with the audio-visual speaker model: who talks over [s0, s1] → [[track, t0, t1]].
+    Scores (one per 25 fps frame, NaN = face not seen) are smoothed; the window changes person only when the
+    other one clearly talks (> ASD_ON and ASD_MARGIN ahead) for ASD_HOLD_SEC; when nobody clearly talks
+    (a pause, an off-screen voice, doubt) the current person KEEPS the window — never a jump to a listener.
+    Runs shorter than min_sec are absorbed. None → no usable scores (caller falls back)."""
+    import numpy as np
+    ts = np.asarray(ts, dtype=float)
+    if len(ts) < 5 or len(scores) != len(cands):
+        return None
+    fps = 1.0 / max(1e-3, float(np.median(np.diff(ts))))
+    k = max(1, int(round(ASD_SMOOTH_SEC * fps)))
+    sm = []
+    for sc in scores:
+        sc = np.asarray(sc, dtype=float)
+        ok = ~np.isnan(sc)
+        if not ok.any():
+            sm.append(np.full(len(ts), np.nan))
+            continue
+        num = np.convolve(np.where(ok, sc, 0.0), np.ones(k), "same")
+        den = np.convolve(ok.astype(float), np.ones(k), "same")
+        v = np.where(den > 0, num / np.maximum(den, 1e-9), np.nan)
+        v[~ok] = np.nan
+        sm.append(v)
+    S = np.stack(sm)                                  # (people, frames)
+    if np.isnan(S).all():
+        return None
+    mean = lambda j, a, b: float(np.nanmean(S[j, a:b])) if (~np.isnan(S[j, a:b])).any() else -1e9   # noqa: E731
+    head = int(round(2.0 * fps))
+    first = [mean(j, 0, head) for j in range(len(cands))]
+    whole = [mean(j, 0, len(ts)) for j in range(len(cands))]
+    cur = int(np.argmax(first)) if max(first) > ASD_ON else int(np.argmax(whole))
+    hold = max(1, int(round(ASD_HOLD_SEC * fps)))
+    who, pend, cnt = [], None, 0
+    for i in range(len(ts)):
+        col = S[:, i]
+        seen = ~np.isnan(col)
+        if not seen[cur] and seen.any():          # the current person is not on screen: the best one that is
+            cur = int(np.nanargmax(np.where(seen, col, -np.inf)))
+            pend, cnt = None, 0
+        elif seen.any():
+            best = int(np.nanargmax(np.where(seen, col, -np.inf)))
+            if best != cur and col[best] > ASD_ON and col[best] - (col[cur] if seen[cur] else -1e9) > ASD_MARGIN:
+                cnt = cnt + 1 if pend == best else 1
+                pend = best
+                if cnt >= hold:
+                    cur, pend, cnt = best, None, 0
+            else:
+                pend, cnt = None, 0
+        who.append(cur)
+    # a switch fires `hold` frames after the other person started talking: put the cut where they started
+    seg: List[List[int]] = []
+    for i, j in enumerate(who):
+        if not seg or seg[-1][0] != j:
+            seg.append([j, i if not seg else max(seg[-1][1] + 1, i - hold + 1)])
+    edges = [s0] + [round(float(ts[st]), 3) for _, st in seg[1:]] + [s1]
+    out = [[cands[j], e0, e1] for (j, _), e0, e1 in zip(seg, edges, edges[1:])]
+
+    def strength(tr: Dict[str, Any], a: float, b: float) -> float:
+        j = next(i for i, c in enumerate(cands) if c is tr)
+        ia, ib = int(np.searchsorted(ts, a)), int(np.searchsorted(ts, b))
+        return mean(j, ia, max(ia + 1, ib))
+    return _merge_runs(out, min_sec, strength)
+
+
+def presence_cuts(samples: List[Dict[str, Any]], bounds: List[float], H: int, gap_sec: float = 1.0) -> List[float]:
+    """Fill mode: «cuts» without a camera cut — an inserted photo/overlay or a dissolve. Inside a shot, where the
+    main person is absent for ≥ gap_sec while someone else is on screen, the shot is split there (else the window
+    keeps sitting where the main face was / will be: an empty piece of the room)."""
+    out: List[float] = []
+    for s0, s1 in zip(bounds, bounds[1:]):
+        ins = [x for x in samples if s0 - 1e-6 <= x["t"] < s1 - 1e-6]
+        trs = [tr for tr in tracks(faces_of(ins, H)) if len(tr["times"]) >= max(3, 0.25 * max(1, len(ins)))]
+        if len(trs) < 2:
+            continue
+        mt = sorted(trs[0]["times"])
+        others = sorted({t for tr in trs[1:] for t in tr["times"]})
+        edges = [(s0, mt[0])] + list(zip(mt, mt[1:])) + [(mt[-1], s1)]
+        for a, b in edges:
+            if b - a < gap_sec:
+                continue
+            inside = [t for t in others if a < t < b]
+            if len(inside) < 3 or inside[-1] - inside[0] < 0.6 * gap_sec:
+                continue
+            for c in ((a + inside[0]) / 2.0 if a > s0 else None, (inside[-1] + b) / 2.0 if b < s1 else None):
+                if c is not None and s0 + 0.5 < c < s1 - 0.5:
+                    out.append(round(c, 3))
+    return sorted(set(out))
+
+
+def fill_candidate(main: Dict[str, Any], other: Dict[str, Any], W: int) -> bool:
+    """Fill mode: may `other` get the window when it talks? A comparable, confident face fully in frame, not on
+    top of the main one. Unlike real_partner no «alive» test: the speaker model decides who talks."""
+    if other["w"] < SPLIT_SIZE * main["w"] or other["score"] < SPLIT_SCORE:
+        return False
+    bs = [b for _, b in other["boxes"]]
+    inside = sum(1 for b in bs if b[0] >= 0.005 * W and b[0] + b[2] <= 0.995 * W) / len(bs)
+    return inside >= 0.8 and abs(_cx(main) - _cx(other)) >= 0.8 * max(main["w"], other["w"])
+
+
 def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
-                  fill: bool = False) -> Dict[str, Any]:
+                  fill: bool = False, speaker_fn=None) -> Dict[str, Any]:
+    """speaker_fn (fill mode): (list of track boxes, s0, s1) → (times, [scores per track]) | None — the
+    audio-visual speaker model (active_speaker.score_tracks bound to the clip); None → mouth-motion cue."""
     from .smart_crop_adapter import crop_window, split_window
     W, H = int(width), int(height)
     cw, ch = crop_window(W, H)
@@ -337,6 +504,11 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
     samples = analysis.get("samples") or []
     cuts = [c for c in analysis.get("cuts") or [] if 0.0 < c < duration]
     bounds = [0.0] + cuts + [duration]
+    if fill:
+        extra = presence_cuts(samples, bounds, H)
+        if extra:
+            info["presence_cuts"] = extra
+            bounds = sorted(set(bounds) | set(extra))
     shots: List[Dict[str, Any]] = []
     # 1. per shot: who is there, which layout
     for s0, s1 in zip(bounds, bounds[1:]):
@@ -361,15 +533,32 @@ def crop_track_v5(analysis: Optional[Dict[str, Any]], duration: float, *, width:
             k9 = lazy_path(main["boxes"], s0, s1, cw, max_x)
             big = path_travel(k9) > max(0.6 * cw, 0.35 * cw * (s1 - s0))
         shot["kind"] = "closeup" if big or shot.get("group") else "single"
-        if fill:                     # one full 9:16 window always; a group → the main (largest) person
+        cands: List[Dict[str, Any]] = []
+        if fill:                     # one full 9:16 window always; who gets it: below
             shot["kind"] = "single"
             shot.pop("group", None)
+            cands = [main] + [tr for tr in trs[1:] if fill_candidate(main, tr, W)][:2]
+            if partner is None and len(cands) == 2 and speaker_fn is not None:
+                partner = cands[1]   # a quiet-looking second person (profile, sunglasses): the model decides
+            if len(cands) > 2:
+                partner = None
         if partner is not None and pair_fits(main, partner, cw):
             shot["pair"] = pair_boxes(main, partner)
             shot["pair_w"] = max(main["w"], partner["w"])
             partner = None
-        if partner is not None and fill:   # no split: follow whoever talks, jump (never pan) between them
-            shot["speakers"] = speaker_runs(main, partner, s0, s1)
+        if fill and (partner is not None or len(cands) > 2):
+            # no split: follow whoever talks, jump (never pan) between them
+            people = [main, partner] if partner is not None else cands
+            runs, cue = None, "mouth"
+            if speaker_fn is not None:
+                res = speaker_fn([tr["boxes"] for tr in people], s0, s1)
+                if res is not None:
+                    runs = speaker_runs_asd(people, res[0], res[1], s0, s1, min_sec=MIN_LAYOUT_SEC)
+                    cue = "asd" if runs else cue
+            if runs is None:
+                runs = speaker_runs(people[0], people[1], s0, s1)
+            shot["speakers"] = runs
+            shot["speaker_cue"] = cue
             partner = None
         if partner is not None:
             ts = sorted({x["t"] for x in ins})

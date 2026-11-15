@@ -98,9 +98,20 @@ def editor_available(env: Optional[Dict[str, str]] = None) -> bool:
     return bool(llm_provider.configured_providers(env))
 
 
-# Opt-in job param crop_mode="fill_9x16" (owner 2026-11-15, A/B test): every moment is one full 9:16 window
-# following the speaker — no close-up square, no split, no bars. The site never sends it; default stays "smart".
+# crop_mode="fill_9x16" (owner 2026-11-15: A/B won by B, «Имран одобрил вариант B»): every moment is one full 9:16
+# window following the speaker — no close-up square, no split, no bars. It is the DEFAULT now; a job param
+# crop_mode="smart" (or env SONYA_CUT_CROP_MODE=smart on the worker) brings back crop-shots-v5 (close-up/split).
 FILL_LAYOUT = "fill_9x16"
+CROP_MODES = (FILL_LAYOUT, "smart")
+
+
+def crop_layout(params: Dict[str, Any], env: Optional[Dict[str, str]] = None) -> str:
+    """Job param crop_mode, else env SONYA_CUT_CROP_MODE, else fill_9x16."""
+    env = os.environ if env is None else env
+    for v in (params.get("crop_mode"), env.get("SONYA_CUT_CROP_MODE")):
+        if isinstance(v, str) and v.strip().lower() in CROP_MODES:
+            return v.strip().lower()
+    return FILL_LAYOUT
 
 
 def applies(mode: str, params: Dict[str, Any]) -> bool:
@@ -252,7 +263,7 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
     out["selection"] = "story"
     out["story"] = dict(params.get("story") or {}, **story)
     crop: Dict[str, Any] = {"mode": "tracked", "analysis": "per_clip",
-                            "layout": FILL_LAYOUT if params.get("crop_mode") == FILL_LAYOUT else "smart",
+                            "layout": crop_layout(params),
                             "source_sha256": _sha256(input_video_path),
                             "clip_cache_dir": str(Path(work_dir) / "vision" / "clips")}
     style = site_subtitle_style(settings)

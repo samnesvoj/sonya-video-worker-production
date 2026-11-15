@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any, Dict
 from decimal import Decimal
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -46,15 +47,26 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     ap.add_argument("--max-minutes", type=float, default=75)
     ap.add_argument("--stub-port", type=int, default=8787)
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--extra", action="append", default=[],
+                    help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY (files go to OUT/NAME)")
     a = ap.parse_args()
-    segs = json.loads(a.segments.read_text())["segments"]
-    if a.only:
-        keep = {int(x) for x in a.only.split(",")}
-        segs = [s for s in segs if int(s["index"]) in keep]
-    fixed = [{k: s[k] for k in ("start", "end", "hook", "keywords", "editor_score", "selection_reason") if k in s}
-             for s in segs]
-    params = dict(SITE_VIRALITY_PARAMS, crop_mode="fill_9x16", fixed_segments=fixed)
-    print(f"release {a.release_sha[:12]} | {len(fixed)} fixed moments | max ${a.max_usd} | {'APPLY' if a.apply else 'dry'}")
+
+    def job_params(seg_path: pathlib.Path, only: str) -> Dict[str, Any]:
+        segs = json.loads(seg_path.read_text())["segments"]
+        if only:
+            keep = {int(x) for x in only.split(",")}
+            segs = [s for s in segs if int(s["index"]) in keep]
+        fixed = [{k: s[k] for k in ("start", "end", "hook", "keywords", "editor_score", "selection_reason") if k in s}
+                 for s in segs]
+        # no crop_mode: since 2026-11-15 fill_9x16 is the worker default (this checks the default path)
+        return dict(SITE_VIRALITY_PARAMS, fixed_segments=fixed)
+    jobs_in = [("", a.source_key, job_params(a.segments, a.only))]
+    for e in a.extra:
+        name, src, segp, only = (e.split("|") + [""])[:4]
+        jobs_in.append((name, src, job_params(pathlib.Path(segp), only)))
+    params = jobs_in[0][2]
+    print(f"release {a.release_sha[:12]} | {[len(j[2]['fixed_segments']) for j in jobs_in]} fixed moments | "
+          f"max ${a.max_usd} | {'APPLY' if a.apply else 'dry'}")
     if not a.apply:
         print(json.dumps(params, ensure_ascii=False)[:600])
         return 0
@@ -70,9 +82,12 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     s3 = boto3.client("s3", endpoint_url=os.environ["S3_ENDPOINT_URL"], aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
                       aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"], region_name=os.environ.get("S3_REGION", "ru-1"))
     bucket = os.environ["S3_BUCKET_NAME"]
-    key = f"fast-start-test/{run_id}/input.mp4"
-    s3.copy({"Bucket": bucket, "Key": a.source_key}, bucket, key)       # server side: never re-uploaded
-    print("source copied to", key)
+    keys = []
+    for n, (name, src, _) in enumerate(jobs_in):
+        key = f"fast-start-test/{run_id}/input{n}.mp4"
+        s3.copy({"Bucket": bucket, "Key": src}, bucket, key)       # server side: never re-uploaded
+        keys.append(key)
+    print("sources copied:", len(keys))
     environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket}
     cfg = FleetConfig(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_instances=1,
                       stopped_retention_seconds=600, max_creates_per_hour=2, label_prefix=PREFIX)
@@ -80,9 +95,10 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
     mgr = FleetManager(cfg, store, vast, stub, static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]), environ)
     t0 = time.time()
-    jid = stub.enqueue("virality", key, params, user_id="ab-fill-test")
+    jids = [stub.enqueue("virality", k, j[2], user_id="ab-fill-test") for k, j in zip(keys, jobs_in)]
+    jid = jids[0]
     say = lambda m: print(f"[+{time.time() - t0:5.0f}s] {m}", flush=True)
-    say(f"job {jid[:8]} queued")
+    say(f"jobs {[x[:8] for x in jids]} queued")
     last, reason = None, None
     try:
         while True:
@@ -92,12 +108,12 @@ def main() -> int:  # pragma: no cover - real Vast/S3
                 if not exc.retryable:
                     raise
                 say(f"vast blip: {exc}")
-            st = stub.jobs[jid]["status"]
+            st = tuple(stub.jobs[x]["status"] for x in jids)
             inst = [(i.id, i.state) for i in store.all()]
             if (st, inst) != last:
-                say(f"job={st} instances={inst}")
+                say(f"jobs={st} instances={inst}")
                 last = (st, inst)
-            if st in ("completed", "failed"):
+            if all(x in ("completed", "failed") for x in st):
                 break
             cost = usage.cost_between(store, t0, time.time(), time.time())
             usd = cost["gpu"] + cost["disk"]
@@ -128,23 +144,28 @@ def main() -> int:  # pragma: no cover - real Vast/S3
             if n:
                 red = red.replace(n, "***")
         (a.out / "worker-log.redacted.txt").write_text(red)
+    for x, (name, _, _) in zip(jids, jobs_in):
+        d = a.out / name if name else a.out
+        d.mkdir(parents=True, exist_ok=True)
+        for f in stub.jobs[x]["files"]:
+            if f.get("s3_key"):
+                s3.download_file(bucket, f["s3_key"], str(d / pathlib.Path(f["s3_key"]).name))
+        if name:
+            (d / "job.json").write_text(json.dumps({"status": stub.jobs[x]["status"], "error": stub.jobs[x].get("error")},
+                                                   ensure_ascii=False))
     j = stub.jobs[jid]
-    for f in j["files"]:
-        if f.get("s3_key"):
-            dst = a.out / pathlib.Path(f["s3_key"]).name
-            s3.download_file(bucket, f["s3_key"], str(dst))
     cost = usage.cost_between(store, t0 - 1, time.time(), time.time())
     for _ in range(12):
         left = [i for i in vast.list_instances() if i.label.startswith(PREFIX)]
         if not left:
             break
         time.sleep(5)
-    rep = {"job": j["status"], "error": j.get("error"), "files": j["files"], "aborted": reason,
+    rep = {"jobs": [stub.jobs[x]["status"] for x in jids], "job": j["status"], "error": j.get("error"), "files": j["files"], "aborted": reason,
            "usd": float(cost["gpu"] + cost["disk"]), "minutes": round((time.time() - t0) / 60, 1),
            "abtest_instances_left": len(left), "history": j["history"]}
     (a.out / "report.json").write_text(json.dumps(rep, ensure_ascii=False, indent=1, default=str))
     say(f"DONE job={j['status']} usd={rep['usd']:.3f} left={len(left)} files={len(j['files'])}")
-    return 0 if j["status"] == "completed" and not left else 1
+    return 0 if all(stub.jobs[x]["status"] == "completed" for x in jids) and not left else 1
 
 
 if __name__ == "__main__":

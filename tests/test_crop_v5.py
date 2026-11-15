@@ -251,16 +251,125 @@ def test_fill_pair_that_fits_is_framed_together():
     assert tr["shots"][0]["target"] == "pair" and not tr.get("split")
 
 
-def test_fill_off_by_default_is_v5():
+def test_fill_off_in_the_crop_function_is_v5():
     tr = crop_track_v2(an(faces=lambda t: [face(900, 420)]), 10.0, width=W, height=H)
     assert tr["crop_version"] == "crop-shots-v5" and tr.get("closeup")
 
 
-def test_fill_job_param_sets_the_layout(tmp_path):
+def test_fill_is_the_default_layout(tmp_path, monkeypatch):
+    """Owner 2026-11-15 «Имран одобрил вариант B»: fill_9x16 by default; crop_mode=smart / env bring v5 back."""
     from scripts.shared import cut_profile as cp
+    monkeypatch.delenv("SONYA_CUT_CROP_MODE", raising=False)
     v = tmp_path / "v.mp4"
     v.write_bytes(b"x")
-    p = cp.apply_profile("virality", {"crop_mode": "fill_9x16"}, str(v), str(tmp_path), ass_supported=True, editor=False)
-    assert p["crop"]["layout"] == "fill_9x16"
-    p = cp.apply_profile("virality", {}, str(v), str(tmp_path), ass_supported=True, editor=False)
-    assert p["crop"]["layout"] == "smart"
+    prof = lambda prm: cp.apply_profile("virality", prm, str(v), str(tmp_path), ass_supported=True,  # noqa: E731
+                                        editor=False)["crop"]["layout"]
+    assert prof({}) == "fill_9x16"
+    assert prof({"crop_mode": "fill_9x16"}) == "fill_9x16"
+    assert prof({"crop_mode": "smart"}) == "smart"
+    assert prof({"crop_mode": "bogus"}) == "fill_9x16"
+    monkeypatch.setenv("SONYA_CUT_CROP_MODE", "smart")
+    assert prof({}) == "smart"
+    assert prof({"crop_mode": "fill_9x16"}) == "fill_9x16"
+
+
+# ── fill_9x16 v2: audio-visual speaker model, hold on doubt, ears ─────────────────────────────────────────
+
+def _asd(fn, fps=25.0):
+    """speaker_fn stub: fn(person_index, t) → score (None = face not seen)."""
+    import numpy as np
+
+    def speaker_fn(boxes, a, b):
+        ts = np.arange(a, b, 1.0 / fps)
+        return ts, [np.array([np.nan if fn(j, t) is None else fn(j, t) for t in ts]) for j in range(len(boxes))]
+    return speaker_fn
+
+
+def _on(tr, t, cx):
+    x = val(tr["keyframes"], t)
+    return x <= cx - 80 and cx + 80 <= x + CW
+
+
+def test_fill_asd_beats_the_mouth_cue():
+    """«Виагра»: the listener (right) smiles and nods = big mouth motion; the talker (left, profile, sunglasses)
+    shows none. The speaker model says left talks → the window stays on the left person all shot long."""
+    f = lambda t: [face(400, 160, mouth=0.0), face(1500, 160, mouth=4.0)]                  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0))
+    assert all(_on(tr, t, 400) for t in (0.5, 3.0, 6.0, 9.5))
+    assert tr["shots"][0]["speaker_cue"] == "asd" and not tr["shots"][0].get("speaker_switch")
+
+
+def test_fill_asd_quiet_looking_partner_still_counts():
+    """A partner that real_partner() calls «not alive» (no mouth motion, no movement) is still a candidate
+    when the model is there: when it talks, it gets the window."""
+    f = lambda t: [face(400, 160, mouth=2.0), face(1500, 160, mouth=0.0)]                  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: (2.5 if t < 5 else -2.0) if j == 0 else
+                                            (-2.0 if t < 5 else 2.5)))
+    assert _on(tr, 2.0, 400) and _on(tr, 8.0, 1500)
+    assert len(tr["shots"][0]["speaker_switch"]) == 1 and 4.5 <= tr["shots"][0]["speaker_switch"][0] <= 5.5
+
+
+def test_fill_asd_doubt_holds_the_current_speaker():
+    """Left talks 0–4 s, then nobody clearly talks (pause / music / off-screen voice): hold left, no jump."""
+    tr = _fill(an(faces=lambda t: [face(400, 160), face(1500, 160)]),
+               speaker_fn=_asd(lambda j, t: (3.0 if t < 4 else 0.2) if j == 0 else (-1.0 if t < 4 else 0.4)))
+    assert all(_on(tr, t, 400) for t in (1.0, 5.0, 9.5))
+    assert not tr["shots"][0].get("speaker_switch")
+
+
+def test_fill_asd_short_reply_does_not_steal_the_window():
+    """The listener's 0.4 s «да» and a 1.2 s remark inside the guest's answer: no switch (hysteresis + 2.5 s runs)."""
+    def sc(j, t):
+        lis = 2.0 <= t < 2.4 or 6.0 <= t < 7.2
+        return (0.0 if lis else 3.0) if j == 0 else (3.0 if lis else -2.0)
+    tr = _fill(an(faces=lambda t: [face(400, 160), face(1500, 160)]), speaker_fn=_asd(sc))
+    assert all(_on(tr, t, 400) for t in (2.2, 6.5, 9.0))
+
+
+def test_fill_asd_unavailable_falls_back_to_mouth():
+    f = lambda t: [face(400, 160, mouth=3.0 if t < 5 else 0.1), face(1500, 160, mouth=0.1 if t < 5 else 3.0)]  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=lambda boxes, a, b: None)
+    assert _on(tr, 2.0, 400) and _on(tr, 8.0, 1500) and tr["shots"][0]["speaker_cue"] == "mouth"
+
+
+def test_fill_asd_three_people_follow_the_talker():
+    """A group of 3 that does not fit one window: the window goes to whoever talks (not just the largest)."""
+    f = lambda t: [face(300, 170), face(960, 160), face(1650, 160)]                          # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == (0 if t < 5 else 2) else -2.0))
+    assert _on(tr, 2.0, 300) and _on(tr, 8.0, 1650) and not tr.get("split")
+
+
+def test_fill_big_face_keeps_both_ears_when_it_fits():
+    """Close-up, face 440 px in a 607 px window: the head (face + ears) is inside, ears get equal room."""
+    tr = _fill(an(faces=lambda t: [face(900 + (6 if int(t * 10) % 2 else -6), 440)]))
+    w, x0 = 440, 900 - 220
+    for t in (1.0, 5.0, 9.0):
+        x = val(tr["keyframes"], t)
+        assert x <= x0 - crop_v5.EAR_FRAC * w + 2 and x0 + w + crop_v5.EAR_FRAC * w - 2 <= x + CW
+    assert crop_v5.path_travel(tr["keyframes"]) <= 40          # detector jitter does not move the window
+
+
+def test_fill_turned_head_is_centred_on_the_head_not_the_face_box():
+    """3/4 view (nose to the right, yaw 0.14): the back of the head is on the left; a head wider than the window
+    loses the same on both sides, and the face box itself is always whole."""
+    w = 465
+    b = [468, 124, w, 635, 0.93, 1.0, 0.14]
+    tr = _fill(an(faces=lambda t: [list(b)]))
+    x = val(tr["keyframes"], 5.0)
+    hx0, hx1 = crop_v5.head_extent(b)
+    assert x <= b[0] and b[0] + w <= x + CW                                    # face whole
+    assert abs((x + CW / 2) - (hx0 + hx1) / 2) <= crop_v5.HEAD_SLACK * w + 2    # centred on the head
+    assert x < 468 + w / 2 - CW / 2 - 10                                       # moved towards the back of the head
+
+
+def test_active_speaker_model_loads_and_scores():
+    torch = pytest.importorskip("torch")
+    from scripts.shared.crop import active_speaker as asd
+    net, dev = asd.load()
+    assert net is not None, asd.status()
+    a = torch.zeros(1, 100, 13)
+    v = torch.full((1, 25, 112, 112), 110.0)
+    with torch.no_grad():
+        assert net(a, v).shape == (25,)
+    m = asd.mfcc((torch.randn(16000) * 1000).numpy())
+    assert m.shape == (99, 13)

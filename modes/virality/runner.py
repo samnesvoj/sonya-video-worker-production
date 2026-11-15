@@ -273,13 +273,23 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             track = fit_track(W, H, dur, "blur" if crop.get("layout") == "blur" else "black")
         elif per_clip:
             clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
+            fill = crop.get("layout") == FILL_LAYOUT
+            speaker_fn = None
+            if fill and clip_an is not None:      # who talks: audio-visual speaker model on this clip (optional)
+                from scripts.shared.crop import active_speaker
+
+                def speaker_fn(boxes, a, b, _s=start):
+                    return active_speaker.score_tracks(input_video_path, _s, a, b, boxes)
             track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
-                or crop_track_v2(clip_an, dur, width=W, height=H, fill=crop.get("layout") == FILL_LAYOUT)
+                or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn)
+            if speaker_fn is not None:
+                seg["crop_speaker_model"] = active_speaker.status()
             if clip_an is None:
                 track["fallback_reason"] = err.split(":", 1)[0] if err else "analysis_failed"
                 seg["crop_detector_error"] = err
             seg.update({"crop_cuts": track.get("cuts", []),
-                        "crop_shots": [{k: sh.get(k) for k in ("start", "end", "target", "faces", "speaker_switch")}
+                        "crop_shots": [{k: sh.get(k) for k in ("start", "end", "target", "faces", "speaker_switch",
+                                                                   "speaker_cue")}
                                        for sh in track.get("shots", [])]})
             zones = text_zones(clip_an, track)
             seg["crop_text_zones"] = zones
