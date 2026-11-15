@@ -13,6 +13,7 @@ from tools.fast_start_test import SITE_VIRALITY_PARAMS
 @pytest.fixture(autouse=True)
 def _env(monkeypatch):
     monkeypatch.delenv("SONYA_CUT_PROFILE", raising=False)
+    monkeypatch.delenv("SONYA_CUT_CROP_MODE", raising=False)
     monkeypatch.setenv("SONYA_RENDER_ARGS", '["-c:v", "libx264"]')     # no encoder probe in unit tests
 
 
@@ -28,7 +29,7 @@ def test_site_job_gets_the_desktop_settings(video, tmp_path):
                            ass_supported=True, editor=False)
     assert out["selection"] == "story" and out["story"] == {"strategy": "qa"}
     crop = out["crop"]
-    assert crop["mode"] == "tracked" and crop["analysis"] == "per_clip" and crop["layout"] == "smart"
+    assert crop["mode"] == "tracked" and crop["analysis"] == "per_clip" and crop["layout"] == "fill_9x16"   # owner 2026-11-15: B
     assert crop["subtitles"] == {"mode": "burn", "burn_supported": True, "style": "highlight", "hook": False,
                                  "font": "dela"}
     assert len(crop["source_sha256"]) == 64 and crop["clip_cache_dir"].startswith(str(tmp_path / "w"))

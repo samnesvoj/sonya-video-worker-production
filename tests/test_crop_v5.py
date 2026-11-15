@@ -195,3 +195,221 @@ def test_weak_editor_picks_are_dropped_but_five_are_kept(monkeypatch):
     monkeypatch.setenv("SONYA_CUT_MIN_CLIPS", "3")
     segs3, _ = select_story_clips(raw, 8, StoryConfig(min_duration=10, editor=True), chat=chat)
     assert len(segs3) == 3
+
+
+# ── fill_9x16 (owner 2026-11-15: «всегда 9:16 вертикально, как было, только без ошибок») ───────────────────
+
+def _fill(a, d=10.0, **kw):
+    return crop_track_v2(a, d, width=a["meta"]["width"], height=a["meta"]["height"], fill=True, **kw)
+
+
+@pytest.mark.parametrize("clip", ["clip4", "clip1"])
+def test_fill_real_clips_one_full_window(clip):
+    """Her clips: fill mode never makes a close-up square or a split."""
+    a = real(clip)
+    tr = _fill(a, a["meta"]["duration"])
+    assert tr["crop_version"] == crop_v5.CROP_VERSION_FILL
+    assert not tr.get("split") and not tr.get("closeup")
+    assert {lay for lay, _, _ in tr["layouts"]} <= {"single"}
+
+
+def test_fill_big_face_is_not_closeup():
+    tr = _fill(an(faces=lambda t: [face(900, 420)]))
+    assert not tr.get("closeup") and tr["crop_w"] == CW
+
+
+@pytest.mark.parametrize("fps", [10.0, 12.0])   # 12 fps: run edges off the 1 ms grid (the window panned 4 s)
+def test_fill_two_people_apart_follow_the_talker_with_a_jump(fps):
+    """Interviewer left talks 0–5 s, guest right talks 5–10 s, too far apart for one window: no split; the
+    window is on the left person, then JUMPS (same time, two x) to the right one; each face whole; no pan."""
+    def f(t):
+        return [face(400, 160, mouth=3.0 if t < 5 else 0.1), face(1500, 160, mouth=0.1 if t < 5 else 3.0)]
+    tr = _fill(an(faces=f, fps=fps))
+    assert not tr.get("split") and not tr.get("closeup")
+    x1, x2 = val(tr["keyframes"], 2.0), val(tr["keyframes"], 8.0)
+    assert x1 <= 400 - 80 and 400 + 80 <= x1 + CW
+    assert x2 <= 1500 - 80 and 1500 + 80 <= x2 + CW
+    k = tr["keyframes"]
+    jumps = [(a, b) for a, b in zip(k, k[1:]) if abs(a[0] - b[0]) < 1e-6 and a[1] != b[1]]
+    assert len(jumps) == 1 and 4.0 <= jumps[0][0][0] <= 6.0
+    assert all(abs(b[1] - a[1]) <= 8 for a, b in zip(k, k[1:]) if b[0] - a[0] > 1e-6)   # no pan
+    assert tr["shots"][0]["target"] == "speaker"
+
+
+def test_fill_speaker_ping_pong_is_calm():
+    """Mouth noise flipping every 0.5 s must not make the window ping-pong: no speaker run < 2.5 s."""
+    def f(t):
+        odd = int(t * 2) % 2
+        return [face(400, 160, mouth=2.0 if odd else 1.0), face(1500, 160, mouth=1.0 if odd else 2.0)]
+    tr = _fill(an(faces=f))
+    edges = [0.0] + (tr["shots"][0].get("speaker_switch") or []) + [10.0]
+    assert all(b - a >= crop_v5.FILL_SPEAKER_MIN_SEC - 1e-6 for a, b in zip(edges, edges[1:]))
+
+
+def test_fill_pair_that_fits_is_framed_together():
+    tr = _fill(an(faces=lambda t: [face(800, 150), face(1150, 150)]))
+    assert tr["shots"][0]["target"] == "pair" and not tr.get("split")
+
+
+def test_fill_off_in_the_crop_function_is_v5():
+    tr = crop_track_v2(an(faces=lambda t: [face(900, 420)]), 10.0, width=W, height=H)
+    assert tr["crop_version"] == "crop-shots-v5" and tr.get("closeup")
+
+
+def test_fill_is_the_default_layout(tmp_path, monkeypatch):
+    """Owner 2026-11-15 «Имран одобрил вариант B»: fill_9x16 by default; crop_mode=smart / env bring v5 back."""
+    from scripts.shared import cut_profile as cp
+    monkeypatch.delenv("SONYA_CUT_CROP_MODE", raising=False)
+    v = tmp_path / "v.mp4"
+    v.write_bytes(b"x")
+    prof = lambda prm: cp.apply_profile("virality", prm, str(v), str(tmp_path), ass_supported=True,  # noqa: E731
+                                        editor=False)["crop"]["layout"]
+    assert prof({}) == "fill_9x16"
+    assert prof({"crop_mode": "fill_9x16"}) == "fill_9x16"
+    assert prof({"crop_mode": "smart"}) == "smart"
+    assert prof({"crop_mode": "bogus"}) == "fill_9x16"
+    monkeypatch.setenv("SONYA_CUT_CROP_MODE", "smart")
+    assert prof({}) == "smart"
+    assert prof({"crop_mode": "fill_9x16"}) == "fill_9x16"
+
+
+# ── fill_9x16 v2: audio-visual speaker model, hold on doubt, ears ─────────────────────────────────────────
+
+def _asd(fn, fps=25.0):
+    """speaker_fn stub: fn(person_index, t) → score (None = face not seen)."""
+    import numpy as np
+
+    def speaker_fn(boxes, a, b):
+        ts = np.arange(a, b, 1.0 / fps)
+        return ts, [np.array([np.nan if fn(j, t) is None else fn(j, t) for t in ts]) for j in range(len(boxes))]
+    return speaker_fn
+
+
+def _on(tr, t, cx):
+    x = val(tr["keyframes"], t)
+    return x <= cx - 80 and cx + 80 <= x + CW
+
+
+def test_fill_asd_beats_the_mouth_cue():
+    """«Виагра»: the listener (right) smiles and nods = big mouth motion; the talker (left, profile, sunglasses)
+    shows none. The speaker model says left talks → the window stays on the left person all shot long."""
+    f = lambda t: [face(400, 160, mouth=0.0), face(1500, 160, mouth=4.0)]                  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0))
+    assert all(_on(tr, t, 400) for t in (0.5, 3.0, 6.0, 9.5))
+    assert tr["shots"][0]["speaker_cue"] == "asd" and not tr["shots"][0].get("speaker_switch")
+
+
+def test_fill_asd_quiet_looking_partner_still_counts():
+    """A partner that real_partner() calls «not alive» (no mouth motion, no movement) is still a candidate
+    when the model is there: when it talks, it gets the window."""
+    f = lambda t: [face(400, 160, mouth=2.0), face(1500, 160, mouth=0.0)]                  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: (2.5 if t < 5 else -2.0) if j == 0 else
+                                            (-2.0 if t < 5 else 2.5)))
+    assert _on(tr, 2.0, 400) and _on(tr, 8.0, 1500)
+    assert len(tr["shots"][0]["speaker_switch"]) == 1 and 4.5 <= tr["shots"][0]["speaker_switch"][0] <= 5.5
+
+
+def test_fill_asd_doubt_holds_the_current_speaker():
+    """Left talks 0–4 s, then nobody clearly talks (pause / music / off-screen voice): hold left, no jump."""
+    tr = _fill(an(faces=lambda t: [face(400, 160), face(1500, 160)]),
+               speaker_fn=_asd(lambda j, t: (3.0 if t < 4 else 0.2) if j == 0 else (-1.0 if t < 4 else 0.4)))
+    assert all(_on(tr, t, 400) for t in (1.0, 5.0, 9.5))
+    assert not tr["shots"][0].get("speaker_switch")
+
+
+def test_fill_asd_short_reply_does_not_steal_the_window():
+    """The listener's 0.4 s «да» and a 1.2 s remark inside the guest's answer: no switch (hysteresis + 2.5 s runs)."""
+    def sc(j, t):
+        lis = 2.0 <= t < 2.4 or 6.0 <= t < 7.2
+        return (0.0 if lis else 3.0) if j == 0 else (3.0 if lis else -2.0)
+    tr = _fill(an(faces=lambda t: [face(400, 160), face(1500, 160)]), speaker_fn=_asd(sc))
+    assert all(_on(tr, t, 400) for t in (2.2, 6.5, 9.0))
+
+
+def test_fill_asd_unavailable_falls_back_to_mouth():
+    f = lambda t: [face(400, 160, mouth=3.0 if t < 5 else 0.1), face(1500, 160, mouth=0.1 if t < 5 else 3.0)]  # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=lambda boxes, a, b: None)
+    assert _on(tr, 2.0, 400) and _on(tr, 8.0, 1500) and tr["shots"][0]["speaker_cue"] == "mouth"
+
+
+def test_fill_asd_three_people_follow_the_talker():
+    """A group of 3 that does not fit one window: the window goes to whoever talks (not just the largest)."""
+    f = lambda t: [face(300, 170), face(960, 160), face(1650, 160)]                          # noqa: E731
+    tr = _fill(an(faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == (0 if t < 5 else 2) else -2.0))
+    assert _on(tr, 2.0, 300) and _on(tr, 8.0, 1650) and not tr.get("split")
+
+
+def test_fill_big_face_keeps_both_ears_when_it_fits():
+    """Close-up, face 440 px in a 607 px window: the head (face + ears) is inside, ears get equal room."""
+    tr = _fill(an(faces=lambda t: [face(900 + (6 if int(t * 10) % 2 else -6), 440)]))
+    w, x0 = 440, 900 - 220
+    for t in (1.0, 5.0, 9.0):
+        x = val(tr["keyframes"], t)
+        assert x <= x0 - crop_v5.EAR_FRAC * w + 2 and x0 + w + crop_v5.EAR_FRAC * w - 2 <= x + CW
+    assert crop_v5.path_travel(tr["keyframes"]) <= 40          # detector jitter does not move the window
+
+
+def test_fill_turned_head_is_centred_on_the_head_not_the_face_box():
+    """3/4 view (nose to the right, yaw 0.14): the back of the head is on the left; a head wider than the window
+    loses the same on both sides, and the face box itself is always whole."""
+    w = 465
+    b = [468, 124, w, 635, 0.93, 1.0, 0.14]
+    tr = _fill(an(faces=lambda t: [list(b)]))
+    x = val(tr["keyframes"], 5.0)
+    hx0, hx1 = crop_v5.head_extent(b)
+    assert x <= b[0] and b[0] + w <= x + CW                                    # face whole
+    assert abs((x + CW / 2) - (hx0 + hx1) / 2) <= crop_v5.HEAD_SLACK * w + 2    # centred on the head
+    assert x < 468 + w / 2 - CW / 2 - 10                                       # moved towards the back of the head
+
+
+def test_active_speaker_model_loads_and_scores():
+    torch = pytest.importorskip("torch")
+    from scripts.shared.crop import active_speaker as asd
+    net, dev = asd.load()
+    assert net is not None, asd.status()
+    a = torch.zeros(1, 100, 13)
+    v = torch.full((1, 25, 112, 112), 110.0)
+    with torch.no_grad():
+        assert net(a, v).shape == (25,)
+    m = asd.mfcc((torch.randn(16000) * 1000).numpy())
+    assert m.shape == (99, 13)
+
+
+def test_fill_tiny_faces_hold_the_person_from_before_the_cut():
+    """VSRAP wide two-shot (faces 60 px < ASD_MIN_FACE): the speaker model is not trusted; the window holds whoever was on screen
+    before the cut (face identity), for the whole shot — even if the model «sees» the other one talk."""
+    def f(t):
+        return [face(1300, 360)] if t < 4 else [face(400, 64), face(1500, 62)]
+    seen = {}
+
+    def identity_fn(ref, cands):
+        seen["n"] = len(cands)
+        return [0.1, 0.7]          # the close-up person is the right one
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0),
+               identity_fn=identity_fn)
+    assert seen["n"] == 2
+    sh = tr["shots"][1]
+    assert sh["speaker_cue"] == "hold+face" and not sh.get("speaker_switch")
+    assert all(_on(tr, t, 1500) for t in (5.0, 7.0, 9.5))
+
+
+def test_fill_tiny_faces_unknown_identity_uses_the_model():
+    f = lambda t: [face(1300, 360)] if t < 4 else [face(400, 64), face(1500, 62)]          # noqa: E731
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 3.0 if j == 0 else -2.0),
+               identity_fn=lambda ref, cands: [0.3, 0.32])
+    assert tr["shots"][1]["speaker_cue"] == "asd" and _on(tr, 7.0, 400)
+
+
+def test_fill_unsure_start_holds_the_same_person_across_the_cut():
+    """Big enough faces, but nobody clearly talks in the first 2 s after the cut: start with the person from
+    before the cut (identity), not with whoever happens to score higher."""
+    f = lambda t: [face(1300, 300)] if t < 4 else [face(400, 160), face(1500, 160)]        # noqa: E731
+    tr = _fill(an(cuts=[4.0], faces=f), speaker_fn=_asd(lambda j, t: 0.2 if j == 0 else 0.0),
+               identity_fn=lambda ref, cands: [0.05, 0.8])
+    assert tr["shots"][1]["speaker_cue"] == "asd+face" and _on(tr, 7.0, 1500)
+
+
+def test_face_id_model_pinned():
+    pytest.importorskip("cv2")
+    from scripts.shared.crop import face_id
+    assert face_id.available()

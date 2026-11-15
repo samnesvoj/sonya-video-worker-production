@@ -434,13 +434,16 @@ def game_track(analysis: Optional[Dict[str, Any]], duration: float, *, width: in
 
 
 def crop_track_v2(analysis: Optional[Dict[str, Any]], duration: float, *, width: int, height: int,
-                  **kw: Any) -> Dict[str, Any]:
+                  fill: bool = False, speaker_fn: Any = None, identity_fn: Any = None, **kw: Any) -> Dict[str, Any]:
     """Shot-aware crop for one clip: crop-shots-v5 (owner 2026-11-13: faces always whole, no false split,
-    no layout jumps, wide close-ups). SONYA_CROP_VERSION=v3 brings back the previous algorithm."""
-    if os.environ.get("SONYA_CROP_VERSION", "").lower() == "v3":
+    no layout jumps, wide close-ups). SONYA_CROP_VERSION=v3 brings back the previous algorithm.
+    fill=True (crop layout "fill_9x16"): always one full 9:16 window that follows the speaker (crop_v5);
+    speaker_fn = the audio-visual speaker model bound to this clip (active_speaker.score_tracks)."""
+    if os.environ.get("SONYA_CROP_VERSION", "").lower() == "v3" and not fill:
         return crop_track_v3(analysis, duration, width=width, height=height, **kw)
     from .crop_v5 import caption_boxes, crop_track_v5
-    track = crop_track_v5(analysis, duration, width=width, height=height)
+    track = crop_track_v5(analysis, duration, width=width, height=height, fill=fill, speaker_fn=speaker_fn,
+                          identity_fn=identity_fn)
     cap = caption_boxes(analysis, duration)
     if cap:
         track["caption_blur"] = cap
@@ -699,15 +702,24 @@ def text_zones(analysis: Optional[Dict[str, Any]], track: Dict[str, Any], *, out
 
 
 def x_expression(keyframes: List[List[float]]) -> str:
-    """Piecewise-linear ffmpeg expression of t for the crop x position."""
-    expr = str(int(keyframes[-1][1]))
-    for (t0, x0), (t1, x1) in reversed(list(zip(keyframes, keyframes[1:]))):
+    """Piecewise-linear ffmpeg expression of t for the crop x position. A balanced tree of if(lt(t,…)) — a linear
+    chain nests once per keyframe and ffmpeg's expression parser refuses ~100+ levels («Failed to configure input
+    pad on Parsed_crop_0»: a 77 s fill_9x16 clip following a moving close-up had 120+ keyframes)."""
+    segs: List[Tuple[float, str]] = []
+    for (t0, x0), (t1, x1) in zip(keyframes, keyframes[1:]):
         if t1 <= t0 or x0 == x1:
             seg = str(int(x0))
         else:
             seg = f"{int(x0)}+({int(x1) - int(x0)})*(t-{t0})/({t1 - t0:.3f})"
-        expr = f"if(lt(t,{t1}),{seg},{expr})"
-    return expr
+        segs.append((t1, seg))
+    segs.append((float("inf"), str(int(keyframes[-1][1]))))
+
+    def tree(i: int, j: int) -> str:          # segments i..j inclusive; the first whose end > t wins
+        if i == j:
+            return segs[i][1]
+        m = (i + j) // 2
+        return f"if(lt(t,{segs[m][0]}),{tree(i, m)},{tree(m + 1, j)})"
+    return tree(0, len(segs) - 1)
 
 
 def _env_encoder_args() -> Optional[List[str]]:

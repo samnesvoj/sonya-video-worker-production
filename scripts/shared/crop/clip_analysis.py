@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 import cv2
 import numpy as np
 
-CLIP_ANALYSIS_VERSION = "clip-yunet-cuts-text-v5"   # v5: + the source's own white captions ("captions")
+CLIP_ANALYSIS_VERSION = "clip-yunet-cuts-text-v6"   # v5: + the source's own white captions; v6: + yaw per face
 MODEL_PATH = Path(__file__).resolve().parent / "models" / "face_detection_yunet_2023mar.onnx"
 MODEL_SHA256 = "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
 DETECT_WIDTH = 640          # faces are detected on frames downscaled to this width
@@ -172,7 +172,7 @@ def _frames(video: str, start: float, duration: float, W: int, H: int, fps: floa
 
 def analyze_clip(video: str, start: float, duration: float, *, face_fps: float = 10.0,
                  check: Optional[Callable[[], None]] = None) -> Dict[str, Any]:
-    """{"meta", "cuts": [t], "samples": [{"t", "faces": [[x,y,w,h,score], …]}]}; t relative to `start`."""
+    """{"meta", "cuts": [t], "samples": [{"t", "faces": [[x,y,w,h,score,mouth,yaw], …]}]}; t relative to `start`."""
     st = model_ok()
     if not st["ok"]:
         raise RuntimeError(st["reason"])
@@ -218,8 +218,10 @@ def analyze_clip(video: str, start: float, duration: float, *, face_fps: float =
             boxes = []
             for f in (faces if faces is not None else []):
                 x, y, w, hh, score = float(f[0]), float(f[1]), float(f[2]), float(f[3]), float(f[14])
+                # yaw: nose offset from the eye midpoint / face width (+ = nose to the right) → where the head is
+                yaw = (float(f[8]) - (float(f[4]) + float(f[6])) / 2.0) / max(w, 1.0)
                 boxes.append([int(x * back), int(y * back), int(w * back), int(hh * back), round(score, 3),
-                              _mouth_motion(gray, prev_gray, f, 1.0 / scale)])
+                              _mouth_motion(gray, prev_gray, f, 1.0 / scale), round(yaw, 3)])
             prev_gray = gray
             boxes.sort(key=lambda b: (-b[2] * b[3], b[0], b[1]))
             samples.append({"t": round(t, 3), "faces": boxes})

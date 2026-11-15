@@ -86,6 +86,19 @@ def _select_and_compose(
     words = apply_glossary(words, params.get("glossary"))
     enrichment["word_timestamps"] = words
 
+    # opt-in (A/B tests, owner 2026-11-15): re-render EXACTLY the moments of an earlier job — its final render
+    # bounds, hook and keywords (selected_segments.json) — no new selection, no new boundaries
+    fixed = params.get("fixed_segments")
+    if fixed:
+        selected = []
+        for s in fixed[:max_clips]:
+            st, en = float(s["start"]), float(s["end"])
+            selected.append({"start": round(st, 3), "duration": round(en - st, 3), "end": round(en, 3),
+                             "boundary_status": "fixed", "source": "fixed_segments",
+                             **{k: s[k] for k in ("hook", "keywords", "editor_score", "selection_reason") if k in s}})
+        return _compose(input_video_path, enrichment, selected, output_dir, params), \
+            {"selection": "fixed_segments", "count": len(selected)}
+
     # Desktop: whole stories / question + answer, 20–90 s (cut-local-rank-v3)
     from scripts.shared.cut_selection import StoryConfig, select_story_clips
     story = dict(params.get("story") or {})
@@ -236,6 +249,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     from scripts.shared.mode_output import write_selected_segments
 
     from scripts.shared.subtitles import subtitles_for_clip
+    from scripts.shared.cut_profile import FILL_LAYOUT
 
     from scripts.shared import split_filler
     from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
@@ -259,13 +273,28 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             track = fit_track(W, H, dur, "blur" if crop.get("layout") == "blur" else "black")
         elif per_clip:
             clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
+            fill = crop.get("layout") == FILL_LAYOUT
+            speaker_fn = identity_fn = None
+            if fill and clip_an is not None:      # who talks: audio-visual speaker model on this clip (optional)
+                from scripts.shared.crop import active_speaker
+
+                def speaker_fn(boxes, a, b, _s=start):
+                    return active_speaker.score_tracks(input_video_path, _s, a, b, boxes)
+
+                def identity_fn(ref, cands, _s=start):
+                    from scripts.shared.crop import face_id
+                    return face_id.similarities(input_video_path, _s, ref, cands)
             track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
-                or crop_track_v2(clip_an, dur, width=W, height=H)
+                or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn,
+                                 identity_fn=identity_fn)
+            if speaker_fn is not None:
+                seg["crop_speaker_model"] = active_speaker.status()
             if clip_an is None:
                 track["fallback_reason"] = err.split(":", 1)[0] if err else "analysis_failed"
                 seg["crop_detector_error"] = err
             seg.update({"crop_cuts": track.get("cuts", []),
-                        "crop_shots": [{k: sh.get(k) for k in ("start", "end", "target", "faces", "speaker_switch")}
+                        "crop_shots": [{k: sh.get(k) for k in ("start", "end", "target", "faces", "speaker_switch",
+                                                                   "speaker_cue")}
                                        for sh in track.get("shots", [])]})
             zones = text_zones(clip_an, track)
             seg["crop_text_zones"] = zones
