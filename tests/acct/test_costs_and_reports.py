@@ -53,15 +53,31 @@ def test_running_instance_open_interval_clipped_to_day():
 def test_daily_report_text_and_amounts():
     led, st = Ledger(), fixture_store()
     usage.compute_day(led, st, DAY, Jobs({DAY: 4}), now=msk(2026, 11, 7, 3))
-    rep = reports.build_daily(led, DAY, FixedRates("80").get(DAY))
-    t = rep["text"]
-    assert t.startswith("SONYA — Vast.ai, расходы за 06.11.2026")
-    assert "GPU: $0.30 / 24.00 ₽" in t and "Диски: $0.10 / 8.00 ₽" in t and "Прочие расходы: $0.00 / 0.00 ₽" in t
-    assert "ИТОГО: $0.40 / 32.00 ₽" in t and "Обработано видео: 4" in t and "GPU работал: 1.50 ч" in t
-    assert "Стоимость одного видео: $0.10 / 8.00 ₽" in t
-    assert "Подтверждено Vast: данных пока нет" in t and "Оценка трафика (НЕ входит в ИТОГО)" in t
-    assert "Курс ЦБ РФ на 06.11.2026: 80.0000" in t
-    assert Decimal(rep["payload"]["total_usd"]) == Decimal("0.40")
+    rep = reports.build_daily(led, DAY, FixedRates("80").get(DAY), now=msk(2026, 11, 7, 0, 5))
+    t = plain(rep["text"])
+    assert t.startswith("SONYA · Vast.ai — расходы за 06.11.2026")
+    lines = t.splitlines()
+    assert row(lines, "GPU") == ["0.30", "24.00"] and row(lines, "Диски") == ["0.10", "8.00"] and row(lines, "Прочее") == ["0.00", "0.00"]
+    assert row(lines, "Расход за сутки") == ["0.40", "32.00"] and row(lines, "Корректировки") == ["0.00", "0.00"]
+    assert row(lines, "ИТОГО") == ["0.40", "32.00"]
+    assert row(lines, "Обработано видео") == ["4"] and row(lines, "GPU-время, ч") == ["1.50"]
+    assert row(lines, "Себестоимость, USD") == ["0.10"] and row(lines, "Себестоимость, RUB") == ["8.00"]
+    assert "Подтверждённых списаний Vast пока нет" in t and "Оценка трафика за 06.11 в ИТОГО не входит" in t
+    assert "Курс ЦБ РФ на 06.11.2026: 80.0000 ₽/$" in t and "Данные на 07.11.2026 00:05 МСК" in t
+    assert Decimal(rep["payload"]["total_usd"]) == Decimal("0.40") and rep["payload"]["fmt"] == "html"
+
+
+def plain(t):
+    from accounting.tgformat import plain as p
+    return p(t)
+
+
+def row(lines, label):
+    """Numeric cells of the first table line that starts with `label` (labels are left, numbers right-aligned)."""
+    for ln in lines:
+        if ln.startswith(label + " ") or ln == label:
+            return ln[len(label):].split()
+    raise AssertionError(f"no row {label!r}")
 
 
 def test_estimates_never_enter_the_total():
@@ -74,7 +90,8 @@ def test_estimates_never_enter_the_total():
 def test_zero_videos_has_no_division_by_zero():
     led, st = Ledger(), fixture_store()
     usage.compute_day(led, st, DAY, Jobs(), now=msk(2026, 11, 7, 3))
-    assert "— (видео не обработано)" in reports.build_daily(led, DAY, FixedRates().get(DAY))["text"]
+    t = reports.build_daily(led, DAY, FixedRates().get(DAY))["text"]
+    assert "Видео не обработано — себестоимость не считается." in t and row(plain(t).splitlines(), "Себестоимость, USD") == ["—"]
 
 
 def test_money_formatting():
@@ -123,7 +140,8 @@ def test_adjustment_shows_in_next_daily_report_once():
     led.add_adjustment("adj:x", date(2026, 11, 5), "gpu", Decimal("0.12"), "reconciliation with Vast charges")
     usage.compute_day(led, st, DAY, Jobs({DAY: 4}), now=msk(2026, 11, 7, 3))
     rep = reports.build_daily(led, DAY, FixedRates("80").get(DAY))
-    assert "Корректировки прошлых периодов" in rep["text"] and Decimal(rep["payload"]["total_usd"]) == Decimal("0.52")
+    assert "<b>КОРРЕКТИРОВКИ</b>" in rep["text"] and Decimal(rep["payload"]["total_usd"]) == Decimal("0.52")
+    assert row(plain(rep["text"]).splitlines(), "Корректировки") == ["0.12", "9.60"]
     led.mark_adjustments_applied(rep["adj_keys"], DAY)
     assert Decimal(reports.build_daily(led, DAY, FixedRates("80").get(DAY))["payload"]["total_usd"]) == Decimal("0.40")
 
@@ -147,6 +165,6 @@ def test_cbr_outage_uses_last_known_and_says_so_never_invents():
     def boom(day): raise OSError("down")
     r = cbr.CbrRates(led, fetch=boom).get(DAY)
     assert r.value == Decimal("81.5") and r.fallback is True
-    assert "последний известный" in reports.build_daily(led, DAY, r)["text"]
+    assert "взят последний известный" in reports.build_daily(led, DAY, r)["text"]
     with pytest.raises(cbr.RateUnavailable):
         cbr.CbrRates(Ledger(), fetch=boom).get(DAY)

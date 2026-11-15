@@ -99,7 +99,7 @@ def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: n
             bal = Decimal(bal) if bal is not None else None
         except Exception:  # noqa: BLE001
             bal = None
-        return build_summary(fleet.store, svc.rates, now, bal)
+        return build_summary(fleet.store, svc.rates, now, bal, svc.ledger)
 
     api = AccountingApi(svc, _accounting_secret(env), summary=summary)
 

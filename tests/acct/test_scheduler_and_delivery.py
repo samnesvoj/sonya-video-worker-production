@@ -41,10 +41,10 @@ def test_month_report_after_the_first():
     svc, led = service(first=date(2026, 11, 1))
     svc.run_due(msk(2026, 12, 1, 0, 11))
     row = led.c.execute("SELECT text, payload FROM report_outbox WHERE report_key='vast-monthly:2026-11'").fetchone()
-    assert row["text"].startswith("SONYA — итог Vast.ai за ноябрь 2026")
+    assert row["text"].startswith("<b>SONYA · Vast.ai — итог за ноябрь 2026</b>")
     p = json.loads(row["payload"])
     assert Decimal(p["total_usd"]) == Decimal("0.40") and p["videos"] == 4 and p["saving_is_estimate"] is True and Decimal(p["saving_usd"]) > 0
-    assert "ОЦЕНКА" in row["text"] and "Источники (не смешиваются)" in row["text"]
+    assert "Оценка" in row["text"] and "<b>СВЕРКА С VAST</b>" in row["text"] and p["videos"] == 4
 
 
 def test_outbox_claim_lease_ack_and_retry():

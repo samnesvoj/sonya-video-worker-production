@@ -6,6 +6,8 @@ with ITS OWN Telegram client to its OWN notify chats, then acknowledges. The Tel
 this module never sees Vast / GitHub credentials. Python 3.9 compatible, standard library only.
 
 Delivery is at-least-once: a sent report key is persisted BEFORE the ack, so a restart or a lost ack never re-sends it.
+Formatting: SONYA sends Telegram HTML (parse_mode "HTML", built by accounting/tgformat.py on the server). If Telegram ever
+rejects the markup, the same text is re-sent once as plain text with the tags removed. No LLM anywhere.
 """
 from __future__ import annotations
 
@@ -33,6 +35,30 @@ class VastReportError(RuntimeError):
     pass
 
 
+_TAG_RE = re.compile(r"</?(b|i|u|s|code|pre)>")
+
+
+def to_plain(text: str) -> str:
+    """Telegram-HTML -> plain text (only the tags our formatter emits; entities back to characters)."""
+    import html as _html
+    return _html.unescape(_TAG_RE.sub("", text))
+
+
+def send_formatted(api: Any, chat: int, text: str, parse_mode: Optional[str] = None, reply_to: Optional[int] = None) -> Optional[int]:
+    """Send with parse_mode; on a markup rejection by Telegram ("can't parse entities") fall back to plain text once."""
+    if not parse_mode:
+        return api.send(chat, text, reply_to) if reply_to else api.send(chat, text)
+    try:
+        return api.send(chat, text, reply_to, parse_mode=parse_mode)
+    except Exception as exc:  # noqa: BLE001
+        if "parse" not in str(exc).lower() and "entit" not in str(exc).lower():
+            raise
+        return api.send(chat, to_plain(text), reply_to) if reply_to else api.send(chat, to_plain(text))
+
+
+COMMANDS = ("/vast", "/vast_day")
+
+
 def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes) -> str:
     msg = "\n".join((ts, nonce, method.upper(), path, hashlib.sha256(body).hexdigest())).encode()
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()
@@ -50,13 +76,51 @@ class VastReportPuller:
         self.timeout, self._next = timeout, 0.0
         self.log = logging.getLogger("receipt_worker.vast_reports")
 
-    def summary(self) -> str:
-        """Text for the /vast command (SONYA computes it; the bot only relays)."""
-        status, data = self._post(BASE + "summary", {})
+    def _message(self, path: str, body: Dict[str, Any]) -> Tuple[str, Optional[str]]:
+        status, data = self._post(BASE + path, body)
         text = data.get("text") if status == 200 else None
         if not isinstance(text, str) or not text:
-            raise VastReportError("summary HTTP %s" % status)
-        return text[:MAX_TEXT]
+            raise VastReportError("%s HTTP %s" % (path, status))
+        pm = data.get("parse_mode") if data.get("parse_mode") in ("HTML",) else None
+        if len(text) > MAX_TEXT:                       # SONYA keeps it short; never cut HTML in the middle of a tag
+            text, pm = to_plain(text)[:MAX_TEXT], None
+        return text, pm
+
+    def summary(self) -> str:
+        """Text for the /vast command (SONYA computes it; the bot only relays)."""
+        return self._message("summary", {})[0]
+
+    def summary_message(self) -> Tuple[str, Optional[str]]:
+        return self._message("summary", {})
+
+    def daily_message(self, day: str = "") -> Tuple[str, Optional[str]]:
+        """Detailed report for a closed MSK day ('' = yesterday); read-only on SONYA."""
+        status, data = self._post(BASE + "daily", {"day": str(day or "")[:10]})
+        if status == 404:
+            return "Отчёта за этот день нет: он ещё не сформирован или день раньше начала учёта.", None
+        if status == 400:
+            return "Не понял дату. Пример: /vast_day 14.11 (без даты — за вчера).", None
+        text = data.get("text") if status == 200 else None
+        if not isinstance(text, str) or not text:
+            raise VastReportError("daily HTTP %s" % status)
+        pm = data.get("parse_mode") if data.get("parse_mode") in ("HTML",) else None
+        if len(text) > MAX_TEXT:
+            text, pm = to_plain(text)[:MAX_TEXT], None
+        return text, pm
+
+    def command(self, chat: int, text: str, reply_to: Optional[int] = None) -> bool:
+        """/vast -> summary, /vast_day [ДД.ММ] -> detailed daily report. Returns False if `text` is not ours."""
+        parts = (text or "").strip().split()
+        cmd = parts[0].split("@")[0] if parts else ""
+        if cmd not in COMMANDS:
+            return False
+        try:
+            msg, pm = self.summary_message() if cmd == "/vast" else self.daily_message(parts[1] if len(parts) > 1 else "")
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("vast_command_error %s", type(exc).__name__)
+            msg, pm = "Не получилось получить данные Vast с сервера SONYA. Попробуй чуть позже.", None
+        send_formatted(self.api, chat, msg, pm, reply_to)
+        return True
 
     # ---------------------------------------------------------------- state
     def _load(self) -> Dict[str, Any]:
@@ -122,6 +186,7 @@ class VastReportPuller:
 
     def _deliver(self, rep: Dict[str, Any]) -> bool:
         key, text = str(rep.get("report_key", "")), str(rep.get("text", ""))
+        pm = rep.get("parse_mode") if rep.get("parse_mode") in ("HTML",) else None
         if not KEY_RE.match(key) or not text or len(text) > MAX_TEXT:
             self._post(BASE + key + "/failed", {"error": "malformed report"}) if KEY_RE.match(key) else None
             return False
@@ -136,7 +201,7 @@ class VastReportPuller:
             if chat in done:
                 continue
             try:
-                mid = self.api.send(chat, text)
+                mid = send_formatted(self.api, chat, text, pm)
                 done.add(chat)
                 first_id = first_id or mid
                 state["partial"][key] = sorted(done)
