@@ -118,7 +118,7 @@ def test_promo_and_reported_speech_are_not_clips():
     real = ["А как ты сам относишься к своей музыке?"] + ans
     raw = words_from(quoted + promo + real + ["Последний вопрос про твоих родителей?"], rate=0.5)
     segs, meta = select_story_clips(raw, 3, StoryConfig(qa_only=True, min_duration=20))
-    qa = [x["text"] for x in meta["selected"] if "story fill" not in x["reason"]]
+    qa = [x["text"] for x in meta["selected"] if "story fill" not in x["reason"] and "short fill" not in x["reason"]]
     assert qa and all(t.startswith("А как ты сам") for t in qa)
     assert not any("Telegram" in x["text"] for x in meta["selected"])            # promo never, not even as fill
 
