@@ -102,6 +102,41 @@ def test_expression_matches_keyframes():
     assert eval_expr(expr, 25.0) == tr["keyframes"][-1][1]
 
 
+def test_expression_many_keyframes_is_shallow_and_exact():
+    """A 77 s fill_9x16 clip had 120+ keyframes: the linear if-chain broke ffmpeg's parser (Vast 2026-11-15)."""
+    import random
+    rnd = random.Random(3)
+    keys, t = [[0.0, 600]], 0.0
+    for _ in range(300):
+        t = round(t + rnd.choice([0.0, 0.083, 0.25, 0.4]), 3)
+        keys.append([t, rnd.randrange(0, 1300, 2)])
+    expr = sca.x_expression(keys)
+    assert expr.count("if(") == len(keys) - 1
+    depth = mx = 0
+    for ch in expr:
+        depth += ch == "("
+        depth -= ch == ")"
+        mx = max(mx, depth)
+    assert mx <= 40
+    for q in [rnd.uniform(0, t + 1) for _ in range(500)] + [k[0] for k in keys]:
+        live = [(a, b) for a, b in zip(keys, keys[1:]) if a[0] <= q < b[0]]
+        if not live:
+            want = keys[-1][1]
+        else:
+            (t0, x0), (t1, x1) = live[0]
+            want = x0 + (x1 - x0) * (q - t0) / (t1 - t0)
+        assert abs(eval_expr(expr, q) - want) < 1.0, q
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+def test_ffmpeg_accepts_a_300_keyframe_crop(tmp_path):
+    keys = [[round(i * 0.02, 3), (i * 37) % 1300 // 2 * 2] for i in range(300)]
+    r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=1920x1080:rate=25:duration=6",
+                        "-vf", f"crop=608:1080:'{sca.x_expression(keys)}':0", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr[-300:]
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
 def test_render_tracked_outputs_1080x1920(tmp_path):
     src = tmp_path / "src.mp4"

@@ -701,15 +701,24 @@ def text_zones(analysis: Optional[Dict[str, Any]], track: Dict[str, Any], *, out
 
 
 def x_expression(keyframes: List[List[float]]) -> str:
-    """Piecewise-linear ffmpeg expression of t for the crop x position."""
-    expr = str(int(keyframes[-1][1]))
-    for (t0, x0), (t1, x1) in reversed(list(zip(keyframes, keyframes[1:]))):
+    """Piecewise-linear ffmpeg expression of t for the crop x position. A balanced tree of if(lt(t,…)) — a linear
+    chain nests once per keyframe and ffmpeg's expression parser refuses ~100+ levels («Failed to configure input
+    pad on Parsed_crop_0»: a 77 s fill_9x16 clip following a moving close-up had 120+ keyframes)."""
+    segs: List[Tuple[float, str]] = []
+    for (t0, x0), (t1, x1) in zip(keyframes, keyframes[1:]):
         if t1 <= t0 or x0 == x1:
             seg = str(int(x0))
         else:
             seg = f"{int(x0)}+({int(x1) - int(x0)})*(t-{t0})/({t1 - t0:.3f})"
-        expr = f"if(lt(t,{t1}),{seg},{expr})"
-    return expr
+        segs.append((t1, seg))
+    segs.append((float("inf"), str(int(keyframes[-1][1]))))
+
+    def tree(i: int, j: int) -> str:          # segments i..j inclusive; the first whose end > t wins
+        if i == j:
+            return segs[i][1]
+        m = (i + j) // 2
+        return f"if(lt(t,{segs[m][0]}),{tree(i, m)},{tree(m + 1, j)})"
+    return tree(0, len(segs) - 1)
 
 
 def _env_encoder_args() -> Optional[List[str]]:
