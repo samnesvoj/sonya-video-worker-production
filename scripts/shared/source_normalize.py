@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 from fractions import Fraction
 from pathlib import Path
@@ -27,6 +28,18 @@ logger = logging.getLogger(__name__)
 FRIENDLY_VCODECS = {"h264", "hevc"}
 FRIENDLY_ACODECS = {"aac", "mp3", "opus", None}
 MODES = ("virality", "beep")          # the modes ported from the Mac mini (Desktop ASR_MODES)
+LONG_SEC = int(os.environ.get("SONYA_LONG_SOURCE_SEC", "1200"))    # > 20 min: fast CPU fallback + watchdog (speedfix)
+LONG_CPU_PRESET = os.environ.get("SONYA_NORMALIZE_LONG_CPU_PRESET", "ultrafast")
+MSG_FAILED = "Не удалось подготовить видео. Попробуйте ещё раз."
+MSG_NO_SPACE = "На сервере не хватило места для такого длинного видео. Попробуйте ещё раз через несколько минут."
+MSG_TOO_SLOW = "Подготовка такого длинного видео заняла слишком много времени. Попробуйте ещё раз или выберите отрезок короче."
+
+
+class NormalizeError(RuntimeError):
+    """A re-encode that cannot finish: code + a message for the user (no hours of CPU libx264, no full disk)."""
+    def __init__(self, code: str, message: str, detail: str = ""):
+        super().__init__(f"{code}: {detail or message}")
+        self.code, self.message = code, message
 
 
 def _rate(s: Optional[str]) -> Optional[float]:
@@ -116,15 +129,31 @@ def normalize_source(path: str, work_dir: str, mode: str) -> Dict[str, Any]:
     reasons = normalize_reasons(summary)
     if not reasons:
         return {"path": path, "reasons": [], "normalized": False}
-    from scripts.shared.cut_profile import encoder_args, encoder_family
-    args = encoder_args(encoder_family(ff), bitrate=None)
+    from scripts.shared.cut_profile import encoder_args, encoder_family, run_encode
+    long_src = (summary.get("duration") or 0) > LONG_SEC
+    cpu_preset = LONG_CPU_PRESET if long_src else None
+    family = encoder_family(ff)
+    args = encoder_args(family, bitrate=None, cpu_preset=cpu_preset)
     dst = Path(work_dir) / (Path(path).stem + ".normalized.mp4")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("[normalize] %s: re-encoding (%s)", Path(path).name, ", ".join(reasons))
-    from scripts.shared.cut_profile import run_encode
-    r, used, _ = run_encode(lambda a: normalize_cmd(ff, Path(path), dst, summary, a), args, what="normalize")
-    if used == "nvenc->cpu":
-        logger.info("[normalize] NVENC busy/failed - re-encoded on CPU")
+    # disk first: the re-encode writes about as much as the source (2026-11-15: a 3.7 GB VP9 filled a 30 GB disk)
+    need = int(os.path.getsize(path) * 1.3) + (512 << 20) if os.path.exists(path) else 0
+    free = shutil.disk_usage(dst.parent).free
+    if need and free < need:
+        raise NormalizeError("NORMALIZE_NO_SPACE", MSG_NO_SPACE, f"free {free >> 20} MB < need {need >> 20} MB")
+    # watchdog for long sources only: CPU ultrafast is ~5-10x realtime; never hours on one job
+    timeout = max(600.0, 0.5 * summary["duration"]) if long_src else None
+    logger.info("[normalize] %s: re-encoding (%s)%s", Path(path).name, ", ".join(reasons),
+                f" long={summary['duration']:.0f}s cpu_preset={cpu_preset} timeout={timeout:.0f}s" if long_src else "")
+    r, used, sec = run_encode(lambda a: normalize_cmd(ff, Path(path), dst, summary, a), args, what="normalize",
+                              timeout=timeout, cpu_preset=cpu_preset)
+    logger.info("[normalize] done in %.0f s (%s) rc=%s", sec, used, r.returncode)
     if r.returncode != 0:
-        raise RuntimeError(f"NORMALIZE_FAILED: {r.stderr[-400:]}")
+        err = (r.stderr or "")[-400:]
+        dst.unlink(missing_ok=True)
+        if r.returncode == 124:
+            raise NormalizeError("NORMALIZE_TIMEOUT", MSG_TOO_SLOW, err)
+        if "No space left" in err or shutil.disk_usage(dst.parent).free < (256 << 20):
+            raise NormalizeError("NORMALIZE_NO_SPACE", MSG_NO_SPACE, err)
+        raise NormalizeError("NORMALIZE_FAILED", MSG_FAILED, err)
     return {"path": str(dst), "reasons": reasons, "normalized": True}

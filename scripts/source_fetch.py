@@ -63,6 +63,23 @@ def _duration(path: str) -> Optional[float]:
         return None
 
 
+def _check_free_space(work_dir: Path, seconds: Optional[float]) -> None:
+    """Before the download (speedfix 2026-11-15): ~0.6 MB/s of 1080p H.264, x2 for the yt-dlp merge + upload copy,
+    + 1 GB slack. A full disk otherwise breaks normalize/render half an hour later."""
+    if not seconds:
+        return
+    need = int(seconds * 1.2e6) + (1 << 30)
+    try:
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(work_dir).free
+    except OSError:
+        return
+    if free < need:
+        logger.error("[source_fetch] low disk: free %d MB < need %d MB for %.0f s", free >> 20, need >> 20, seconds)
+        raise SourceFetchError("SOURCE_NO_SPACE", "На сервере сейчас не хватает места для такого длинного видео. "
+                                                  "Попробуйте ещё раз через несколько минут.")
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     if 11 <= n % 100 <= 14:
         return many
@@ -94,6 +111,7 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
         if trim and total and start >= total:
             raise SourceFetchError("SOURCE_TRIM_RANGE", "Начало отрезка позже конца видео. Выберите отрезок заново.")
         lim = url_ingest.long_source_overrides(trim or total or cap, mode)
+        _check_free_space(work_dir, trim or total)
         path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None,
                                                trim_start=start, **lim)
     except url_ingest.DownloadLimitExceeded as exc:

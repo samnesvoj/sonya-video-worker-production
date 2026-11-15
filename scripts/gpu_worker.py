@@ -799,6 +799,11 @@ def process_job(job: dict, worker_id: str) -> None:
                     progress_callback=_progress,
                 )
         except Exception as exc:
+            from scripts.shared.source_normalize import NormalizeError
+            if isinstance(exc, NormalizeError):       # speedfix: a clear message, not hours of CPU libx264
+                logger.error("[worker] normalize_failed job_id=%s: %s", job_id, exc)
+                _fail(job_id, exc.code, exc.message, retry=False)
+                return
             logger.exception(
                 "[worker] runner_failed job_id=%s mode=%s: %s", job_id, mode, exc
             )

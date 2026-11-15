@@ -573,13 +573,17 @@ def trim_request(params: dict, cap_sec: int) -> tuple:
     return start, min(length, int(cap_sec))
 
 
+LONG_SOURCE_SEC = int(os.environ.get("SONYA_LONG_SOURCE_SEC", "1200"))   # > 20 min: 1080p H.264, fast CPU fallback
+
+
 def long_source_overrides(seconds: Optional[float], mode: Optional[str] = None) -> dict:
     """Per-job download limits for long sources (admin up to hours): bytes scale with the length
-    (~1.25 MB/s, never below MAX_UPLOAD_SIZE_MB) and > 90 min is fetched at <=1080p."""
+    (~1.25 MB/s, never below MAX_UPLOAD_SIZE_MB) and > 20 min is fetched at <=1080p H.264 (speedfix 2026-11-15:
+    YouTube has 1440p only as VP9/AV1 -> 3.7 GB for 55 min + a 16+ min re-encode; 1080p avc1 needs no normalize)."""
     if not seconds:
         return {}
     out = {"max_bytes": max(_max_bytes(mode), int(seconds * 1_250_000))}
-    if seconds > 5400:
+    if seconds > LONG_SOURCE_SEC:
         out["max_height"] = 1080
     return out
 

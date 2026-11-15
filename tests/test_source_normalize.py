@@ -42,3 +42,44 @@ def test_friendly_source_is_not_re_encoded(monkeypatch, tmp_path):
     monkeypatch.setattr(sn, "probe", lambda path, fp="ffprobe": _raw())
     monkeypatch.setattr(sn.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(AssertionError("encoded")))
     assert sn.normalize_source("x.mp4", str(tmp_path), "virality")["normalized"] is False
+
+
+def _long(monkeypatch, tmp_path, rc=0, stderr="", family="nvenc", used="nvenc"):
+    raw = _raw(vcodec="vp9")
+    raw["format"]["duration"] = "3300"
+    monkeypatch.setattr(sn, "probe", lambda path, fp="ffprobe": raw)
+    from scripts.shared import cut_profile
+    monkeypatch.setattr(cut_profile, "encoder_family", lambda ff=None: family)
+    seen = {}
+
+    def fake_run(make_cmd, args, **kw):
+        seen.update(kw, args=args)
+        return sn.subprocess.CompletedProcess([], rc, "", stderr), used, 1.0
+    monkeypatch.setattr(cut_profile, "run_encode", fake_run)
+    src = tmp_path / "s.webm"
+    src.write_bytes(b"x" * 1000)
+    return str(src), seen
+
+
+def test_long_source_cpu_is_ultrafast_with_watchdog(monkeypatch, tmp_path):
+    src, seen = _long(monkeypatch, tmp_path, family="cpu")
+    assert sn.normalize_source(src, str(tmp_path / "ing"), "virality")["normalized"] is True
+    assert seen["cpu_preset"] == "ultrafast" and seen["timeout"] == 1650
+    assert seen["args"][seen["args"].index("-preset") + 1] == "ultrafast"
+
+
+def test_long_source_timeout_and_disk_are_clear_errors(monkeypatch, tmp_path):
+    import pytest
+    src, _ = _long(monkeypatch, tmp_path, rc=124)
+    with pytest.raises(sn.NormalizeError) as e:
+        sn.normalize_source(src, str(tmp_path / "ing"), "virality")
+    assert e.value.code == "NORMALIZE_TIMEOUT" and "длинного" in e.value.message
+    src, _ = _long(monkeypatch, tmp_path, rc=1, stderr="Error: No space left on device")
+    with pytest.raises(sn.NormalizeError) as e:
+        sn.normalize_source(src, str(tmp_path / "ing"), "virality")
+    assert e.value.code == "NORMALIZE_NO_SPACE"
+    src, _ = _long(monkeypatch, tmp_path)
+    monkeypatch.setattr(sn.shutil, "disk_usage", lambda p: type("U", (), {"free": 1})())
+    with pytest.raises(sn.NormalizeError) as e:
+        sn.normalize_source(src, str(tmp_path / "ing"), "virality")
+    assert e.value.code == "NORMALIZE_NO_SPACE"

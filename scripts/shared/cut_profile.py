@@ -144,7 +144,7 @@ def _double(rate: str) -> str:
     return f"{float(num) * 2:g}{rate[len(num):]}"
 
 
-def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
+def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE, cpu_preset: Optional[str] = None) -> list:
     """sonya_desktop.media.encoders.encoder_args(family, "h264", "quality", bitrate) for nvenc / cpu."""
     if family in ("nvenc", "nvenc_basic"):
         if family == "nvenc":
@@ -161,7 +161,7 @@ def encoder_args(family: str, bitrate: Optional[str] = RENDER_BITRATE) -> list:
     elif family == "cpu":
         # libx264 ignores -b:v next to -crf (measured: 7.1 Mb/s on a 1080p60 stream clip): cap it with the VBV
         # instead, so a 60 s clip stays ≈ 45 MB like the NVENC / VideoToolbox renders (Telegram's 50 MB limit)
-        args = ["-c:v", "libx264", "-preset", CPU_PRESET, "-crf", "18"]
+        args = ["-c:v", "libx264", "-preset", cpu_preset or CPU_PRESET, "-crf", "18"]
         if bitrate:
             args += ["-maxrate", bitrate, "-bufsize", _double(bitrate)]
     else:
@@ -175,7 +175,8 @@ def encode_timeout(duration_s: float) -> float:
     return max(float(os.environ.get("SONYA_RENDER_TIMEOUT_MIN_S", "300")), 10.0 * max(0.0, duration_s))
 
 
-def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Optional[str] = None, what: str = "render"):
+def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Optional[str] = None, what: str = "render",
+               cpu_preset: Optional[str] = None):
     """Run ``make_cmd(args)``. When the NVENC encode fails or hangs (GeForce: at most 8 NVENC sessions at once;
     L40S: cuCtxCreate CUDA_ERROR_OPERATING_SYSTEM with 6 jobs), the SAME command is re-run once with the libx264
     args instead of dropping the clip. -> (CompletedProcess, "nvenc" | "cpu" | "nvenc->cpu", seconds)."""
@@ -190,7 +191,7 @@ def run_encode(make_cmd, args: list, *, timeout: Optional[float] = None, cwd: Op
 
     def cpu_args():
         bitrate = args[args.index("-b:v") + 1] if "-b:v" in args and args[args.index("-b:v") + 1] != "0" else None
-        return encoder_args("cpu", bitrate)
+        return encoder_args("cpu", bitrate, cpu_preset=cpu_preset)
 
     if not nvenc:
         r = once(args)
