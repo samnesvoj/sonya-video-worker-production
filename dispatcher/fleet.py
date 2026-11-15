@@ -269,34 +269,52 @@ class FleetManager:
 
     def _demand(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         """Cover demand with SLOTS, not servers. With every server at jobs_per_instance slots this is exactly the old rule
-        need = min(max_instances, ceil(demand / jobs_per_instance)); a power server counts with its own slots."""
+        need = min(max_instances, ceil(demand / jobs_per_instance)); a power server counts with its own slots.
+        Dedicated (cfg.dedicated, CEO 2026-11-16): each paying user / admin with work needs ONE WHOLE server
+        (jobs_per_instance slots, at most dedicated_max_instances users); a server holding such a user counts as one
+        server whatever its size (nobody else may join it); shared jobs are covered by the other servers as before."""
         demand = snap.pending + snap.active_total
         if demand <= 0:
             return
         up = self.store.all(("creating", "running", "starting", "stop_pending", "stopping"))   # waking: let a stop finish,
-        cap = sum(self.slots(i) for i in up)                                                   # then resume the same disk
+        jpi = self.cfg.jobs_per_instance                                                       # then resume the same disk
+        ded_users = ded_left = 0
+        need = demand
+        busy_ded: set = set()
+        if self.cfg.dedicated and snap.dedicated_users:
+            ded_users = min(snap.dedicated_users, self.cfg.dedicated_max_instances)
+            busy_ded = {i.label for i in up} & snap.dedicated_workers
+            ded_left = max(0, ded_users - len(busy_ded))        # users still without a server of their own
+            need = max(0, demand - snap.dedicated_jobs) + ded_users * jpi
+        cap = sum(jpi if i.label in busy_ded else self.slots(i) for i in up)
         count = sum(1 for i in up if i.role != "reserve")       # the power reserve is outside max_instances
         used: set = set()
-        if self.cfg.power_reserve and demand >= self.cfg.reserve_wake_at() and cap < demand:
+        if self.cfg.power_reserve and demand >= self.cfg.reserve_wake_at() and cap < need:
             cap += self._wake_reserve(now, actions, used)
-        if cap >= demand or count >= self.cfg.max_instances:
+        if cap >= need or count >= self.cfg.max_instances:
             return
         stopped = sorted((i for i in self.store.all(("stopped",)) if i.resume_failures < self.cfg.max_resume_failures
                           and i.release_sha == self.cfg.release_sha and i.role != "reserve"),
                          key=lambda i: (i.role != "warm", -(i.stopped_at or 0)))
-        while cap < demand and count < self.cfg.max_instances:   # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates
+        while cap < need and count < self.cfg.max_instances:   # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates
+            # a user waiting for an own server gets a default-class one first (a big power server would idle under one
+            # user): gap 0 never picks the power class; the shared jobs come after
+            gap = 0 if ded_left > 0 else need - cap
             if stopped:
                 inst = stopped.pop(0)
                 if self._resume(inst, now, actions) or not self.cfg.spares_enabled:
                     got = self.slots(inst)
                 else:                                            # spares: the warm is gone -> the next offer, now
-                    got = self._create(now, actions, exclude=used, gap=demand - cap)
+                    got = self._create(now, actions, exclude=used, gap=gap)
                     if not got:
                         break
             else:
-                got = self._create(now, actions, exclude=used, gap=demand - cap)
+                got = self._create(now, actions, exclude=used, gap=gap)
                 if not got:
                     break
+            if ded_left > 0:
+                ded_left -= 1
+                got = jpi                                        # it will carry one dedicated user only
             cap, count = cap + got, count + 1
 
     def _wake_reserve(self, now: float, actions: List[str], used: set) -> int:
