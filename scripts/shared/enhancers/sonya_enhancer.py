@@ -70,7 +70,16 @@ def enrich_video_for_mode(
     if tracked:
         logger.info("[enhancer] crop=tracked: whole-video vision skipped (per-clip analysis instead)")
 
+    # Load test 2026-11-16: educational spent 8.5 of its 16 min on YOLO + pose over EVERY frame of the whole video, and
+    # nothing reads them (the edu clip path is stage / SmartCropper; the GeminiComposer ignores the hints). Same clips
+    # without it. SONYA_EDU_WHOLE_VISION=1 runs them again.
+    edu_skip = mode == "educational" and not _flag("SONYA_EDU_WHOLE_VISION", "false")
+    if edu_skip:
+        logger.info("[enhancer] educational: whole-video YOLO / pose / webcam skipped (unused by the edu clip path)")
+
     def _vision(name: str, default: str = "true") -> bool:
+        if edu_skip and name in ("YOLO_COMMON_ENABLED", "YOLO_POSE_ENABLED", "WEBCAM_DETECTOR_ENABLED"):
+            return False
         return not tracked and _flag(name, default)
 
     def _step(name: str, progress: float, fn: Callable) -> None:

@@ -99,11 +99,28 @@ def normalize_reasons(summary: Dict[str, Any]) -> List[str]:
     return reasons
 
 
-def normalize_cmd(ffmpeg: str, src: Path, dst: Path, summary: Dict[str, Any], encoder_args: List[str]) -> List[str]:
-    """CFR + yuv420p + AAC; ffmpeg autorotate bakes rotation into pixels."""
+# Load test 2026-11-16: a 19-min 1440p VP9 YouTube source took 382 s to normalize (CPU VP9 decode + the clip preset p7 /
+# 2-pass / lookahead, on a busy server). The normalized file is an INTERMEDIATE: decode on the GPU (NVDEC; ffmpeg falls back
+# to software decode by itself when the card cannot) and a fast NVENC preset at a HIGHER quality target (cq 17 vs 19).
+# SONYA_NORMALIZE_FAST=0 = the old command (clip preset, CPU decode).
+def fast_enabled() -> bool:
+    return os.environ.get("SONYA_NORMALIZE_FAST", "1").lower() not in ("0", "false", "off", "no")
+
+
+def fast_nvenc_args() -> List[str]:
+    preset = os.environ.get("SONYA_NORMALIZE_PRESET", "p4")
+    return ["-c:v", "h264_nvenc", "-preset", preset, "-tune", "hq", "-rc", "vbr", "-cq", "17", "-b:v", "0",
+            "-spatial-aq", "1", "-bf", "3", "-pix_fmt", "yuv420p"]
+
+
+def normalize_cmd(ffmpeg: str, src: Path, dst: Path, summary: Dict[str, Any], encoder_args: List[str],
+                  hw_decode: bool = False) -> List[str]:
+    """CFR + yuv420p + AAC; ffmpeg autorotate bakes rotation into pixels. hw_decode: NVDEC (frames come back to system
+    memory, so the fps filter / autorotate work unchanged)."""
     fps = summary.get("fps") or 30.0
     fps = min(max(round(fps, 3), 1.0), 120.0)
     return [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            *(["-hwaccel", "cuda"] if hw_decode else []),
             "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?",
             "-vf", f"fps={fps}", *encoder_args,
             "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
@@ -134,6 +151,9 @@ def normalize_source(path: str, work_dir: str, mode: str) -> Dict[str, Any]:
     cpu_preset = LONG_CPU_PRESET if long_src else None
     family = encoder_family(ff)
     args = encoder_args(family, bitrate=None, cpu_preset=cpu_preset)
+    fast = fast_enabled() and family == "nvenc"
+    if fast:
+        args = fast_nvenc_args()
     dst = Path(work_dir) / (Path(path).stem + ".normalized.mp4")
     dst.parent.mkdir(parents=True, exist_ok=True)
     # disk first: the re-encode writes about as much as the source (2026-11-15: a 3.7 GB VP9 filled a 30 GB disk)
@@ -145,9 +165,9 @@ def normalize_source(path: str, work_dir: str, mode: str) -> Dict[str, Any]:
     timeout = max(600.0, 0.5 * summary["duration"]) if long_src else None
     logger.info("[normalize] %s: re-encoding (%s)%s", Path(path).name, ", ".join(reasons),
                 f" long={summary['duration']:.0f}s cpu_preset={cpu_preset} timeout={timeout:.0f}s" if long_src else "")
-    r, used, sec = run_encode(lambda a: normalize_cmd(ff, Path(path), dst, summary, a), args, what="normalize",
-                              timeout=timeout, cpu_preset=cpu_preset)
-    logger.info("[normalize] done in %.0f s (%s) rc=%s", sec, used, r.returncode)
+    r, used, sec = run_encode(lambda a: normalize_cmd(ff, Path(path), dst, summary, a, hw_decode=fast), args,
+                              what="normalize", timeout=timeout, cpu_preset=cpu_preset)
+    logger.info("[normalize] done in %.0f s (%s%s) rc=%s", sec, used, ", fast nvdec" if fast else "", r.returncode)
     if r.returncode != 0:
         err = (r.stderr or "")[-400:]
         dst.unlink(missing_ok=True)

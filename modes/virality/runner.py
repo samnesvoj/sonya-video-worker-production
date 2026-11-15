@@ -346,7 +346,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     # Two clips at a time: one analyses (CPU) while the other renders (hardware encoder).
     import os
     from concurrent.futures import ThreadPoolExecutor
-    workers = max(1, int(os.environ.get("SONYA_CLIP_WORKERS", "2")))
+    from scripts.shared.clip_parallel import clip_workers      # 2 before 2026-11-16; more on an idle server
+    workers = clip_workers(len(selected))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(lambda a: one(*a), enumerate(selected)))
     output_paths: List[str] = [r for r in results if r]
