@@ -172,10 +172,8 @@ def test_render_with_caption_blur_and_closeup(tmp_path):
                                                for s in json.loads(p.stdout)["streams"]]
 
 
-def test_weak_editor_picks_are_dropped_but_five_are_kept(monkeypatch):
-    """8 requested, the editor rates only 3 strong → 5 clips (3 strong + 2 best of the rest), not 8."""
+def _editor_case(scores):
     import json as _json
-    from scripts.shared.cut_selection import StoryConfig, select_story_clips
     from tests.test_cut_story_v3 import _Res, words_from
 
     texts = [f"Вопрос номер {i}: почему вы решили переехать в другой город? Потому что там работа и море, "
@@ -184,17 +182,53 @@ def test_weak_editor_picks_are_dropped_but_five_are_kept(monkeypatch):
 
     def chat(messages, **kw):
         items = _json.loads(messages[1]["content"].split("Фрагменты:\n", 1)[1].split("\n\nВерни", 1)[0])
-        clips = [{"id": x["id"], "score": 88 if i < 3 else 55, "self_contained": True, "qa": True, "hook": "Х",
+        clips = [{"id": x["id"], "score": scores(i), "self_contained": True, "qa": True, "hook": "Х",
                   "keywords": [], "reason": "r"} for i, x in enumerate(items)]
         return _Res(_json.dumps({"clips": clips}, ensure_ascii=False))
+    return raw, chat
 
+
+def test_min_8_clips_strong_first_then_weaker(monkeypatch):
+    """Owner 2026-11-15 «всегда минимум 8 клипов»: 8 requested, the editor rates only 3 strong → still 8 clips,
+    the 3 strong ones first, no overlaps. SONYA_CUT_MIN_CLIPS (ops) can lower the floor again."""
+    from scripts.shared.cut_selection import StoryConfig, select_story_clips
+    raw, chat = _editor_case(lambda i: 88 if i < 3 else 55)
     segs, meta = select_story_clips(raw, 8, StoryConfig(min_duration=10, editor=True), chat=chat)
     assert meta["selection_method"] == "editor"
-    assert len(segs) == 5 and sorted(s["editor_score"] for s in segs)[-3:] == [88, 88, 88]
-    assert meta["editor_dropped_weak"] == 3
+    assert len(segs) == 8 and [s["editor_score"] for s in segs][:3] == [88, 88, 88]
+    assert [s["score"] for s in segs] == sorted((s["score"] for s in segs), reverse=True)
+    iv = sorted((s["start"], s["start"] + s["duration"]) for s in segs)
+    assert all(a[1] <= b[0] for a, b in zip(iv, iv[1:]))
     monkeypatch.setenv("SONYA_CUT_MIN_CLIPS", "3")
     segs3, _ = select_story_clips(raw, 8, StoryConfig(min_duration=10, editor=True), chat=chat)
     assert len(segs3) == 3
+
+
+def test_min_8_clips_never_takes_editor_junk():
+    """A moment the editor calls junk (< 20: ad, broken thought) is never used to reach 8."""
+    from scripts.shared.cut_selection import StoryConfig, select_story_clips
+    raw, chat = _editor_case(lambda i: 90 if i < 2 else (25 if i < 4 else 5))
+    segs, meta = select_story_clips(raw, 8, StoryConfig(min_duration=10, editor=True), chat=chat)
+    assert all(s.get("editor_score", 100) >= 20 for s in segs)
+    assert [s.get("editor_score") for s in segs][:2] == [90, 90]
+    assert [s.get("editor_score") for s in segs].count(25) == 2      # weak but not junk: last resort
+
+
+def test_short_source_fills_with_15s_stories():
+    """A short source without 8 stories of 20 s+: whole 15–20 s stories fill the gaps (no overlaps), and a
+    source too short for 8 gives what it has."""
+    from scripts.shared.cut_selection import StoryConfig, select_story_clips
+    from tests.test_cut_story_v3 import words_from
+    one = ("Мой отец всю жизнь проработал на заводе и каждое утро вставал в пять часов чтобы успеть на первый "
+           "автобус до проходной а вечером он приходил домой уставший но всегда находил время чтобы почитать "
+           "нам с братом книжку перед сном.")    # 38 words ≈ 17 s: two in a row = 35 s
+    raw = words_from([one] * 5, rate=0.45, pause_between=1.0)
+    dur = raw[-1]["end"] - raw[0]["start"]
+    segs, meta = select_story_clips(raw, 8, StoryConfig(), chat=None)
+    iv = sorted((s["start"], s["start"] + s["duration"]) for s in segs)
+    assert all(a[1] <= b[0] for a, b in zip(iv, iv[1:]))
+    assert all(s["duration"] >= 15.0 - 1e-6 for s in segs)
+    assert meta.get("short_fill", 0) >= 1 and len(segs) <= int(dur // 15)
 
 
 # ── fill_9x16 (owner 2026-11-15: «всегда 9:16 вертикально, как было, только без ошибок») ───────────────────

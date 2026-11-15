@@ -40,7 +40,7 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     ap.add_argument("--image", required=True)
     ap.add_argument("--backend-url", required=True)
     ap.add_argument("--source-key", required=True)
-    ap.add_argument("--segments", required=True, type=pathlib.Path)
+    ap.add_argument("--segments", required=True, type=pathlib.Path, help='selected_segments.json, or "full" (own selection)')
     ap.add_argument("--only", default="", help="comma list of 1-based clip indexes to render (default: all)")
     ap.add_argument("--out", required=True, type=pathlib.Path)
     ap.add_argument("--max-usd", type=float, default=1.0)
@@ -52,6 +52,8 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     a = ap.parse_args()
 
     def job_params(seg_path: pathlib.Path, only: str) -> Dict[str, Any]:
+        if str(seg_path) == "full":            # the whole site path: own selection (editor), boundaries, render
+            return dict(SITE_VIRALITY_PARAMS)
         segs = json.loads(seg_path.read_text())["segments"]
         if only:
             keep = {int(x) for x in only.split(",")}
@@ -65,7 +67,7 @@ def main() -> int:  # pragma: no cover - real Vast/S3
         name, src, segp, only = (e.split("|") + [""])[:4]
         jobs_in.append((name, src, job_params(pathlib.Path(segp), only)))
     params = jobs_in[0][2]
-    print(f"release {a.release_sha[:12]} | {[len(j[2]['fixed_segments']) for j in jobs_in]} fixed moments | "
+    print(f"release {a.release_sha[:12]} | {[len(j[2].get('fixed_segments') or []) or 'full' for j in jobs_in]} fixed moments | "
           f"max ${a.max_usd} | {'APPLY' if a.apply else 'dry'}")
     if not a.apply:
         print(json.dumps(params, ensure_ascii=False)[:600])

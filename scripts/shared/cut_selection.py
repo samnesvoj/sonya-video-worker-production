@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .boundaries import Word, group_sentences, normalize_words
@@ -420,6 +420,14 @@ def story_score(c: Dict[str, Any], cfg: StoryConfig) -> Tuple[float, List[str]]:
     return round(score, 6), why
 
 
+SHORT_FILL_MIN_SEC = 15.0     # «всегда минимум 8»: shortest whole story taken when the 20 s+ ones run out
+
+
+def _free(c: Dict[str, Any], picked) -> bool:
+    """No overlap with anything already picked (no duplicates, no shared words)."""
+    return all(c["end"] <= k["start"] or c["start"] >= k["end"] for k, _, _ in picked)
+
+
 def _diverse(sc_list, limit):
     """Best local candidates without overlaps (the editor should see different moments)."""
     out = []
@@ -500,14 +508,19 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
         if verdicts:
             by_id = {c["id"]: (c, sc, why) for c, sc, why in qa_pool + fill_pool}
             picked: List[Tuple[Dict[str, Any], float, List[str]]] = []
-            # Owner 2026-11-13 «моменты некачественные … лучше меньше, но сильных»: only the editor's STRONG
-            # picks fill the request; weaker ones only up to a floor of `keep` clips (min 5 by default).
+            # Owner 2026-11-13 «лучше меньше, но сильных» → 2026-11-15 «всегда минимум 8 клипов»: the editor's STRONG
+            # picks come first; then weaker ones on a sliding scale until the request (max_clips, 8 by default) is
+            # met — best first, never overlapping. SONYA_CUT_MIN_CLIPS (ops) can set a lower floor again.
             strong = _f_env("SONYA_CUT_STRONG_SCORE", 75.0)
-            keep = min(max_clips, int(_f_env("SONYA_CUT_MIN_CLIPS", 5.0)))
+            keep = min(max_clips, int(_f_env("SONYA_CUT_MIN_CLIPS", float(max_clips))))
+            relaxed = _f_env("SONYA_CUT_RELAXED_SCORE", 35.0)    # below: the editor says «не публиковать»
+            floor = _f_env("SONYA_CUT_FLOOR_SCORE", 20.0)        # below: junk (ad, broken thought), never
             tiers = ((2.0, max_clips, lambda v: v["self_contained"] and v["score"] >= strong),
                      (1.8, max_clips, lambda v: not v["self_contained"] and v["score"] >= max(strong, 80.0)),
                      (1.5, keep, lambda v: v["self_contained"] and v["score"] >= 50),
-                     (1.2, keep, lambda v: not v["self_contained"] and v["score"] >= 60))
+                     (1.2, keep, lambda v: not v["self_contained"] and v["score"] >= 60),
+                     (1.0, keep, lambda v: v["self_contained"] and v["score"] >= relaxed),
+                     (0.8, keep, lambda v: not v["self_contained"] and v["score"] >= relaxed + 10))
             for tier, cap, ok in tiers:
                 for v in verdicts:
                     if len(picked) >= cap:
@@ -515,20 +528,52 @@ def select_story_clips(raw_words: Sequence[Dict[str, Any]], max_clips: int,
                     if not ok(v) or v["id"] in extras or (brief and not v.get("ad_fit", True)):
                         continue
                     c, sc, why = by_id[v["id"]]
-                    if all(c["end"] <= k["start"] or c["start"] >= k["end"] for k, _, _ in picked):
+                    if _free(c, picked):
                         picked.append((c, v["score"] / 100.0 + tier,
                                        why + [f"editor {v['score']:.0f}"
                                               f"{'' if v['self_contained'] else ' (needs context?)'}: {v['reason']}"]))
                         extras[c["id"]] = v
-            # the editor rejected too many: top up with the local order up to the floor (never overlapping)
+            # still short: moments the editor did not see (the pool is capped by the Gemini budget), in the local
+            # order; a candidate the editor saw and rated below the relaxed scale is not taken back here
             meta["editor_dropped_weak"] = max(0, max_clips - max(len(picked), keep))
-            for c, sc, why in chosen:
+            seen = {v["id"]: v for v in verdicts}
+            n_editor = len(picked)
+            weak = [by_id[v["id"]][0] for v in verdicts if v["id"] not in extras and v["score"] < relaxed]
+
+            def same_as_weak(c):        # the same moment with other edges is no new moment
+                return any(min(c["end"], k["end"]) - max(c["start"], k["start"]) > 0.25 * (c["end"] - c["start"])
+                           for k in weak)
+            for c, sc, why in scored:
                 if len(picked) >= keep:
                     break
-                if c["id"] not in extras and all(c["end"] <= k["start"] or c["start"] >= k["end"] for k, _, _ in picked):
+                if c["id"] not in seen and not same_as_weak(c) and _free(c, picked):
                     picked.append((c, sc, why + ["local (editor short)"]))
+            # last resort: what the editor rated weak but not junk (ad / broken thought stays out)
+            for v in sorted(verdicts, key=lambda v: -v["score"]):
+                if len(picked) >= keep:
+                    break
+                if v["id"] in extras or v["score"] < floor or (brief and not v.get("ad_fit", True)):
+                    continue
+                c, sc, why = by_id[v["id"]]
+                if _free(c, picked):
+                    picked.append((c, v["score"] / 100.0, why + [f"editor {v['score']:.0f} (weak, fill): {v['reason']}"]))
+                    extras[c["id"]] = v
+            meta["min_clips_fill"] = {"editor_tiers": n_editor, "after_fill": len(picked), "target": keep}
             chosen = picked
             meta["selection_method"] = "editor"
+    if len(chosen) < max_clips and cfg.min_duration > SHORT_FILL_MIN_SEC:
+        # «всегда минимум 8» on a short source: whole stories 15–20 s in the gaps (same rules: true sentence
+        # start/end, no promo, advertiser conditions), after the longer ones, never overlapping
+        short_cfg = replace(cfg, min_duration=SHORT_FILL_MIN_SEC, max_duration=cfg.min_duration)
+        short = [c for c in build_story_candidates(words, short_cfg) if not is_promo(c["text"])]
+        if cfg.promo:
+            from .promo import PromoSpec, filter_candidates
+            short, _ = filter_candidates(short, PromoSpec.from_dict(cfg.promo))
+        known = {c["id"] for c, _, _ in scored}
+        short = [c for c in short if c["id"] not in known]
+        before = len(chosen)
+        scored = scored + rank_pick(short, chosen, max_clips, "short fill")
+        meta["short_fill"] = len(chosen) - before
     if brief and len(extras) < len(chosen):
         # brand fit of these clips was checked by the local rules only (editor failed / too few
         # ad_fit picks): say so, the owner/advertiser reviews them by hand
