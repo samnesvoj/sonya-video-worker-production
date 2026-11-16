@@ -254,6 +254,24 @@ def _first_word(text: str) -> str:
     return (m.group(1) if m else "").lower()
 
 
+# A clip never opens on a bare backchannel: production 2026-11-15 clips started with «Угу.» / «Уда.» (ASR of a hum)
+# followed by 2-3 s of nothing - the viewer swipes away before the first real line.
+_BACKCHANNEL = {"угу", "ага", "ну", "мм", "ммм", "хм", "эм", "э", "а", "о", "ой", "ох", "ах", "да", "нет", "ок", "окей",
+                "ладно", "так", "вот", "уда", "ау", "ха", "хаха", "аха", "ого", "м", "mhm", "uh", "um", "yeah", "okay",
+                "ok", "oh", "hmm", "yes", "no", "so"}
+
+
+def is_backchannel(text: str) -> bool:
+    """1-2 word sentence made only of «угу / ага / да / ну…» (or a 1-word non-question of <= 3 letters)."""
+    ws = [re.sub(r"[^\w-]", "", w).lower().replace("ё", "е") for w in text.split()]
+    ws = [w for w in ws if w]
+    if not ws or len(ws) > 2:
+        return False
+    if all(w in _BACKCHANNEL for w in ws):
+        return True
+    return len(ws) == 1 and len(ws[0]) <= 3 and not _Q_END.search(text.strip())
+
+
 def build_story_candidates(words: Sequence[Word], cfg: StoryConfig) -> List[Dict[str, Any]]:
     sents = true_sentences(words)
     long_source = bool(words) and words[-1].end >= cfg.skip_intro_min_source
@@ -266,6 +284,8 @@ def build_story_candidates(words: Sequence[Word], cfg: StoryConfig) -> List[Dict
     for i, (s0, _) in enumerate(sents):
         if long_source and words[s0].start < cfg.skip_intro_sec:
             continue
+        if is_backchannel(" ".join(w.text for w in words[s0:sents[i][1] + 1])):
+            continue                                   # start at the next real line instead
         for j in range(i, len(sents)):
             e = sents[j][1]
             dur = words[e].end - words[s0].start
