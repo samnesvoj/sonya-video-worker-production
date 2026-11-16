@@ -63,7 +63,8 @@ class HookConfig:
     global_margin_sec: float = 3.0  # global candidates keep this far from every selected clip
     vision: bool = True             # labelled frame collages to the editor
     pose: bool = True               # YOLO pose on candidate frames (when the model + ultralytics exist)
-    flash_sec: float = 0.12
+    flash_sec: float = 0.25
+    white_hold_sec: float = 0.6     # owner 2026-11-16: hold the white longer so the hook reads as a separate fragment
     whoosh_db: float = -21.0        # «звук-вжух тихий»
     budget_rub: float = 1.5         # shared with the clip editor (owner cap per video)
 
@@ -823,16 +824,19 @@ def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg") -
     fl = cfg.flash_sec
     wd = min(0.45, d)
     hold = 0.08                                     # the last ~2 frames are fully white: a real flash at the cut
-    vf = f"[0:v]fade=t=out:st={max(0.0, d - fl - hold):.3f}:d={fl:.3f}:color=white[v]"
+    wh_hold = max(0.0, float(os.environ.get("SONYA_HOOK_WHITE_HOLD", cfg.white_hold_sec)))
+    vf = (f"[0:v]fade=t=out:st={max(0.0, d - fl - hold):.3f}:d={fl:.3f}:color=white,"
+          f"tpad=stop_mode=add:stop_duration={wh_hold:.3f}:color=white[v]")
+    total = d + wh_hold
     # whoosh: band-passed pink noise with a fast rise and a short tail, quiet, ending at the cut
     wh = (f"anoisesrc=d={wd:.3f}:c=pink:r={sr}:a=0.6,highpass=f=500,lowpass=f=5000,"
           f"afade=t=in:st=0:d={wd * 0.7:.3f}:curve=exp,afade=t=out:st={wd * 0.7:.3f}:d={wd * 0.3:.3f},"
           f"volume={cfg.whoosh_db}dB,adelay={int(max(0.0, d - wd) * 1000)}:all=1,apad[wh]")
     if has_a:
-        af = (f"[0:a]afade=t=out:st={max(0.0, d - 0.1):.3f}:d=0.1[a0];{wh};"
-              f"[a0][wh]amix=inputs=2:duration=first:normalize=0[a]")
+        af = (f"[0:a]afade=t=out:st={max(0.0, d - 0.1):.3f}:d=0.1,apad[a0];{wh};"
+              f"[a0][wh]amix=inputs=2:duration=first:normalize=0,atrim=0:{total:.3f}[a]")
     else:
-        af = f"{wh};[wh]atrim=0:{d:.3f}[a]"
+        af = f"{wh};[wh]atrim=0:{total:.3f}[a]"
     enc = _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p"]
 
     def make(e):
