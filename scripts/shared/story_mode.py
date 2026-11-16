@@ -337,6 +337,7 @@ def _span(kept: List[int], words: Sequence[Word], sents: List[Dict[str, Any]], c
     return start, end, jc.pieces(kw, start, end, max_gap=cfg.max_gap, keep_gap=cfg.keep_gap, loud=loud, fps=cfg.fps)
 
 
+_LEAD_FILLER = {"э", "э-э", "э-э-э", "ээ", "эм", "ну", "типа", "короче", "вот", "так", "а", "uh", "um", "so"}
 _CLAUSE_END = re.compile(r"[,;:—–-][\"'»”)\]]*$")
 
 
@@ -389,6 +390,11 @@ def _teaser(h: Optional[int], ids: List[int], cut: set, pieces, body: float, wor
         card["teaser_skipped"] = "hook_line_length"
         return None
     b, e = rng
+    if h in ids[-2:] or sents[h]["e"] >= sents[ids[-1]]["b"]:
+        card["teaser_skipped"] = "reveals_ending"          # the punchline in front would spoil the story
+        return None
+    while e - b >= 2 and re.sub(r"[^\w-]", "", words[b].text).lower() in _LEAD_FILLER:
+        b += 1                                              # «э-э, вдруг в зале…» → «вдруг в зале…»
     at = jc.to_output(words[b].start, pieces) if own else 1e9
     if at is None:
         card["teaser_skipped"] = "hook_line_cut"

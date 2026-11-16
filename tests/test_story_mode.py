@@ -284,3 +284,11 @@ def test_topic_series_joins_stories_about_the_same_thing():
     sm.topic_series(sts)
     assert sts[0]["series"] and sts[0]["series"] == sts[1]["series"]
     assert not sts[2]["series"] and not sts[3]["series"]
+
+
+def test_teaser_never_spoils_the_ending_and_skips_a_leading_filler():
+    segs, _ = sm.select_stories(talk(), 10, chat=FakeChat(ans(story(10, 22, hook=21))))
+    assert "teaser" not in segs[0] and segs[0]["story"]["teaser_skipped"] == "reveals_ending"
+    words = talk(text=lambda k: "э-э," if k == 17 else f"слово{k}_0")
+    segs, _ = sm.select_stories(words, 10, chat=FakeChat(ans(story(10, 22, hook=17))))
+    assert not segs[0]["teaser"]["text"].startswith("э-э")
