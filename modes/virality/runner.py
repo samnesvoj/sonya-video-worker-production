@@ -370,16 +370,23 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
                 sm["subtitle_path"] = Path(sm["subtitle_path"]).name
             seg.update(sm)
             sub_path = str(Path(out).with_suffix(".ass")) if burn else None
+        # even loudness (-14 LUFS, one linear gain per clip); the hook piece arrives with its clip's gain in seg
+        if "audio_gain_db" not in seg:
+            from scripts.shared.loudness import clip_gain
+            seg["audio_gain_db"] = clip_gain(ffmpeg_bin(), input_video_path, start, dur)
+        gain = seg["audio_gain_db"]
         if filler:
             tmp = str(Path(out).with_suffix(".top.mp4"))
-            render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg)
+            render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg, audio_gain_db=gain,
+                           freeze_edges=True)
             if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
                                   ffmpeg=ffmpeg_bin()):
                 os.remove(tmp)
             else:
                 os.replace(tmp, out)
         else:
-            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
+            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg, audio_gain_db=gain,
+                           freeze_edges=True)
         return out
 
     def one(i: int, seg: Dict[str, Any]) -> Optional[str]:
@@ -408,7 +415,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         tmpd.mkdir(exist_ok=True)
         stem = f"viral_clip_{i+1:02d}_hook"
         raw, fin, joined = (str(tmpd / f"{stem}.mp4"), str(tmpd / f"{stem}_fx.mp4"), str(tmpd / f"{stem}_joined.mp4"))
-        rep: Dict[str, Any] = {}
+        rep: Dict[str, Any] = {"audio_gain_db": seg.get("audio_gain_db")}     # same loudness step as its clip
         try:
             piece(rep, raw, float(tz["start"]), float(tz["duration"]))
             hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin())

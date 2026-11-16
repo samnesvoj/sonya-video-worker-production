@@ -176,7 +176,8 @@ def enrich_video_for_mode(
             # SONYA ASR (scripts/shared/asr): GigaAM v3 by default (owner decision), faster-whisper fallback.
             # Returns: {"text", "language", "backend", "model", "segments", "words": [{word, start, end}]}
             from scripts.shared import asr
-            transcript = asr.transcribe(input_video_path, language=params.get("language"))
+            transcript = asr.transcribe(input_video_path, language=asr.job_language(params))
+            result["asr_language"] = transcript.get("language")
             # Return word-level list directly
             return transcript.get("words", [])
         _step("word_timestamps", 0.72, _transcribe)

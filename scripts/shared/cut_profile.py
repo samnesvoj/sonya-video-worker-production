@@ -262,7 +262,10 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
     # Hooks (owner 2026-11-16: «просто режим вирал + добавить именно хук»): the SAME clips as virality (strategy qa,
     # same editor prompt and pool) + a 1.5-3 s hook in front of each (scripts/shared/hooks.py). params hook=1 / teaser
     # asks for the same on a virality job; SONYA_HOOKS_TEASER=off on the worker turns hooks jobs into plain virality.
-    story = {"strategy": "qa"}
+    # Storytelling (site card «Мини-истории с началом и концом»): the same virality pool and recipe, the selector's
+    # "story" strategy (setup -> development -> ending). Before 2026-11-16 the site sent mode=stories, which no fleet
+    # pool serves: the job was charged and waited forever.
+    story = {"strategy": "story" if clip_type in ("storytelling", "stories", "story") else "qa"}
     if clip_type == "hooks" or str(params.get("hook") or "").lower() in ("1", "true", "on", "yes"):
         out["teaser"] = params.get("teaser") if isinstance(params.get("teaser"), dict) else True
     if editor if editor is not None else editor_available():
