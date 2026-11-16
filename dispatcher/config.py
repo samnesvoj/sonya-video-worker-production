@@ -40,7 +40,8 @@ class FleetConfig:
     allow_old_cpu: bool = True               # SONYA_ALLOW_OLD_CPU - last-resort class 2 (Xeon E5 etc.) when no modern-CPU offer
     warm_storage_rub_total: int = 0          # SONYA_WARM_STORAGE_RUB_TOTAL: all warms' paused disks together <= this RUB/month
                                              # (0 = no total cap; each warm is still under max_storage_gb_month). Owner 2026-11-16:
-                                             # 2 warms ~330-650 RUB/month -> 650 in prod
+                                             # 2 warms, cap x2 -> 1312 in prod (2 x 40 GB x $0.20 x 82); a real 3060 warm
+                                             # pauses for ~437 RUB/month (40 GB x $0.133), two ~875
     warm_fallback: bool = False              # SONYA_WARM_FALLBACK - no European RTX 3060 offered: may a European fallback class
                                              # (4060 Ti / A4000 ..., same storage cap) be the warm? Owner decided 3060 -> off
     warm_old_cpu: bool = False               # SONYA_WARM_OLD_CPU - no class 0/1 host in Europe: a class-2 (old CPU) one may be the warm
