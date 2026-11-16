@@ -190,3 +190,13 @@ def test_hook_is_never_longer_than_3_s_even_with_pads():
     w = _words([("Понял", 0.5, 0.8), ("меня?", 0.85, 1.3), ("Грязный", 1.6, 2.2), ("бандюга!", 2.3, 3.45)])
     for s, e, i, j in hooks.windows(w, 0.0, 10.0, hooks.HookConfig()):
         assert e - s <= 3.0 + 1e-6
+
+
+def test_teaser_report_is_plain_json_even_from_numpy_maths(tmp_path):
+    import numpy as np
+    from scripts.shared.mode_output import write_selected_segments
+    assert json.dumps(hooks._plain({"a": np.float32(1.5), "b": [np.int64(2)]})) == '{"a": 1.5, "b": [2]}'
+    seg = {"start": 1.0, "duration": 20.0, "teaser": {"score": np.float32(2.5)}}
+    write_selected_segments(str(tmp_path), "virality", [seg], [str(tmp_path / "viral_clip_01.mp4")])
+    d = json.loads((tmp_path / "selected_segments.json").read_text(encoding="utf-8"))
+    assert d["segments"][0]["teaser"]["score"] == 2.5

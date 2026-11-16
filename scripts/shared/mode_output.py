@@ -79,7 +79,8 @@ def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[
             items.append(item)
         out = Path(output_dir) / FILENAME
         out.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "mode": mode,
-                                   "segments": items}, ensure_ascii=False, indent=2),
+                                   "segments": items}, ensure_ascii=False, indent=2,
+                                  default=lambda o: o.item() if hasattr(o, "item") else str(o)),   # numpy scalars
                        encoding="utf-8")
         return str(out)
     except Exception as exc:  # pragma: no cover - defensive

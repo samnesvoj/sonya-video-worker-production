@@ -690,8 +690,12 @@ def attach_teasers(video: str, selected: List[Dict[str, Any]], raw_words: Sequen
         for c in every:
             pc = pose_cues(frames.get(c["id"]))
             c["detail"]["pose"] = pc
-            c["score"] = round(c["score"] + 0.8 * pc["fight"] + 0.5 * pc["embrace"], 4)
-            if pc["fight"] >= 0.5:
+            # one still frame of two people talking with their hands looks like a fight (seen on a podcast,
+            # 2026-11-16): the fight cue counts fully only together with sharp movement / action editing
+            moving = any(t in c["tags"] for t in ("резкое движение", "быстрый монтаж", "резкий звук"))
+            fight = pc["fight"] if moving else 0.3 * pc["fight"]
+            c["score"] = round(c["score"] + 0.8 * fight + 0.5 * pc["embrace"], 4)
+            if fight >= 0.5:
                 c["tags"].append("похоже на драку")
             if pc["embrace"] >= 0.5:
                 c["tags"].append("объятия")
@@ -763,17 +767,30 @@ def attach_teasers(video: str, selected: List[Dict[str, Any]], raw_words: Sequen
         safety = (ch or {}).get("safety") or ("edgy" if any(t in pick["tags"] for t in ("мат", "романтика", "конфликт",
                                                                                          "похоже на драку", "объятия",
                                                                                          "лица близко")) else "ok")
-        seg["teaser"] = {"start": pick["start"], "end": pick["end"], "duration": round(pick["end"] - pick["start"], 3),
-                         "id": pick["id"], "source": pick["source"], "score": pick["score"], "tags": pick["tags"],
-                         "text": pick["text"], "safety": safety, "picked_by": how,
-                         "why": (ch or {}).get("why", ""), "version": HOOKS_VERSION}
+        seg["teaser"] = _plain({"start": pick["start"], "end": pick["end"],
+                                "duration": round(pick["end"] - pick["start"], 3), "id": pick["id"],
+                                "source": pick["source"], "score": pick["score"], "tags": pick["tags"],
+                                "text": pick["text"], "safety": safety, "picked_by": how,
+                                "why": (ch or {}).get("why", ""), "version": HOOKS_VERSION})
         n_hooks += 1
         logger.info("[hooks] clip %d: hook %.1f-%.1f s (%s, %s, %s) %s «%s»", k + 1, pick["start"], pick["end"],
                     pick["source"], how, safety, ",".join(pick["tags"][:5]), pick["text"][:80])
     meta.update(clips=len(live), hooks=n_hooks, global_candidates=len(glob),
                 from_video=sum(1 for s in live if (s.get("teaser") or {}).get("source") == "video"),
                 edgy=sum(1 for s in live if (s.get("teaser") or {}).get("safety") == "edgy"))
-    return meta
+    return _plain(meta)
+
+
+def _plain(v: Any) -> Any:
+    """numpy scalars (float32 from the motion / pose maths) → plain Python: selected_segments.json is json.dumps'ed
+    (seen on Vast 2026-11-16: «Object of type float32 is not JSON serializable» lost the whole file)."""
+    if isinstance(v, dict):
+        return {k: _plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_plain(x) for x in v]
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
 
 
 # ── render helpers ──────────────────────────────────────────────────────────────────────────────────────────────────
