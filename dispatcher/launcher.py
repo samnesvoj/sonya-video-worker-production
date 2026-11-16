@@ -164,6 +164,9 @@ def offer_slots(o: Mapping[str, Any], cfg: FleetConfig, *, power: bool = False, 
     (scripts/ops/gpu_plan.capacity: VRAM of each card, CPU threads, RAM - ~1.5 GB VRAM / ~3.5 GB RAM / ~4 threads per video).
     environ: the dispatcher env - the per-video budget overrides (SONYA_VRAM_PER_JOB_MB ...) it passes to the worker too."""
     if not power:
+        # 2 videos need ~2 x 4-6 threads (ASR, libass render, ffmpeg); a smaller slice gets one video, not two slow ones
+        if cfg.jobs_per_instance > 1 and float(o.get("cpu_cores_effective") or 0) < getattr(cfg, "slot2_min_cpu_cores", 0):
+            return 1
         return cfg.jobs_per_instance
     from scripts.ops.gpu_plan import Budget, capacity   # stdlib-only module; one formula for worker and fleet
     n = num_gpus(o)
@@ -238,7 +241,7 @@ def offer_brief(o: Mapping[str, Any], known_machines: Iterable[int] = ()) -> Dic
 
 
 def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Mapping[str, str], *,
-                   power_slots: int = 0) -> Dict[str, Any]:
+                   power_slots: int = 0, slots: int = 0) -> Dict[str, Any]:
     """power_slots > 0: a POWER server - the worker sizes itself ("auto": its real cards, CPU threads, RAM; a broken card is
     left out) but never runs more than the fleet counted for it."""
     validate_release(cfg)
@@ -246,7 +249,7 @@ def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Map
     env = {"SONYA_RELEASE_SHA": cfg.release_sha, "SONYA_RELEASE_REPO": cfg.release_repo,
            "WORKER_ID": label, "WORKER_BACKEND_MODE": "api", "ENABLED_MODES": ",".join(cfg.pool_modes),
            "SONYA_REQUIRE_MODEL_LOCK": "1", "SONYA_MIN_VRAM_MB": str(cfg.min_vram_gb * 1000 - 4000),
-           "SONYA_WORKER_CONCURRENCY": "auto" if power_slots else str(cfg.jobs_per_instance),
+           "SONYA_WORKER_CONCURRENCY": "auto" if power_slots else str(slots or cfg.jobs_per_instance),
            # NVENC: the NVIDIA runtime mounts libnvidia-encode only with the "video" capability; without it the worker
            # fell back to libx264 on Vast (run 4: "render encoder: cpu @ 6M", 179 s vs 108 s on the Mac mini)
            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"}

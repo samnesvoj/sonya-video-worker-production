@@ -65,6 +65,8 @@ class FleetConfig:
     fallback_gpus: Tuple[str, ...] = ("RTX 4060 Ti", "RTX 4070", "RTX A4000", "RTX 3080", "RTX 3080 Ti", "RTX 4070 Ti",
                                       "RTX 4070 SUPER", "RTX 3090", "RTX 5060 Ti", "RTX 5070")
     min_cpu_cores: float = 8.0               # effective cores of OUR slice (Vast cpu_cores_effective)
+    slot2_min_cpu_cores: float = 0.0         # SONYA_SLOT2_MIN_CPU_CORES (0 = off; prod 12): a default-class host with fewer cores runs ONE video
+                                             # (load test 2026-11-16: 8-core Ryzen 3700X with 2 jobs -> 19-min video 39 min)
     min_cpu_ram_gb: int = 16
     max_storage_gb_month: Decimal = Decimal("0.20")  # USD per GB-month: pause cost = disk_gb x this (40 x 0.20 = $8 = ~656 RUB/month max)
     min_reliability: float = 0.98
@@ -135,6 +137,7 @@ class FleetConfig:
             boot_grace_seconds=_int(e, "SONYA_BOOT_GRACE_SECONDS", 600, lo=60, hi=3600),
             max_instances=_int(e, "SONYA_FLEET_MAX_INSTANCES", 3, lo=1, hi=8),
             jobs_per_instance=_int(e, "SONYA_JOBS_PER_INSTANCE", 2, lo=1, hi=4),
+            slot2_min_cpu_cores=float(_int(e, "SONYA_SLOT2_MIN_CPU_CORES", 0, lo=0, hi=256)),
             warm_instances=_int(e, "SONYA_WARM_INSTANCES", 1, lo=0, hi=1),
             warm_prime=e.get("SONYA_WARM_PRIME", "true").lower() in TRUE,
             warm_old_cpu=e.get("SONYA_WARM_OLD_CPU", "false").lower() in TRUE,

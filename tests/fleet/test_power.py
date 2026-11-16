@@ -195,3 +195,17 @@ def test_old_fleet_db_gets_the_new_columns(tmp_path):
     c.close()
     (i,) = FleetStore(str(db)).all()
     assert (i.slots, i.num_gpus, i.gpu_class, i.role) == (0, 1, "standard", "warm")
+
+
+def test_small_cpu_host_runs_one_video():
+    """Load test 2026-11-16: an 8-core Ryzen 3700X with 2 jobs took 39 min for a 19-min video (SONYA_SLOT2_MIN_CPU_CORES)."""
+    cfg = FleetConfig.from_env({"SONYA_SLOT2_MIN_CPU_CORES": "12"})
+    assert launcher.offer_slots(offer(1, 7, cores=8.0), cfg) == 1
+    assert launcher.offer_slots(offer(1, 7, cores=16.0), cfg) == 2
+    assert launcher.offer_slots(offer(1, 7, cores=8.0), FleetConfig()) == 2          # off by default: the old count
+    env = {"BACKEND_API_URL": "x", "WORKER_SECRET": "x", "S3_ENDPOINT_URL": "x", "S3_ACCESS_KEY_ID": "x",
+           "S3_SECRET_ACCESS_KEY": "x", "S3_REGION": "x", "MODELS_S3_BUCKET": "x", "S3_BUCKET_NAME": "x"}
+    cfg = FleetConfig.from_env({"SONYA_SLOT2_MIN_CPU_CORES": "12", "SONYA_RELEASE_SHA": "a" * 40,
+                                "SONYA_WORKER_IMAGE": "ghcr.io/x/base@sha256:" + "b" * 64})
+    p = launcher.create_payload(cfg, "sonya-pool-x", "", env, slots=1)
+    assert "SONYA_WORKER_CONCURRENCY=1" in str(p) or p.get("env", {}).get("SONYA_WORKER_CONCURRENCY") == "1"
