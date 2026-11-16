@@ -54,7 +54,8 @@ def _interval(seg: Dict[str, Any]) -> Dict[str, float]:
 
 # optional per-clip facts a mode may report (Educational v4: the title, the place in a series, the frame layout)
 _CLIP_KEYS = ("title", "topic_title", "series_index", "series_total", "frame_layout",
-              "teaser", "teaser_status", "teaser_error", "output_offset_sec")    # hooks mode (scripts/shared/hooks.py)
+              "teaser", "teaser_status", "teaser_error", "output_offset_sec",    # hooks mode (scripts/shared/hooks.py)
+              "story", "pieces")                    # storytelling (scripts/shared/story_mode.py)
 
 
 def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[str, Any]],

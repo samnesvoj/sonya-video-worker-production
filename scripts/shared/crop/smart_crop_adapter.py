@@ -985,13 +985,14 @@ def _shift_keyframes(track: Dict[str, Any], pieces: List[Tuple[float, float]], c
 def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[float, float]],
                   track: Dict[str, Any], clip_start: float, *, fps: float = 30.0, has_audio: bool = True,
                   insert: Optional[Dict[str, Any]] = None, subtitle_path: Optional[str] = None,
-                  encoder_args: Optional[List[str]] = None, report: Optional[Dict[str, Any]] = None) -> str:
+                  encoder_args: Optional[List[str]] = None, report: Optional[Dict[str, Any]] = None,
+                  audio_gain_db: Optional[float] = None) -> str:
     """ONE ffmpeg pass from the original source: every piece is its own accurately seeked input (a jump cut
     costs no re-encode), the pieces are concatenated, cropped by the track (render_tracked's graph), an optional
     short full-screen insert (``insert`` = {"path", "at" (cut-timeline s), "dur", "gain_db", "has_audio"}) is
     spliced in between two pieces, then subtitles (ASS on the final timeline) are burned.
     Audio: 15 ms fades at every jump (no clicks), the insert gets ``gain_db`` (loudness-matched by the caller)
-    and 60 ms fades in / out."""
+    and 60 ms fades in / out. ``audio_gain_db``: the clip's loudness step (scripts/shared/loudness.py) on the result."""
     from scripts.shared.jumpcut import total
     input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
     ps = [(float(a), float(d)) for a, d in pieces if d > 0]
@@ -1076,11 +1077,16 @@ def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[fl
             tail = _glass_graph(tail, mask.name)
         tail += f",ass=filename={sub.name}:fontsdir='{fd}'"
     fc.append(f"[vcat]{tail},format=yuv420p[vout]")
+    from scripts.shared.loudness import audio_filter
+    a_out = "[acat]"
+    if audio_filter(audio_gain_db):
+        fc.append(f"[acat]{audio_filter(audio_gain_db)}[again]")
+        a_out = "[again]"
     graph = ";".join(fc)
     out_dur = total(ps) + (float(insert["dur"]) if insert else 0.0)
     from scripts.shared.cut_profile import encode_timeout, run_encode
     make = lambda enc: [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin", *inputs,   # noqa: E731
-                        "-filter_complex", graph, "-map", "[vout]", "-map", "[acat]", *enc,
+                        "-filter_complex", graph, "-map", "[vout]", "-map", a_out, *enc,
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
     enc = encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
     result, used, secs = run_encode(make, enc, timeout=encode_timeout(out_dur), cwd=cwd, what=Path(output_path).name)

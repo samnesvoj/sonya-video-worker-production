@@ -112,6 +112,10 @@ def _select_and_compose(
             story["energy"] = zscores(loudness_per_second(input_video_path, ffmpeg_bin(), cache))
         except Exception as exc:             # ranking still works on words alone; say so
             logger.warning("[virality] audio energy unavailable: %s", exc)
+    if story.get("strategy") == "story" and not params.get("promo"):
+        from scripts.shared import story_mode
+        if story_mode.enabled():
+            return _story_super(input_video_path, enrichment, params, output_dir, words, story, max_clips)
     if params.get("promo"):          # advertiser conditions shape WHICH moments are picked
         story["promo"] = params["promo"]
     top, selection = select_story_clips(words, max_clips, StoryConfig(**story))
@@ -124,6 +128,37 @@ def _select_and_compose(
     selected = refine_segments(top[:max_clips], words,
                                BoundaryConfig(**(params.get("boundaries") or {})))
     return _compose(input_video_path, enrichment, selected, output_dir, params, selection), selection
+
+
+def _story_super(input_video_path: str, enrichment: Dict[str, Any], params: Dict[str, Any], output_dir: Path,
+                 words: List[Dict[str, Any]], story: Dict[str, Any], max_clips: int):
+    """Storytelling (scripts/shared/story_mode.py): Gemini finds finished stories on the transcript, every clip is a
+    jump-cut story with the hook line as a teaser in front and a hook title on top; no Gemini = the local picks."""
+    from scripts.shared import story_mode as sm
+    cfg = sm.StoryModeConfig(fps=_source_fps(input_video_path))
+    segs, selection = sm.select_stories(words, max_clips, cfg, energy=story.get("energy"),
+                                        use_llm=bool(story.get("editor")))
+    if not segs:
+        raise RuntimeError("NO_CLIPS: no complete story found in the speech "
+                           f"({len(words)} words, {selection.get('selection_status')})")
+    selection["selection"] = "story_super"
+    for s in segs:
+        s["fps"] = cfg.fps
+    return _compose(input_video_path, enrichment, segs, output_dir, params, selection), selection
+
+
+def _source_fps(path: str) -> float:
+    """The source frame rate (jump-cut pieces sit on its frame grid; the teaser joins without a re-encode)."""
+    import subprocess
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                              "stream=avg_frame_rate", "-of", "csv=p=0", path], capture_output=True, text=True,
+                             timeout=30).stdout.strip()
+        n, _, d = out.partition("/")
+        fps = float(n) / float(d or 1)
+        return round(fps, 3) if 10.0 <= fps <= 120.0 else 30.0
+    except (ValueError, ZeroDivisionError, OSError, subprocess.SubprocessError):
+        return 30.0
 
 
 def _attach_teasers(input_video_path: str, enrichment: Dict[str, Any], selected: List[Dict[str, Any]],
@@ -206,6 +241,8 @@ def _compose(input_video_path: str, enrichment: Dict[str, Any], selected: List[D
     if hooks.enabled(params):
         crop = dict(crop, teaser=True)
         _attach_teasers(input_video_path, enrichment, selected, params, selection)
+    elif any(s.get("teaser") for s in selected):
+        crop = dict(crop, teaser=True)              # storytelling: the story's own hook line (story_mode)
     from scripts.shared import split_filler
     _f = split_filler.normalize(params, params.get("settings") if isinstance(params.get("settings"), dict) else None)
     if _f["mode"] != "none":
@@ -311,7 +348,11 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     subs = crop.get("subtitles") or {}
     def piece(seg: Dict[str, Any], out: str, start: float, dur: float) -> str:
         """Analysis → track → subtitles → render of one interval into ``out`` (a clip, or a clip's hook); the crop /
-        subtitle / encoder report goes into ``seg``. Raises when the render fails."""
+        subtitle / encoder report goes into ``seg``. Raises when the render fails. ``seg["pieces"]`` (storytelling):
+        only those source pieces play, back to back (jump cuts; render_pieces). ``seg["title_top"]``: a title on top
+        for the first ~3 s."""
+        from scripts.shared import jumpcut as jc
+        cuts = [(float(a), float(d)) for a, d in seg.get("pieces") or []]
         zones: List[List[float]] = []
         cache = crop.get("cache")
         if fit:
@@ -355,13 +396,21 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
                     "crop_cache": cache, "source_width": W, "source_height": H,
                     "output_aspect": "9:16", "crop_keyframes": track["keyframes"]})
         sub_path = None
+        title = seg.get("title_top") or (seg.get("hook") if subs.get("hook", False) else None)
+        if cuts:                                   # subtitles live on the cut timeline
+            inside = [w for w in words or [] if float(w["end"]) > start and float(w["start"]) < start + dur]
+            sub_words, sub_start = jc.remap_words(inside, cuts), 0.0
+            out_dur = jc.total(cuts)
+        else:
+            sub_words, sub_start, out_dur = words, start, dur
         if subs.get("mode") == "burn":
-            sm = subtitles_for_clip(words, start, dur, Path(out).with_suffix(".ass"),
-                                    centered=(split_filler.seam_intervals(dur, filler["top_h"]) if filler else
+            sm = subtitles_for_clip(sub_words, sub_start, out_dur, Path(out).with_suffix(".ass"),
+                                    centered=(split_filler.seam_intervals(out_dur, filler["top_h"]) if filler else
+                                              None if cuts else
                                               (track.get("split") or {}).get("intervals") or track.get("seam")),
                                     avoid=zones,
                                     preset=subs.get("style"), keywords=seg.get("keywords"),
-                                    hook=seg.get("hook") if subs.get("hook", False) else None,
+                                    hook=title or None,
                                     font=subs.get("font"), promo=crop.get("promo"))
             burn = sm.get("subtitle_status") in ("ok", "promo_only") and bool(subs.get("burn_supported"))
             sm["subtitle_burn"] = ("burned" if burn else
@@ -375,6 +424,19 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
             from scripts.shared.loudness import clip_gain
             seg["audio_gain_db"] = clip_gain(ffmpeg_bin(), input_video_path, start, dur)
         gain = seg["audio_gain_db"]
+        if cuts:
+            from scripts.shared.crop.smart_crop_adapter import render_pieces
+            fps = float(seg.get("fps") or 30.0)
+            target = str(Path(out).with_suffix(".top.mp4")) if filler else out
+            render_pieces(input_video_path, target, cuts, track, start, fps=fps, subtitle_path=None if filler else sub_path,
+                          report=seg, audio_gain_db=gain)
+            if filler:
+                if split_filler.apply(target, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
+                                      ffmpeg=ffmpeg_bin()):
+                    os.remove(target)
+                else:
+                    os.replace(target, out)
+            return out
         if filler:
             tmp = str(Path(out).with_suffix(".top.mp4"))
             render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg, audio_gain_db=gain,
@@ -395,6 +457,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         if seg.get("boundary_status") == "dropped_overlap":
             return None
         start, dur = float(seg.get("start", 0)), float(seg.get("duration", 30.0))
+        if seg.get("story") and seg.get("title") and not (crop.get("teaser") and seg.get("teaser")):
+            seg["title_top"] = seg["title"]          # storytelling: the hook title on top of the clip's first seconds
         try:
             piece(seg, out, start, dur)
             if crop.get("promo") and crop["promo"].get("integration"):
@@ -415,7 +479,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         tmpd.mkdir(exist_ok=True)
         stem = f"viral_clip_{i+1:02d}_hook"
         raw, fin, joined = (str(tmpd / f"{stem}.mp4"), str(tmpd / f"{stem}_fx.mp4"), str(tmpd / f"{stem}_joined.mp4"))
-        rep: Dict[str, Any] = {"audio_gain_db": seg.get("audio_gain_db")}     # same loudness step as its clip
+        rep: Dict[str, Any] = {"audio_gain_db": seg.get("audio_gain_db"),     # same loudness step as its clip
+                               **({"title_top": seg["title"]} if seg.get("story") and seg.get("title") else {})}
         try:
             piece(rep, raw, float(tz["start"]), float(tz["duration"]))
             hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin())
