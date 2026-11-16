@@ -121,6 +121,9 @@ def gemini_block(g: Dict[str, dict], r: Optional[Decimal], labels: Sequence[str]
     lines = [tf.table(rows, ("USD", "RUB")), tf.table(facts), note]
     if not m["requests"]:
         lines.append("Запросов к Gemini в этом месяце пока нет.")
+    since = g.get("since")
+    if since is not None and labels and since.day != 1:
+        lines.append(f"Учёт Gemini ведётся с {since.strftime('%d.%m.%Y')} — раньше токены не записывались.")
     if m["no_tokens"]:
         lines.append(f"Без счётчика токенов: {m['no_tokens']} запрос(ов) — в сумму вошли как 0.")
     if balance is not None:

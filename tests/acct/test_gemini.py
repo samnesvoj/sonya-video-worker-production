@@ -69,6 +69,7 @@ def test_gemini_block_rounding_and_estimate_mark():
     g = gm.periods(led, date(2026, 11, 6), P, Decimal("80"))
     txt = reports.gemini_block(g, Decimal("80"), ("Сегодня", "Вчера", "С начала месяца"), P, "1 234.56 ₽")
     assert "<b>GEMINI</b>" in txt and "1.28" in txt and "0.02" in txt          # 1.28 RUB = $0.016 -> 0.02
+    assert "Учёт Gemini ведётся" not in txt                                     # data since 01.11
     assert "42.08" in txt and "14.03" in txt and "оценка" in txt and "Баланс Timeweb: 1 234.56 ₽" in txt
     official = reports.gemini_block(g, Decimal("80"), ("a", "b", "c"), gm.Prices(Decimal("40"), Decimal("240"), False))
     assert "оценка" not in official and "Тарифы Timeweb" in official
@@ -107,3 +108,11 @@ def test_timeweb_balance_text():
     assert gm.timeweb_balance_text("t", get=lambda: {"finances": {"balance": 1234.5}}) == "1 234.50 ₽"
     assert gm.timeweb_balance_text("t", get=lambda: {}) is None
     assert gm.timeweb_balance_text("", get=lambda: 1 / 0) is None
+
+
+def test_since_note_when_accounting_started_mid_month():
+    led = Ledger()
+    objs = {"k.json": _doc("j", "beep", _call(msk(2026, 11, 16, 10)))}
+    gm.import_objects(led, objs, lambda k: objs[k])
+    g = gm.periods(led, date(2026, 11, 16), P, Decimal("80"))
+    assert "Учёт Gemini ведётся с 16.11.2026" in reports.gemini_block(g, Decimal("80"), ("a", "b", "c"), P)

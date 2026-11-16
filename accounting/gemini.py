@@ -156,7 +156,10 @@ def stats(ledger, first: date, last: date, prices: Prices, rate: Optional[Decima
 
 def periods(ledger, day: date, prices: Prices, rate: Optional[Decimal] = None) -> Dict[str, dict]:
     """day / the day before / month to day (MSK)."""
-    return {"day": stats(ledger, day, day, prices, rate), "prev": stats(ledger, day - timedelta(days=1), day - timedelta(days=1), prices, rate),
+    ensure_schema(ledger)
+    first = ledger.c.execute("SELECT MIN(day) FROM llm_usage").fetchone()[0]
+    return {"since": date.fromisoformat(first) if first else None,
+            "day": stats(ledger, day, day, prices, rate), "prev": stats(ledger, day - timedelta(days=1), day - timedelta(days=1), prices, rate),
             "month": stats(ledger, day.replace(day=1), day, prices, rate)}
 
 
