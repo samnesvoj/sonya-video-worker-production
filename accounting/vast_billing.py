@@ -1,6 +1,6 @@
 """
 Confirmed Vast charges (GET /api/v0/charges/) -> ledger, and reconciliation against our calculated numbers.
-!! The exact row schema of /api/v0/charges/ could NOT be verified here (no Vast API key on this machine). The parser is
+!! (Real schema since verified: see parse_row.) Original note: the exact row schema of /api/v0/charges/ could NOT be verified here (no Vast API key on this machine). The parser is
 !! deliberately defensive and every row keeps its raw form in `detail`. Verify against the first real response before relying
 !! on 'confirmed' figures (tests use a documented ASSUMED shape).
 Charges are per UTC day. Corrections are DELTA adjustments (confirmed - calculated - already adjusted), so re-running an
@@ -26,8 +26,15 @@ def _utc_day(v) -> date:
 
 def parse_row(row: dict) -> List[tuple]:
     """-> [(utc_day, category, amount, detail)] ; unknown splits go to 'gpu' (instance) / 'disk' (volume) flagged unsplit."""
-    day = _utc_day(row.get("day") if row.get("day") is not None else row.get("when"))
+    day = _utc_day(next(v for v in (row.get("day"), row.get("when"), row.get("start")) if v is not None))
     typ = str(row.get("type") or "instance")
+    if isinstance(row.get("items"), list) and row["items"]:
+        # REAL /api/v0/charges/ shape (verified 2026-11-15): one row per instance per UTC day, items gpu / disk / bwd / bwu
+        agg: Dict[str, Decimal] = {}
+        for it in row["items"]:
+            cat = {"gpu": "gpu", "disk": "disk"}.get(str(it.get("type")), "other")
+            agg[cat] = agg.get(cat, Decimal(0)) + D(it.get("amount", 0))
+        return [(day, c, a, {"raw": row["items"], "instance": row.get("source")}) for c, a in agg.items() if a]
     total = D(row.get("amount", row.get("cost", row.get("total", 0))))
     parts = {"gpu": D(row.get("gpu") or row.get("compute") or 0), "disk": D(row.get("storage") or row.get("disk") or 0),
              "other": D(row.get("bandwidth") or row.get("network") or row.get("other") or 0)}
@@ -46,7 +53,8 @@ def import_charges(ledger, rows: Iterable[dict], now: float = 0.0) -> int:
     for row in rows:
         h = hashlib.sha256(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest()[:16]
         for day, cat, amount, detail in parse_row(row):
-            key = f"conf:{row.get('id') or h}:{day}:{cat}"
+            rid = row.get("id") or (f"{row['source']}@{row['start']}" if row.get("source") and row.get("start") is not None else h)
+            key = f"conf:{rid}:{day}:{cat}"
             ledger.upsert_cost(key, "confirmed", day, cat, amount, None, detail, now)
             n += 1
     return n

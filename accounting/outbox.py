@@ -45,6 +45,14 @@ def monthly_due(now: float, first_day: date) -> List[tuple]:
     return out
 
 
+def _parse_mode(payload: str) -> Optional[str]:
+    """Reports built by the HTML formatter say so in their payload; older plain-text rows stay plain."""
+    try:
+        return "HTML" if (json.loads(payload or "{}") or {}).get("fmt") == "html" else None
+    except ValueError:
+        return None
+
+
 class ReportService:
     def __init__(self, ledger, store, rates, jobs_source, utc_cost: Callable[[date, float], dict], first_day: date):
         self.ledger, self.store, self.rates, self.jobs, self.utc_cost, self.first_day = ledger, store, rates, jobs_source, utc_cost, first_day
@@ -57,7 +65,7 @@ class ReportService:
                 continue                                   # already built (sent or pending): never rebuilt -> never double counted
             usage.compute_day(self.ledger, self.store, day, self.jobs, now)
             recon = self._reconcile_previous_utc_day(day, now)
-            rep = reports.build_daily(self.ledger, day, self.rates.get(day), recon)
+            rep = reports.build_daily(self.ledger, day, self.rates.get(day), recon, now=now, first_day=self.first_day)
             self._enqueue(rep, now)
             self.ledger.mark_adjustments_applied(rep["adj_keys"], day)
             built.append(key)
@@ -65,7 +73,7 @@ class ReportService:
             key = f"vast-monthly:{y:04d}-{m:02d}"
             if self.ledger.c.execute("SELECT 1 FROM report_outbox WHERE report_key=?", (key,)).fetchone():
                 continue
-            self._enqueue(reports.build_monthly(self.ledger, y, m, self.rates), now)
+            self._enqueue(reports.build_monthly(self.ledger, y, m, self.rates, now=now), now)
             built.append(key)
         return built
 
@@ -73,7 +81,19 @@ class ReportService:
         from accounting import vast_billing
         utc_day = msk_day - timedelta(days=1)           # the last fully closed UTC day at 00:05 MSK
         calc = self.utc_cost(utc_day, now)
-        return vast_billing.reconcile_day(self.ledger, utc_day, calc, now)
+        vast_billing.reconcile_day(self.ledger, utc_day, calc, now)     # may book delta adjustments (unchanged rule)
+        return reports.compare(self.ledger, utc_day, calc)              # what the report shows (read-only, after booking)
+
+    def render_daily(self, day: date, now: float) -> Optional[str]:
+        """READ-ONLY re-render of an already built daily report with the current format and data (bot command /vast_day).
+        Uses the adjustments that were applied in that report; writes nothing. None if that day has no report yet."""
+        with self.ledger.lock:
+            if not self.ledger.c.execute("SELECT 1 FROM report_outbox WHERE report_key=?", (f"vast-daily:{day.isoformat()}",)).fetchone():
+                return None
+            adj = [dict(r) for r in self.ledger.c.execute("SELECT * FROM adjustments WHERE applied_on=? ORDER BY day, adj_key", (day.isoformat(),))]
+            utc_day = day - timedelta(days=1)
+            recon = reports.compare(self.ledger, utc_day, self.utc_cost(utc_day, now))
+            return reports.build_daily(self.ledger, day, self.rates.get(day), recon, adjustments=adj, now=now, first_day=self.first_day)["text"]
 
     def _enqueue(self, rep: dict, now: float) -> None:
         self.ledger.c.execute("INSERT OR IGNORE INTO report_outbox(report_key, kind, period, text, payload, created_at) VALUES (?,?,?,?,?,?)",
@@ -87,7 +107,8 @@ class ReportService:
                 "ORDER BY period, report_key LIMIT ?", (now, now, limit)).fetchall()
             for r in rows:
                 self.ledger.c.execute("UPDATE report_outbox SET lease_until=?, attempts=attempts+1 WHERE report_key=?", (now + LEASE_SECONDS, r["report_key"]))
-            return [{"report_key": r["report_key"], "kind": r["kind"], "period": r["period"], "text": r["text"], "attempt": r["attempts"] + 1} for r in rows]
+            return [{"report_key": r["report_key"], "kind": r["kind"], "period": r["period"], "text": r["text"], "attempt": r["attempts"] + 1,
+                     "parse_mode": _parse_mode(r["payload"])} for r in rows]
 
     def ack_sent(self, key: str, message_id: str, now: float) -> bool:
         cur = self.ledger.c.execute("UPDATE report_outbox SET status='sent', sent_at=?, telegram_message_id=?, lease_until=NULL WHERE report_key=? AND status<>'sent'",

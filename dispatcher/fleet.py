@@ -13,7 +13,7 @@ Rules
   * stopped longer than stopped_retention_seconds, or built from an older release -> DESTROY (stopped disks bill storage).
   * resume stuck in 'scheduling' longer than resume_timeout_seconds -> cancel (stop), count a failure; after
     max_resume_failures -> DESTROY and CREATE a new one.
-  * WARM / BURST (owner decision 2026-11-08): exactly cfg.warm_instances (1) instance has role "warm" - on idle it is
+  * WARM / BURST (owner decision 2026-11-08): exactly cfg.warm_instances (1; 2 since owner 2026-11-16) instance(s) have role "warm" - on idle it is
     STOPPED (disk keeps image + release + models: resume ~10-40 s instead of a ~4-6 min cold start). Every other
     instance is "burst": created for the extra load and DESTROYED (not stopped) when idle, so its disk never bills.
     The warm is never removed by retention (only by a stale release / host error / failed resume). A warm that cannot
@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from decimal import Decimal
 from typing import Callable, Dict, List, Mapping, Optional
 
 from dispatcher import launcher
@@ -92,6 +93,21 @@ class FleetManager:
         return [i for i in self.store.all(("creating", "running", "stop_pending", "stopping", "stopped", "starting"))
                 if i.role == "warm" and i.id != exclude]
 
+    def _warm_missing(self) -> int:
+        """How many warm servers are still missing (cfg.warm_instances: 1, or 2 since owner 2026-11-16)."""
+        return max(0, self.cfg.warm_instances - len(self._warm()))
+
+    def _warm_storage_left(self, exclude: Optional[int] = None) -> Optional[Decimal]:
+        """RUB / month the warms may still bill for their paused disks (cfg.warm_storage_rub_total; None = no total cap).
+        Owner 2026-11-16: two warms, together about 330-650 RUB / month of storage."""
+        if not self.cfg.warm_storage_rub_total:
+            return None
+        used = sum((self._inst_pause_rub(w) for w in self._warm(exclude=exclude)), Decimal(0))
+        return Decimal(self.cfg.warm_storage_rub_total) - used
+
+    def _inst_pause_rub(self, inst: Inst) -> Decimal:
+        return Decimal(str(inst.storage_gb_month or 0)) * Decimal(inst.disk_gb or self.cfg.disk_gb) * self.cfg.usd_rub
+
     def _reserves(self, exclude: Optional[int] = None) -> List[Inst]:
         """Instances that ARE the power reserve (any live state)."""
         return [i for i in self.store.all(("creating", "running", "stop_pending", "stopping", "stopped", "starting"))
@@ -105,8 +121,9 @@ class FleetManager:
             return "stop"
         if inst.gpu_class == "power":                        # a rush server never becomes the warm (pause cost, owner scheme)
             return "destroy" if self.cfg.warm_instances > 0 else "stop"
-        if self.cfg.warm_instances > 0 and not self._warm(exclude=inst.id) and inst.release_sha == self.cfg.release_sha \
-                and (inst.note or "") == "warm_eligible":
+        left = self._warm_storage_left(exclude=inst.id)
+        if len(self._warm(exclude=inst.id)) < self.cfg.warm_instances and inst.release_sha == self.cfg.release_sha \
+                and (inst.note or "") == "warm_eligible" and (left is None or self._inst_pause_rub(inst) <= left):
             return "stop"                                    # promoted below, in _finish_stop, after the fence
         return "destroy" if self.cfg.warm_instances > 0 else "stop"
 
@@ -377,8 +394,11 @@ class FleetManager:
                 yield o, True
             return
         if want_warm or prime:
+            left = self._warm_storage_left()
+            warm_hosts = {w.machine_id for w in self._warm() if w.machine_id}   # 2 warms on one host could not both wake
             for o in launcher.rank_offers(offers, self.cfg, banned, known, warm=True, exclude=exclude):
-                yield o, False
+                if o.get("machine_id") not in warm_hosts and (left is None or launcher.pause_rub_month(o, self.cfg) <= left):
+                    yield o, False                                                 # all warms together under the cap
         if prime:
             return
         if self.cfg.power_enabled and gap >= self.cfg.power_gap():
@@ -406,8 +426,8 @@ class FleetManager:
                 self._create_backoff_until = now + 300
             return 0
         exclude = set() if exclude is None else exclude
-        want_warm = not reserve and self.cfg.warm_instances > 0 and not self._warm() and not any(
-            (i.note or "") == "warm_eligible" for i in self.store.all(("creating", "running", "starting")))
+        want_warm = not reserve and self._warm_missing() > sum(
+            1 for i in self.store.all(("creating", "running", "starting")) if (i.note or "") == "warm_eligible" and i.role != "warm")
         tries = self.cfg.spares_count if self.cfg.spares_enabled else 1
         offer, power, iid, tried = None, False, None, 0
         try:
@@ -478,8 +498,8 @@ class FleetManager:
         by the normal idle rule after boot_grace. Bounded by max_creates_per_hour and a 10 min back-off on failure."""
         if not (self.cfg.warm_instances > 0 and self.cfg.warm_prime) or snap.pending + snap.active_total > 0:
             return
-        if self._warm() or self.store.all(("creating", "running", "starting", "stop_pending", "stopping", "destroying")):
-            return
+        if not self._warm_missing() or self.store.all(("creating", "running", "starting", "stop_pending", "stopping", "destroying")):
+            return                         # one prime at a time; the 2nd warm is primed once the 1st one is paused
         self._create(now, actions, prime=True)
 
     def _prime_reserve(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
@@ -487,7 +507,7 @@ class FleetManager:
         after boot_grace (then only its disk bills, <= power_reserve_max_storage_rub / month). The warm is primed first."""
         if not self.cfg.power_reserve or snap.pending + snap.active_total > 0 or self._reserves():
             return
-        if self.cfg.warm_instances > 0 and self.cfg.warm_prime and not self._warm():
+        if self.cfg.warm_instances > 0 and self.cfg.warm_prime and self._warm_missing():
             return
         if self.store.all(("creating", "starting")):
             return
@@ -531,8 +551,10 @@ class FleetManager:
     def _retention(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         for inst in self.store.all(("stopped",)):
             stale = inst.release_sha != self.cfg.release_sha
-            warm = inst.role == "warm" and self.cfg.warm_instances > 0 and not any(
-                w.stopped_at and (w.stopped_at > (inst.stopped_at or 0)) for w in self._warm(exclude=inst.id) if w.state == "stopped")
+            # kept while it is one of the warm_instances most recently paused warms (an extra one is removed by retention)
+            warm = inst.role == "warm" and sum(
+                1 for w in self._warm(exclude=inst.id) if w.state == "stopped" and w.stopped_at
+                and w.stopped_at > (inst.stopped_at or 0)) < self.cfg.warm_instances
             reserve = inst.role == "reserve" and self.cfg.power_reserve and not any(
                 r.stopped_at and (r.stopped_at > (inst.stopped_at or 0)) for r in self._reserves(exclude=inst.id) if r.state == "stopped")
             expired = not (warm or reserve) and now - (inst.stopped_at or now) > self.cfg.stopped_retention_seconds

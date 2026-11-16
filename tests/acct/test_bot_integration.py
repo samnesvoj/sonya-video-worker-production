@@ -26,10 +26,11 @@ class FakeTelegram:
         self.sent, self.fail = [], False
         self.token = TG_TOKEN
 
-    def send(self, chat_id, text, reply_to=None):
+    def send(self, chat_id, text, reply_to=None, parse_mode=None):
         if self.fail:
             raise RuntimeError("telegram down")
         self.sent.append((chat_id, text))
+        self.modes = getattr(self, "modes", []) + [parse_mode]
         return 1000 + len(self.sent)
 
 
@@ -68,7 +69,7 @@ def setup(tmp_path):
 def test_happy_path_sends_to_all_chats_and_acks(tmp_path):
     svc, led, api, net, tg, puller, now = setup(tmp_path)
     assert puller.poll() == 1
-    assert [c for c, _ in tg.sent] == [111, 222] and tg.sent[0][1].startswith("SONYA — Vast.ai, расходы за 06.11.2026")
+    assert [c for c, _ in tg.sent] == [111, 222] and tg.sent[0][1].startswith("<b>SONYA · Vast.ai — расходы за 06.11.2026</b>") and tg.modes == ["HTML", "HTML"]
     assert led.c.execute("SELECT status FROM report_outbox").fetchone()["status"] == "sent"
     assert puller.poll() == 0
 
@@ -113,10 +114,10 @@ def test_lost_ack_does_not_resend_to_telegram(tmp_path):
 def test_partial_delivery_resumes_only_missing_chats(tmp_path):
     svc, led, api, net, tg, puller, now = setup(tmp_path)
     orig = tg.send
-    def flaky(chat, text, reply_to=None):
+    def flaky(chat, text, reply_to=None, parse_mode=None):
         if chat == 222 and not getattr(flaky, "ok", False):
             raise RuntimeError("blocked")
-        return orig(chat, text)
+        return orig(chat, text, reply_to, parse_mode)
     tg.send = flaky
     assert puller.poll() == 0 and [c for c, _ in tg.sent] == [111]
     flaky.ok = True
@@ -141,3 +142,42 @@ def test_state_file_permissions(tmp_path):
     svc, led, api, net, tg, puller, now = setup(tmp_path)
     puller.poll()
     assert (tmp_path / "state.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_vast_commands_send_html_and_unknown_text_is_not_ours(tmp_path):
+    from accounting.summary import build_summary
+    svc, led, api, net, tg, puller, now = setup(tmp_path)
+    api._summary = lambda n: build_summary(svc.store, svc.rates, n, None, led)
+    assert puller.command(111, "/vast") is True
+    assert tg.sent[-1][1].startswith("<b>SONYA · Vast.ai — сводка</b>") and tg.modes[-1] == "HTML"
+    assert puller.command(111, "/vast_day 06.11") is True and "расходы за 06.11.2026" in tg.sent[-1][1]
+    assert puller.command(111, "/vast_day 01.11") is True and tg.sent[-1][1].startswith("Отчёта за этот день нет") and tg.modes[-1] is None
+    assert puller.command(111, "/vast_day завтра") is True and tg.sent[-1][1].startswith("Не понял дату")
+    n = len(tg.sent)
+    assert puller.command(111, "/list") is False and len(tg.sent) == n
+
+
+def test_markup_rejected_by_telegram_falls_back_to_plain_once(tmp_path):
+    svc, led, api, net, tg, puller, now = setup(tmp_path)
+    orig = tg.send
+    def picky(chat, text, reply_to=None, parse_mode=None):
+        if parse_mode:
+            raise RuntimeError("telegram sendMessage: Bad Request: can't parse entities: unexpected end tag")
+        return orig(chat, text, reply_to)
+    tg.send = picky
+    assert puller.poll() == 1
+    assert all("<b>" not in t and "<pre>" not in t for _, t in tg.sent) and tg.sent[0][1].startswith("SONYA · Vast.ai — расходы за 06.11.2026")
+
+
+def test_network_error_is_not_mistaken_for_markup_error(tmp_path):
+    svc, led, api, net, tg, puller, now = setup(tmp_path)
+    def down(chat, text, reply_to=None, parse_mode=None):
+        raise RuntimeError("telegram unreachable (URLError)")
+    tg.send = down
+    assert puller.poll() == 0 and led.c.execute("SELECT status FROM report_outbox").fetchone()["status"] == "pending"
+
+
+def test_unavailable_server_gives_a_short_plain_answer(tmp_path):
+    svc, led, api, net, tg, puller, now = setup(tmp_path)
+    net.down = True
+    assert puller.command(111, "/vast") is True and tg.sent[-1][1].startswith("Не получилось получить данные Vast")

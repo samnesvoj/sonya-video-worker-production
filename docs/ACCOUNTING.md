@@ -33,3 +33,11 @@ Bot VPS: receipt_worker.vast_reports.VastReportPuller (поток существ
 1. Бот: `git apply integration/accounting_bot/accounting-bot-vast-reports.patch` в `agents/finance/receipt-worker` (проверено: применяется чисто, 134 теста бота зелёные до и после). Добавляет `vast_reports.py`, секрет `accounting_api_secret`, хук в цикл простоя. Включение: `VAST_REPORTS_ENABLED=true` в `/etc/sonya-accounting-bot/env`, `python3 -m receipt_worker secret set accounting_api_secret`.
 2. Сервер: подключить `accounting.internal_api.fastapi_router(AccountingApi(service, secret))` к API (маршрут `POST /api/internal/accounting/vast/*`); секрет — тот же `accounting_api_secret`.
 3. Dispatcher VPS: `SONYA_ACCOUNTING_ENABLED=true`, `SONYA_ACCOUNTING_FIRST_DAY=YYYY-MM-DD`.
+
+
+## LIVE с 2026-11-15 (как устроено на проде)
+- Dispatcher (sonya-fleet) сам поднимает подписанный API бота на 127.0.0.1:8765; nginx проксирует `/api/internal/accounting/vast/` туда (sonya-api не затронут). Секрет: `/etc/sonya-fleet/accounting_api_secret` (сервер) = `/etc/sonya-accounting-bot/secrets/accounting_api_secret` (бот).
+- Env dispatcher: `SONYA_ACCOUNTING_ENABLED=true`, `VAST_REPORTS_ENABLED=true`, `SONYA_ACCOUNTING_FIRST_DAY`, `SONYA_ACCOUNTING_ALERT_RUB_DAY=500`. Env бота: `VAST_REPORTS_ENABLED=true`.
+- Команда бота `/vast` — сегодня / вчера / месяц, баланс Vast, часы GPU по классам. Алерт: один раз в сутки, если расчётный расход за день (МСК) > порога.
+- Реальный формат `/api/v0/charges/` (проверен): параметр `select_filters=<json>` (не `q=`), строка = инстанс×UTC-день, items: gpu / disk / bwd / bwu. Трафик (bwd/bwu) Vast реально списывает — в «подтверждено» он есть, в «расчёте» нет, разницу сверка добавляет корректировкой.
+- Откат: `/root/backups/acct-vast-*/ROLLBACK.sh` на каждом из двух серверов.

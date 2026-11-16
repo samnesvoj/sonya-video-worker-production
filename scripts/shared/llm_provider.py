@@ -262,6 +262,14 @@ def chat_json(messages: List[Dict[str, str]], *, prompt_version: str, opt_in: bo
                     usage = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
                     attempts.append({"provider": p.name, "model": p.model, "ok": True, "status": status,
                                      "latency_ms": latency})
+                    try:                       # the accountant: tokens of every answered call (scripts/shared/llm_usage.py)
+                        from scripts.shared import llm_usage
+                        llm_usage.record(provider=p.name, model=raw.get("model") or p.model, prompt_version=prompt_version,
+                                         input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
+                                         images=llm_usage.count_images(messages), cost_usd=usage.get("cost"),
+                                         latency_ms=latency)
+                    except Exception:  # noqa: BLE001 - accounting never breaks a call
+                        pass
                     return LLMResult(text=text, provider=p.name, model=raw.get("model") or p.model,
                                      prompt_version=prompt_version, input_tokens=usage.get("prompt_tokens"),
                                      output_tokens=usage.get("completion_tokens"),

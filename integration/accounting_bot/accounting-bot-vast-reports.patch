@@ -1,8 +1,7 @@
-diff --git a/receipt_worker/cli.py b/receipt_worker/cli.py
-index c7973a2..4826e96 100644
---- a/receipt_worker/cli.py
-+++ b/receipt_worker/cli.py
-@@ -106,7 +106,16 @@ def build_worker(config: Config, store: keychain.SecretStore) -> Worker:
+diff -ruN a/receipt_worker/cli.py b/receipt_worker/cli.py
+--- a/receipt_worker/cli.py	2026-11-14 17:11:04
++++ b/receipt_worker/cli.py	2026-11-14 17:11:04
+@@ -106,7 +106,17 @@
                                            allowed_ids=config.telegram_allowed_ids,
                                            state_path=config.home / "telegram-desk.json",
                                            remind_hours=config.remind_hours, expected_inn=config.mynalog_inn)
@@ -16,15 +15,15 @@ index c7973a2..4826e96 100644
 +        worker.vast_reports = vast_reports.VastReportPuller(
 +            (os.environ.get("VAST_REPORTS_API_BASE") or config.sonya_api_base), acc_secret, desk.api,
 +            config.telegram_notify_ids, config.home / "vast-reports.json", timeout=config.http_timeout)
++        desk.vast_summary = worker.vast_reports.summary   # /vast command
 +    return worker
  
  
  def fiscal_ping(config: Config, store: keychain.SecretStore) -> int:
-diff --git a/receipt_worker/keychain.py b/receipt_worker/keychain.py
-index b5ac42e..4053a3d 100644
---- a/receipt_worker/keychain.py
-+++ b/receipt_worker/keychain.py
-@@ -39,6 +39,7 @@ SECURITY = "/usr/bin/security"
+diff -ruN a/receipt_worker/keychain.py b/receipt_worker/keychain.py
+--- a/receipt_worker/keychain.py	2026-11-14 17:11:04
++++ b/receipt_worker/keychain.py	2026-11-14 17:11:04
+@@ -39,6 +39,7 @@
  
  FISCAL_API_SECRET = "fiscal_api_secret"
  TELEGRAM_BOT_TOKEN = "telegram_bot_token"
@@ -32,7 +31,7 @@ index b5ac42e..4053a3d 100644
  MYNALOG_PASSWORD = "mynalog_password"
  MYNALOG_REFRESH_TOKEN = "mynalog_refresh_token"
  MYNALOG_DEVICE_ID = "mynalog_device_id"
-@@ -75,7 +76,7 @@ class SecretStore(Protocol):
+@@ -75,7 +76,7 @@
  
  
  def _check_name(name: str) -> None:
@@ -41,12 +40,39 @@ index b5ac42e..4053a3d 100644
          raise SecretError(f"unknown secret name: {name}")
  
  
-diff --git a/receipt_worker/vast_reports.py b/receipt_worker/vast_reports.py
-new file mode 100644
-index 0000000..863c694
---- /dev/null
-+++ b/receipt_worker/vast_reports.py
-@@ -0,0 +1,145 @@
+diff -ruN a/receipt_worker/telegram_desk.py b/receipt_worker/telegram_desk.py
+--- a/receipt_worker/telegram_desk.py	2026-11-14 17:11:04
++++ b/receipt_worker/telegram_desk.py	2026-11-14 17:11:09
+@@ -58,7 +58,7 @@
+         "2. В чеке нажми «Поделиться» → скопируй ссылку.\n"
+         "3. Ответь на моё сообщение об оплате этой ссылкой.\n"
+         "Я сохраню чек и отправлю его покупателю на почту с auth@sonya.group.\n\n"
+-        "/list — оплаты, по которым ещё нет чека")
++        "/list — оплаты, по которым ещё нет чека\n/vast — расходы на серверы Vast (сегодня, вчера, месяц, баланс)")
+ 
+ 
+ class TelegramError(RuntimeError):
+@@ -283,6 +283,16 @@
+         mid = message.get("message_id")
+         if text.split(" ")[0].split("@")[0] in ("/start", "/help"):
+             self._reply(sender, HELP)
++            return 1
++        if text.split(" ")[0].split("@")[0] == "/vast":
++            summary = getattr(self, "vast_summary", None)
++            if summary is None:
++                self._reply(sender, "Отчёты Vast не включены.")
++            else:
++                try:
++                    self._reply(sender, summary())
++                except Exception:  # noqa: BLE001
++                    self._reply(sender, "Не получилось получить данные Vast с сервера SONYA. Попробуй чуть позже.")
+             return 1
+         if text.split(" ")[0].split("@")[0] == "/list":
+             self._reply(sender, self._list_text())
+diff -ruN a/receipt_worker/vast_reports.py b/receipt_worker/vast_reports.py
+--- a/receipt_worker/vast_reports.py	1969-12-31 16:00:00
++++ b/receipt_worker/vast_reports.py	2026-11-14 17:11:04
+@@ -0,0 +1,153 @@
 +"""
 +Vast.ai cost reports for the EXISTING accounting bot (@sonya_accounting_bot). No new bot, no new token.
 +
@@ -73,7 +99,7 @@ index 0000000..863c694
 +from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 +from urllib.parse import urlsplit
 +
-+KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2})$")
++KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})$")
 +BASE = "/api/internal/accounting/vast/"
 +MAX_TEXT = 3900                        # Telegram limit is 4096
 +
@@ -98,6 +124,14 @@ index 0000000..863c694
 +        self._open = opener or urllib.request.urlopen
 +        self.timeout, self._next = timeout, 0.0
 +        self.log = logging.getLogger("receipt_worker.vast_reports")
++
++    def summary(self) -> str:
++        """Text for the /vast command (SONYA computes it; the bot only relays)."""
++        status, data = self._post(BASE + "summary", {})
++        text = data.get("text") if status == 200 else None
++        if not isinstance(text, str) or not text:
++            raise VastReportError("summary HTTP %s" % status)
++        return text[:MAX_TEXT]
 +
 +    # ---------------------------------------------------------------- state
 +    def _load(self) -> Dict[str, Any]:
@@ -192,11 +226,10 @@ index 0000000..863c694
 +        self._save(state)                                          # persisted BEFORE the ack
 +        self._post(BASE + key + "/sent", {"message_id": str(first_id or 0)})
 +        return True
-diff --git a/receipt_worker/worker.py b/receipt_worker/worker.py
-index cc3486e..78e652d 100644
---- a/receipt_worker/worker.py
-+++ b/receipt_worker/worker.py
-@@ -78,6 +78,7 @@ class Worker:
+diff -ruN a/receipt_worker/worker.py b/receipt_worker/worker.py
+--- a/receipt_worker/worker.py	2026-11-14 17:11:04
++++ b/receipt_worker/worker.py	2026-11-14 17:11:04
+@@ -78,6 +78,7 @@
          self.provider = provider
          self.alerts = alert_sink or desk or alerts.LogAlertSink()
          self.desk = desk  # RECEIPT_PROVIDER=manual: Telegram intake, polled while idle
@@ -204,7 +237,7 @@ index cc3486e..78e652d 100644
          self.rng = rng or random.Random()
          self.clock = clock
          self.stop_event = threading.Event()
-@@ -219,6 +220,8 @@ class Worker:
+@@ -219,6 +220,8 @@
              except Exception as exc:  # the desk must never stop the receipt loop
                  logs.log("telegram_desk_error", logging.ERROR, error_type=type(exc).__name__)
                  self.stop_event.wait(5)
