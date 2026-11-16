@@ -175,3 +175,10 @@ def test_site_none_subtitles_are_still_burned(video, tmp_path, monkeypatch):
     monkeypatch.setenv("SONYA_SUBTITLES_ALLOW_OFF", "1")
     out = cp.apply_profile("virality", p, video, str(tmp_path / "b"), ass_supported=True, editor=False)
     assert "subtitles" not in out["crop"]
+
+
+def test_storytelling_card_runs_the_story_strategy(video, tmp_path):
+    """Site «Storytelling» (2026-11-16: was mode=stories, which no fleet pool serves) = virality + strategy story."""
+    out = cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS, clipType="storytelling"), video, str(tmp_path),
+                           ass_supported=True, editor=True)
+    assert out["story"] == {"strategy": "story", "editor": True} and "teaser" not in out
