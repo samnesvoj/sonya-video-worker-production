@@ -1,6 +1,8 @@
 """
 Signed internal API the EXISTING accounting bot polls (same pattern as /api/internal/fiscal/*: outbound-only bot, HMAC, nonce).
   POST /api/internal/accounting/vast/claim            -> {"reports":[{report_key, kind, period, text, attempt}]}
+  POST /api/internal/accounting/vast/summary          -> {"text": "...", "parse_mode": "HTML"}   (bot's /vast command)
+  POST /api/internal/accounting/vast/daily            body {"day": "YYYY-MM-DD"|"DD.MM"|""} -> {"text", "parse_mode"}  (/vast_day; read-only)
   POST /api/internal/accounting/vast/{key}/sent       body {"message_id": "..."}
   POST /api/internal/accounting/vast/{key}/failed     body {"error": "..."}
 X-Accounting-Timestamp / -Nonce / -Signature = hex HMAC-SHA256(secret, "<ts>\n<nonce>\n<METHOD>\n<path>\n<sha256(body)>").
@@ -16,7 +18,7 @@ import time
 from typing import Callable, Dict, Optional, Tuple
 
 SKEW = 120
-KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2})$")
+KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})$")
 
 
 def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes) -> str:
@@ -25,8 +27,9 @@ def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes
 
 
 class AccountingApi:
-    def __init__(self, service, secret: str, clock: Callable[[], float] = time.time):
-        self.svc, self._secret, self.clock = service, secret.encode(), clock
+    def __init__(self, service, secret: str, clock: Callable[[], float] = time.time, summary: Optional[Callable[[float], str]] = None,
+                 parse_mode: Optional[str] = "HTML"):
+        self.svc, self._secret, self.clock, self._summary, self.parse_mode = service, secret.encode(), clock, summary, parse_mode
         self._nonces: Dict[str, float] = {}
 
     def _verify(self, headers: Dict[str, str], method: str, path: str, body: bytes) -> bool:
@@ -43,6 +46,9 @@ class AccountingApi:
         self._nonces[nonce] = now
         return True
 
+    def _msg(self, text: str) -> dict:
+        return {"text": text, "parse_mode": self.parse_mode} if self.parse_mode else {"text": text}
+
     def handle(self, method: str, path: str, headers: Dict[str, str], body: bytes) -> Tuple[int, dict]:
         if not self._verify(headers, method, path, body):
             return 401, {"error": "unauthorized"}
@@ -50,6 +56,23 @@ class AccountingApi:
         base = "/api/internal/accounting/vast/"
         if method == "POST" and path == base + "claim":
             return 200, {"reports": self.svc.claim(now, limit=1)}
+        if method == "POST" and path == base + "summary" and self._summary:
+            try:
+                return 200, self._msg(self._summary(now))
+            except Exception:  # noqa: BLE001 - never leak internals
+                return 502, {"error": "summary_failed"}
+        if method == "POST" and path == base + "daily" and hasattr(self.svc, "render_daily"):
+            try:
+                day = parse_day((json.loads(body or b"{}") or {}).get("day"), now)
+            except (ValueError, TypeError, AttributeError):
+                return 400, {"error": "bad_day"}
+            try:
+                text = self.svc.render_daily(day, now)
+            except Exception:  # noqa: BLE001
+                return 502, {"error": "daily_failed"}
+            if text is None:
+                return 404, {"error": "no_report", "day": day.isoformat()}
+            return 200, self._msg(text)
         m = re.fullmatch(re.escape(base) + r"(.+)/(sent|failed)", path)
         if method == "POST" and m and KEY_RE.match(m.group(1)):
             try:
@@ -62,6 +85,27 @@ class AccountingApi:
                 self.svc.ack_failed(m.group(1), str(data.get("error", "")), now)
             return 200, {"ok": True}
         return 404, {"error": "not_found"}
+
+
+def parse_day(v, now: float):
+    """'' / None -> yesterday (MSK); 'YYYY-MM-DD'; 'DD.MM' (current year); 'DD.MM.YYYY'. Never in the future."""
+    from datetime import datetime, timedelta
+    from accounting.money import MSK
+    today = datetime.fromtimestamp(now, MSK).date()
+    s = str(v or "").strip()[:10]
+    if not s:
+        return today - timedelta(days=1)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        d = datetime.strptime(s, "%Y-%m-%d").date()
+    elif re.fullmatch(r"\d{1,2}\.\d{1,2}", s):
+        d = datetime.strptime(f"{s}.{today.year}", "%d.%m.%Y").date()
+    elif re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", s):
+        d = datetime.strptime(s, "%d.%m.%Y").date()
+    else:
+        raise ValueError("bad day")
+    if d >= today:
+        raise ValueError("day not closed yet")
+    return d
 
 
 def fastapi_router(api: AccountingApi):  # pragma: no cover - thin adapter for prod_generation_api (see integration/)
