@@ -864,6 +864,10 @@ def join(teaser: str, main: str, out: str, ffmpeg: str = "ffmpeg") -> str:
         if r.returncode == 0:
             return "copy"
         logger.warning("[hooks] stream-copy join failed (%s) - re-encoding", (r.stderr or "")[-200:])
+    else:
+        names = ("type", "codec", "profile", "level", "w", "h", "pix_fmt", "fps", "sample_rate", "channels", "extradata")
+        diff = sorted({names[k] for a, b in zip(_sig(pt), _sig(pm)) for k in range(len(names)) if a[k] != b[k]})
+        logger.info("[hooks] join re-encodes: hook and clip encodes differ in %s", ",".join(diff) or "stream count")
     d = float((pm.get("format") or {}).get("duration") or 60.0)
     enc = _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p"]
     has_a = all(any(s.get("codec_type") == "audio" for s in p.get("streams") or []) for p in (pt, pm))
