@@ -428,7 +428,8 @@ class FleetManager:
                                          num_gpus=launcher.num_gpus(offer), slots=slots)
                     return 0
                 label = self.cfg.label_prefix + secrets.token_hex(4)
-                payload = launcher.create_payload(self.cfg, label, self._token(), self._env, power_slots=slots if power else 0)
+                payload = launcher.create_payload(self.cfg, label, self._token(), self._env, power_slots=slots if power else 0,
+                                                  slots=0 if power else slots)
                 tried += 1
                 try:
                     iid = self.vast.create(int(offer["id"]), payload)
@@ -460,7 +461,8 @@ class FleetManager:
                        machine_id=offer.get("machine_id"), inet_up_tb=offer.get("internet_up_cost_per_tb"), inet_down_tb=offer.get("internet_down_cost_per_tb"),
                        role="reserve" if reserve else "warm" if prime else "burst", note="warm_eligible" if eligible else "",
                        # default class: NULL = cfg.jobs_per_instance at every tick, exactly the old count
-                       slots=slots if power else None, num_gpus=launcher.num_gpus(offer), gpu_class="power" if power else "standard")
+                       # (a small-CPU host stores its 1)
+                       slots=slots if power or slots != self.cfg.jobs_per_instance else None, num_gpus=launcher.num_gpus(offer), gpu_class="power" if power else "standard")
         extra = {"reserve": True} if reserve else {}
         if tried > 1:
             extra["attempt"] = tried
