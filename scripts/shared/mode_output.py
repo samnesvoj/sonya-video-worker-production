@@ -52,7 +52,8 @@ def _interval(seg: Dict[str, Any]) -> Dict[str, float]:
 
 
 # optional per-clip facts a mode may report (Educational v4: the title, the place in a series, the frame layout)
-_CLIP_KEYS = ("title", "topic_title", "series_index", "series_total", "frame_layout")
+_CLIP_KEYS = ("title", "topic_title", "series_index", "series_total", "frame_layout",
+              "teaser", "teaser_status", "teaser_error", "output_offset_sec")    # hooks mode (scripts/shared/hooks.py)
 
 
 def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[str, Any]],
@@ -78,7 +79,8 @@ def write_selected_segments(output_dir: str, mode: str, selected: Sequence[Dict[
             items.append(item)
         out = Path(output_dir) / FILENAME
         out.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "mode": mode,
-                                   "segments": items}, ensure_ascii=False, indent=2),
+                                   "segments": items}, ensure_ascii=False, indent=2,
+                                  default=lambda o: o.item() if hasattr(o, "item") else str(o)),   # numpy scalars
                        encoding="utf-8")
         return str(out)
     except Exception as exc:  # pragma: no cover - defensive

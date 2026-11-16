@@ -96,8 +96,8 @@ def _select_and_compose(
             selected.append({"start": round(st, 3), "duration": round(en - st, 3), "end": round(en, 3),
                              "boundary_status": "fixed", "source": "fixed_segments",
                              **{k: s[k] for k in ("hook", "keywords", "editor_score", "selection_reason") if k in s}})
-        return _compose(input_video_path, enrichment, selected, output_dir, params), \
-            {"selection": "fixed_segments", "count": len(selected)}
+        sel = {"selection": "fixed_segments", "count": len(selected)}
+        return _compose(input_video_path, enrichment, selected, output_dir, params, sel), sel
 
     # Desktop: whole stories / question + answer, 20–90 s (cut-local-rank-v3)
     from scripts.shared.cut_selection import StoryConfig, select_story_clips
@@ -123,7 +123,51 @@ def _select_and_compose(
     from scripts.shared.boundaries import BoundaryConfig, refine_segments
     selected = refine_segments(top[:max_clips], words,
                                BoundaryConfig(**(params.get("boundaries") or {})))
-    return _compose(input_video_path, enrichment, selected, output_dir, params), selection
+    return _compose(input_video_path, enrichment, selected, output_dir, params, selection), selection
+
+
+def _attach_teasers(input_video_path: str, enrichment: Dict[str, Any], selected: List[Dict[str, Any]],
+                    params: Dict[str, Any], selection: Optional[Dict[str, Any]]) -> None:
+    """Hooks mode: a 1.5-3 s hook per clip (scripts/shared/hooks.py). Faces come from the same cached per-clip crop
+    analysis the render uses (no second detector pass). Never fails the job: no hook = the plain virality clip."""
+    from scripts.shared import hooks
+    from scripts.shared.clip_parallel import clip_workers
+    from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
+    crop = params["crop"]
+    story = params.get("story") or {}
+    spent = float(((selection or {}).get("llm") or {}).get("cost_rub_est") or 0.0)
+    chat = None
+    if story.get("editor"):
+        from scripts.shared import llm_provider
+        chat = llm_provider.chat_json
+
+    def faces(st: float, du: float):
+        if crop.get("analysis") != "per_clip" or crop.get("layout") in ("fit", "blur"):
+            return None
+        data, _, _ = _clip_analysis(crop, input_video_path, st, du)
+        return data
+    try:
+        dur = float(_source_duration(input_video_path))
+        cache = crop.get("clip_cache_dir")
+        meta = hooks.attach_teasers(input_video_path, selected, enrichment.get("word_timestamps") or [],
+                                    duration=dur, faces_fn=faces, chat=chat, editor=bool(chat), spent_rub=spent,
+                                    cache_dir=str(Path(cache).parent) if cache else None, ffmpeg=ffmpeg_bin(),
+                                    workers=clip_workers(len(selected)))
+    except Exception as exc:                  # noqa: BLE001 - hooks never kill the job
+        logger.warning("[virality] hooks failed: %s - clips without a hook", exc)
+        meta = {"version": hooks.HOOKS_VERSION, "status": "error", "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+    if selection is not None:
+        selection["hooks"] = meta
+
+
+def _source_duration(path: str) -> float:
+    import subprocess
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                         capture_output=True, text=True)
+    try:
+        return float(out.stdout.strip())
+    except ValueError:
+        return 0.0
 
 
 def _load_face_analysis(crop: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -156,8 +200,12 @@ def _source_dims(path: str) -> "tuple[int, int]":
 
 
 def _compose(input_video_path: str, enrichment: Dict[str, Any], selected: List[Dict[str, Any]],
-             output_dir: Path, params: Dict[str, Any]) -> List[str]:
+             output_dir: Path, params: Dict[str, Any], selection: Optional[Dict[str, Any]] = None) -> List[str]:
     crop = params["crop"]
+    from scripts.shared import hooks
+    if hooks.enabled(params):
+        crop = dict(crop, teaser=True)
+        _attach_teasers(input_video_path, enrichment, selected, params, selection)
     from scripts.shared import split_filler
     _f = split_filler.normalize(params, params.get("settings") if isinstance(params.get("settings"), dict) else None)
     if _f["mode"] != "none":
@@ -261,12 +309,9 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     meta = (analysis or {}).get("meta") or {}
     W, H = (meta.get("width"), meta.get("height")) if analysis else _source_dims(input_video_path)
     subs = crop.get("subtitles") or {}
-    def one(i: int, seg: Dict[str, Any]) -> Optional[str]:
-        """Analysis → track → subtitles → render for one clip (runs in a worker thread)."""
-        out = str(output_dir / f"viral_clip_{i+1:02d}.mp4")
-        if seg.get("boundary_status") == "dropped_overlap":
-            return None
-        start, dur = float(seg.get("start", 0)), float(seg.get("duration", 30.0))
+    def piece(seg: Dict[str, Any], out: str, start: float, dur: float) -> str:
+        """Analysis → track → subtitles → render of one interval into ``out`` (a clip, or a clip's hook); the crop /
+        subtitle / encoder report goes into ``seg``. Raises when the render fails."""
         zones: List[List[float]] = []
         cache = crop.get("cache")
         if fit:
@@ -325,23 +370,65 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
                 sm["subtitle_path"] = Path(sm["subtitle_path"]).name
             seg.update(sm)
             sub_path = str(Path(out).with_suffix(".ass")) if burn else None
-        try:
-            if filler:
-                tmp = str(Path(out).with_suffix(".top.mp4"))
-                render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg)
-                if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
-                                      ffmpeg=ffmpeg_bin()):
-                    os.remove(tmp)
-                else:
-                    os.replace(tmp, out)
+        if filler:
+            tmp = str(Path(out).with_suffix(".top.mp4"))
+            render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg)
+            if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
+                                  ffmpeg=ffmpeg_bin()):
+                os.remove(tmp)
             else:
-                render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
+                os.replace(tmp, out)
+        else:
+            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg)
+        return out
+
+    def one(i: int, seg: Dict[str, Any]) -> Optional[str]:
+        """One clip (runs in a worker thread): render, advertiser insert, then the hook in front (hooks mode)."""
+        out = str(output_dir / f"viral_clip_{i+1:02d}.mp4")
+        if seg.get("boundary_status") == "dropped_overlap":
+            return None
+        start, dur = float(seg.get("start", 0)), float(seg.get("duration", 30.0))
+        try:
+            piece(seg, out, start, dur)
             if crop.get("promo") and crop["promo"].get("integration"):
                 seg.update(_insert_integration(out, crop["promo"], words or [], start, dur))
-            return out
         except Exception as exc:
             logger.warning("[virality] Clip %d failed: %s", i + 1, exc)
             return None
+        if crop.get("teaser") and isinstance(seg.get("teaser"), dict):
+            _prepend_teaser(i, seg, out)
+        return out
+
+    def _prepend_teaser(i: int, seg: Dict[str, Any], out: str) -> None:
+        """The hook piece (same crop + subtitles) → flash + whoosh → joined in front of the clip. Any failure leaves
+        the plain clip (seg["teaser_status"] says why)."""
+        from scripts.shared import hooks
+        tz = seg["teaser"]
+        tmpd = output_dir.parent / "hooks_tmp"          # never inside output/ (everything there is uploaded)
+        tmpd.mkdir(exist_ok=True)
+        stem = f"viral_clip_{i+1:02d}_hook"
+        raw, fin, joined = (str(tmpd / f"{stem}.mp4"), str(tmpd / f"{stem}_fx.mp4"), str(tmpd / f"{stem}_joined.mp4"))
+        rep: Dict[str, Any] = {}
+        try:
+            piece(rep, raw, float(tz["start"]), float(tz["duration"]))
+            hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin())
+            offset = float((hooks._probe(fin).get("format") or {}).get("duration") or tz["duration"])
+            how = hooks.join(fin, out, joined, ffmpeg_bin())
+            os.replace(joined, out)
+            if seg.get("subtitle_path"):
+                hooks.merge_ass(str(tmpd / f"{stem}.ass"), str(output_dir / seg["subtitle_path"]), offset)
+            tz.update(render_join=how, offset_sec=round(offset, 3), crop_status=rep.get("crop_status"),
+                      render_encoder=rep.get("render_encoder"), subtitle_status=rep.get("subtitle_status"))
+            seg.update(teaser_status="ok", output_offset_sec=round(offset, 3))
+        except Exception as exc:                 # noqa: BLE001 - the clip itself is fine: deliver it without a hook
+            logger.warning("[virality] Clip %d hook failed: %s - clip without a hook", i + 1, exc)
+            seg.update(teaser_status="render_failed", teaser_error=f"{type(exc).__name__}: {str(exc)[:200]}")
+        finally:
+            for p in tmpd.glob(stem + "*"):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
 
     # Two clips at a time: one analyses (CPU) while the other renders (hardware encoder).
     import os
@@ -350,6 +437,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     workers = clip_workers(len(selected))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(lambda a: one(*a), enumerate(selected)))
+    import shutil
+    shutil.rmtree(output_dir.parent / "hooks_tmp", ignore_errors=True)
     output_paths: List[str] = [r for r in results if r]
     names = [str(output_dir / f"viral_clip_{i+1:02d}.mp4") for i in range(len(selected))]
     write_selected_segments(str(output_dir), "virality", selected,
