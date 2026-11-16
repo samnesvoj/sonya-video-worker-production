@@ -223,7 +223,7 @@ def test_reports_are_valid_telegram_html_and_fit_a_phone():
     t = real_daily()["text"]
     assert_tg_html(t)
     assert_narrow_and_aligned(t)
-    assert t.count("<pre>") == 4 and t.count("⚠") == 0               # minimum emoji
+    assert t.count("<pre>") == 7 and t.count("⚠") == 0               # 4 Vast + 3 Gemini/total; minimum emoji
 
 
 def test_summary_explains_gross_vs_report_total():

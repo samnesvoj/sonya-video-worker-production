@@ -13,6 +13,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Sequence
 
+from accounting import gemini as gm
 from accounting import tgformat as tf
 from accounting.money import D, MSK, month_bounds_msk
 from accounting.cbr import Rate
@@ -96,6 +97,48 @@ def day_figures(ledger, day: date) -> dict:
     return {"calc": calc, "est_other": est["other"], "videos": facts["videos"], "gpu_hours": facts["gpu_hours"], "has_facts": bool(ledger.get_facts(day))}
 
 
+# ------------------------------------------------------------------------------------------------ gemini
+def _g_usd(rub_v, r):
+    return None if r is None or not r else tf.dec(rub_v) / r
+
+
+def gemini_block(g: Dict[str, dict], r: Optional[Decimal], labels: Sequence[str], prices: gm.Prices,
+                 balance: Optional[str] = None) -> str:
+    """GEMINI: three periods in USD / RUB, requests, videos, RUB per video. Gemini is billed in RUB: USD = RUB / CBR rate."""
+    rows = [tf.Row(lab, tf.num(_g_usd(g[k]["rub"], r)), tf.num(g[k]["rub"])) for lab, k in zip(labels, ("day", "prev", "month"))]
+    m = g["month"]
+    pv = m["per_video"]
+    facts = [tf.Row(f"Запросов, {labels[0].lower()}", str(g["day"]["requests"])),
+             tf.Row("Запросов, месяц", str(m["requests"])),
+             tf.Row("Видео с Gemini, месяц", str(m["jobs"])),
+             tf.Row("RUB на видео, месяц", tf.num(pv) if pv is not None else tf.DASH)]
+    if prices.estimate:
+        note = (f"Тарифы — <b>оценка</b>: {tf.esc(tf.num(prices.rub_in_per_m, 0))} ₽ вход / {tf.esc(tf.num(prices.rub_out_per_m, 0))} ₽ "
+                "выход за 1 млн токенов (Timeweb не публикует цену модели).")
+    else:
+        note = (f"Тарифы Timeweb: {tf.esc(tf.num(prices.rub_in_per_m, 2))} ₽ вход / {tf.esc(tf.num(prices.rub_out_per_m, 2))} ₽ "
+                "выход за 1 млн токенов.")
+    lines = [tf.table(rows, ("USD", "RUB")), tf.table(facts), note]
+    if not m["requests"]:
+        lines.append("Запросов к Gemini в этом месяце пока нет.")
+    if m["no_tokens"]:
+        lines.append(f"Без счётчика токенов: {m['no_tokens']} запрос(ов) — в сумму вошли как 0.")
+    if balance is not None:
+        lines.append("Баланс Timeweb: " + balance)
+    return tf.block("GEMINI", *lines, sub="Timeweb")
+
+
+def grand_total_block(items: Sequence[tuple], r: Optional[Decimal]) -> str:
+    """items: [(label, vast_usd, gemini_rub)] -> «ВСЕГО РАСХОДЫ = VAST + GEMINI», one row per period."""
+    rows = []
+    for label, vast_usd, g_rub in items:
+        v_rub = tf.to_rub(vast_usd, r)
+        rub_total = None if v_rub is None else v_rub + tf.dec(g_rub)
+        usd_total = None if r is None else tf.dec(vast_usd) + tf.dec(g_rub) / r
+        rows.append(tf.Row(label, tf.num(usd_total), tf.num(rub_total)))
+    return tf.block("ВСЕГО РАСХОДЫ = VAST + GEMINI", tf.table(rows, ("USD", "RUB")))
+
+
 # ------------------------------------------------------------------------------------------------ daily
 def daily_numbers(ledger, day: date, rate: Optional[Rate], recon: Optional[dict], adjustments: Sequence[dict]) -> dict:
     f = day_figures(ledger, day)
@@ -105,6 +148,7 @@ def daily_numbers(ledger, day: date, rate: Optional[Rate], recon: Optional[dict]
     grand = gross + adj_total
     r = rate.value if rate is not None else None
     return {"day": day, "rate": rate, "r": r, "calc": c, "gross": gross, "adjustments": list(adjustments), "adj_total": adj_total,
+            "gemini": gm.periods(ledger, day, gm.Prices.from_env(), r), "g_prices": gm.Prices.from_env(),
             "grand": grand, "videos": f["videos"], "gpu_hours": f["gpu_hours"], "est_other": f["est_other"], "has_facts": f["has_facts"],
             "per_video": (grand / f["videos"]) if f["videos"] else None, "recon": recon}
 
@@ -137,6 +181,11 @@ def render_daily(n: dict, now: float, first_day: Optional[date] = None) -> str:
 
     recon = tf.block("СВЕРКА С VAST", *reconciliation_lines(n, first_day))
     blocks = [(head, False), (structure, False), (eff, False), (recon, False)]
+    if n.get("gemini") is not None:
+        d = n["day"]
+        blocks.append((gemini_block(n["gemini"], r, (f"За {_dm(d)}", f"За {_dm(d - timedelta(days=1))}", f"С {_dm(d.replace(day=1))}"),
+                                    n["g_prices"]), False))
+        blocks.append((grand_total_block([(f"За {_dm(d)}", n["grand"], n["gemini"]["day"]["rub"])], r), False))
     if n["adjustments"]:
         blocks.append((adjustments_block(n["adjustments"], r), True))
     blocks.append((rate_line(n["rate"], now), False))
@@ -193,7 +242,11 @@ def daily_payload(n: dict) -> dict:
             "calculated": {k: S(v) for k, v in n["calc"].items()}, "gross_usd": S(n["gross"]), "estimate_other": S(n["est_other"]),
             "adjustments": [dict(a) for a in n["adjustments"]], "adjustments_total": S(n["adj_total"]), "total_usd": S(n["grand"]),
             "total_rub": S(n["grand"] * r) if r is not None else None, "videos": n["videos"], "gpu_hours": S(n["gpu_hours"]),
-            "recon_status": (n["recon"] or {}).get("status")}
+            "recon_status": (n["recon"] or {}).get("status"),
+            **({"gemini_rub": S(n["gemini"]["day"]["rub"]), "gemini_requests": n["gemini"]["day"]["requests"],
+                "gemini_price_estimate": n["g_prices"].estimate,
+                "all_total_rub": S(n["grand"] * r + n["gemini"]["day"]["rub"]) if r is not None else None}
+               if n.get("gemini") is not None else {})}
 
 
 def build_daily(ledger, day: date, rate: Optional[Rate], utc_recon: Optional[dict] = None, adjustments: Optional[Sequence[dict]] = None,

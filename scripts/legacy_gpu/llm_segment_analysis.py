@@ -49,7 +49,15 @@ def _call_llm(prompt: str, max_tokens: int = 500, model: str = DEFAULT_MODEL) ->
         )
         if r.status_code != 200:
             return None
-        return r.json().get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        raw = r.json()
+        try:                                   # the accountant (scripts/shared/llm_usage.py): tokens, never text
+            from scripts.shared import llm_usage
+            u = raw.get("usage") if isinstance(raw.get("usage"), dict) else {}
+            llm_usage.record(provider="openrouter", model=raw.get("model") or model, prompt_version="legacy-segment",
+                             input_tokens=u.get("prompt_tokens"), output_tokens=u.get("completion_tokens"), cost_usd=u.get("cost"))
+        except Exception:
+            pass
+        return raw.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
     except Exception:
         return None
 

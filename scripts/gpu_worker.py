@@ -788,6 +788,11 @@ def process_job(job: dict, worker_id: str) -> None:
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"sonya_{job_id}_p{os.getpid()}_"))
     _job_tmp_enter(tmp_dir)
     _ACTIVE_JOB["id"] = job_id
+    try:                                       # Gemini tokens of this job -> S3 -> the accountant (llm_usage.py)
+        from scripts.shared import llm_usage
+        llm_usage.begin(job_id, mode, tmp_dir)
+    except Exception:  # noqa: BLE001
+        pass
     if not _FIRST_JOB["claimed"]:
         _FIRST_JOB["claimed"] = True
         _timeline("first_job_claimed", mode=mode)
@@ -1046,6 +1051,11 @@ def process_job(job: dict, worker_id: str) -> None:
         try:                                   # never delete the source while its S3 copy is still reading it
             from scripts.source_fetch import upload_done
             upload_done(_SRC_COPY.pop("got", None))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from scripts.shared import llm_usage
+            llm_usage.flush()
         except Exception:  # noqa: BLE001
             pass
         _ACTIVE_JOB["id"] = None

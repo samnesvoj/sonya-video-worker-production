@@ -278,3 +278,62 @@ def test_create_payload_public_repo_carries_no_github_credential():
     p = launcher.create_payload(CFG, "sonya-pool-x", "", ENV)
     assert "GITHUB_RELEASE_TOKEN" not in p["env"] and p["env"]["SONYA_RELEASE_SHA"] == CFG.release_sha
     assert launcher.create_payload(CFG, "sonya-pool-x", "tok", ENV)["env"]["GITHUB_RELEASE_TOKEN"] == "tok"
+
+
+# ------------------------------------------------------------------ two warms (owner 2026-11-16)
+def test_two_warms_are_primed_one_after_another_on_two_hosts_and_both_kept_paused():
+    mgr, vast, queue, store, clock = fleet(warm_instances=2)
+    vast.offers = [offer(1, 7), offer(2, 8, geo="Germany, DE")]
+    run_until(mgr, clock, 640)
+    run_until(mgr, clock, 700)
+    warms = [i for i in store.all() if i.role == "warm"]
+    assert len(warms) == 2 and all(store.get(w.id).state == "stopped" for w in warms)
+    assert len({w.machine_id for w in warms}) == 2
+    run_until(mgr, clock, 6 * 3600, step=600)                     # retention keeps both, no third one
+    assert vast.n("create") == 2 and vast.n("destroy") == 0
+    assert all(store.get(w.id).state == "stopped" for w in warms)
+    for k in range(4):                                            # 4 jobs = 2 x 2 slots: both warms wake, no create
+        queue.add(f"j{k}", ts=clock())
+    mgr.tick()
+    assert vast.n("resume") == 2 and vast.n("create") == 2
+
+
+def test_second_warm_respects_the_total_storage_cap():
+    # 40 GB x $0.20 x 82 = 656 RUB / month each: a 700 RUB total cap holds one warm only
+    mgr, vast, queue, store, clock = fleet(warm_instances=2, warm_storage_rub_total=700)
+    vast.offers = [offer(1, 7), offer(2, 8, geo="Germany, DE")]
+    run_until(mgr, clock, 1400)
+    assert [i.role for i in store.all()] == ["warm"] and vast.n("create") == 1
+    assert any(e["event"] == "prime_failed" for e in store.events())
+    # a cheap-storage host fits the rest of the cap -> the second warm
+    mgr2, vast2, queue2, store2, clock2 = fleet(warm_instances=2, warm_storage_rub_total=700)
+    vast2.offers = [offer(1, 7), offer(2, 8, storage=0.01, geo="Germany, DE")]
+    run_until(mgr2, clock2, 1400)
+    assert sorted(i.role for i in store2.all()) == ["warm", "warm"]
+
+
+def test_two_warms_under_load_the_first_two_idle_servers_become_the_warms():
+    mgr, vast, queue, store, clock = fleet(warm_instances=2, warm_prime=False)
+    vast.offers = [offer(1, 7), offer(2, 8, geo="Germany, DE"), offer(3, 9, geo="France, FR")]
+    for k in range(6):
+        queue.add(f"j{k}", ts=clock())
+    mgr.tick()
+    assert vast.n("create") == 3
+    mgr.tick()
+    labels = sorted(i.label for i in store.all())
+    owner = {f"j{k}": labels[k % 3] for k in range(6)}
+    for jid, lab in owner.items():
+        queue.set(jid, "mode_running", lab, clock())
+    run_until(mgr, clock, 120)
+    finish_all(queue, owner, clock)
+    run_until(mgr, clock, 120)
+    assert vast.n("stop") == 2 and vast.n("destroy") == 1
+    assert sorted(i.role for i in store.all() if i.state == "stopped") == ["warm", "warm"]
+
+
+def test_warm_instances_env_allows_two_not_three():
+    import pytest
+    c = FleetConfig.from_env({"SONYA_WARM_INSTANCES": "2", "SONYA_WARM_STORAGE_RUB_TOTAL": "650"})
+    assert (c.warm_instances, c.warm_storage_rub_total) == (2, 650)
+    with pytest.raises(ValueError):
+        FleetConfig.from_env({"SONYA_WARM_INSTANCES": "3"})

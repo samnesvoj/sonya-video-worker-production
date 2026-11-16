@@ -101,7 +101,11 @@ def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: n
             bal = Decimal(bal) if bal is not None else None
         except Exception:  # noqa: BLE001
             bal = None
-        return build_summary(fleet.store, svc.rates, now, bal, svc.ledger)
+        try:
+            import_gemini(svc.ledger, env)     # /vast shows the calls of the last minutes too
+        except Exception as exc:  # noqa: BLE001
+            log.warning("import_gemini_error %s", type(exc).__name__)
+        return build_summary(fleet.store, svc.rates, now, bal, svc.ledger, timeweb_balance(env))
 
     api = AccountingApi(svc, _accounting_secret(env), summary=summary)
 
@@ -139,6 +143,10 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
                     import_confirmed(fleet, ledger)   # a charges-API hiccup must not stop the reports
                 except Exception as exc:  # noqa: BLE001
                     log.warning("import_confirmed_error %s", type(exc).__name__)
+                try:
+                    import_gemini(ledger)             # Gemini token counts from the workers (S3) -> ledger
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("import_gemini_error %s", type(exc).__name__)
                 for k in svc.run_due(time.time()):
                     log.info("report_built %s", k)
                 from accounting.summary import check_alert
@@ -158,6 +166,40 @@ def import_confirmed(fleet: FleetManager, ledger) -> None:  # pragma: no cover
     now = time.time()
     rows = fleet.vast.charges(int(now - 3 * 86400), int(now))
     vast_billing.import_charges(ledger, rows, now)
+
+
+_GEMINI_LAST = {"t": 0.0}
+
+
+def import_gemini(ledger, env=os.environ, every: float = 300.0) -> int:  # pragma: no cover - S3 on the VPS
+    """Worker JSONs (scripts/shared/llm_usage.py) -> ledger.llm_usage, at most every 5 min (idempotent)."""
+    now = time.time()
+    if now - _GEMINI_LAST["t"] < every:
+        return 0
+    _GEMINI_LAST["t"] = now
+    bucket = env.get("S3_BUCKET_NAME") or env.get("S3_BUCKET")
+    if not bucket or not env.get("S3_ACCESS_KEY_ID"):
+        return 0
+    import boto3
+    from accounting import gemini
+    client = boto3.client("s3", endpoint_url=env.get("S3_ENDPOINT_URL") or None, region_name=env.get("S3_REGION") or None,
+                          aws_access_key_id=env["S3_ACCESS_KEY_ID"], aws_secret_access_key=env.get("S3_SECRET_ACCESS_KEY"))
+    n = gemini.import_from_s3(ledger, client, bucket, env.get("SONYA_LLM_USAGE_PREFIX") or gemini.DEFAULT_PREFIX, now)
+    if n:
+        log.info("gemini_usage_imported calls=%d", n)
+    return n
+
+
+def timeweb_balance(env=os.environ):  # pragma: no cover - network
+    """Timeweb Cloud account balance (RUB) if a Cloud API token file is configured; the Gemini key cannot read it."""
+    from accounting import gemini
+    f = env.get("TIMEWEB_CLOUD_TOKEN_FILE", "/etc/sonya-fleet/timeweb_cloud_token")
+    try:
+        if not Path(f).exists() or Path(f).stat().st_mode & 0o077:
+            return None
+        return gemini.timeweb_balance_text(Path(f).read_text().strip())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def status(state_dir: Path = STATE_DIR) -> int:

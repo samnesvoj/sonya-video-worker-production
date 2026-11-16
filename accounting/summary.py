@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, Optional
 
+from accounting import gemini as gm
 from accounting import reports
 from accounting import tgformat as tf
 from accounting.money import D, UTC, month_bounds_msk, msk_date_of, msk_day_bounds
@@ -41,7 +42,8 @@ def gpu_hours_by_class(store, r: dict) -> Dict[str, Decimal]:
     return dict(out)
 
 
-def summary_numbers(store, rates, now: float, balance_usd: Optional[Decimal] = None, ledger=None) -> dict:
+def summary_numbers(store, rates, now: float, balance_usd: Optional[Decimal] = None, ledger=None,
+                    timeweb_balance: Optional[str] = None) -> dict:
     today = msk_date_of(now)
     yday = today - timedelta(days=1)
     try:
@@ -67,6 +69,9 @@ def summary_numbers(store, rates, now: float, balance_usd: Optional[Decimal] = N
                                   (first.isoformat(), datetime.fromtimestamp(now, UTC).date().isoformat())):
             conf += D(k[0])
         n["conf_month"] = conf
+        n["g_prices"] = gm.Prices.from_env()
+        n["gemini"] = gm.periods(ledger, today, n["g_prices"], n["r"])
+        n["timeweb_balance"] = timeweb_balance
     return n
 
 
@@ -125,14 +130,21 @@ def render_summary(n: dict, now: float) -> str:
         else:
             lines.append(f"Подтверждённых списаний Vast за UTC {tf.esc(reports._fmt_date(rc['day']))} пока нет.")
         blocks.append((tf.block("СВЕРКА С VAST", *lines), True))
+    if n.get("gemini") is not None:
+        g = n["gemini"]
+        blocks.append((reports.gemini_block(g, r, ("Сегодня", "Вчера", "С начала месяца"), n["g_prices"],
+                                            n.get("timeweb_balance") or "по API не подключён"), False))
+        blocks.append((reports.grand_total_block([("Сегодня", n["t"], g["day"]["rub"]), ("Вчера", n["y"], g["prev"]["rub"]),
+                                                  ("С начала месяца", n["m"], g["month"]["rub"])], r), False))
     bal = n["balance"]
     blocks.append((tf.title("БАЛАНС VAST") + ": " + (tf.esc(tf.pair(bal, R(bal))) if bal is not None else "не удалось получить"), False))
     blocks.append((reports.rate_line(n["rate"], now), False))
     return tf.assemble(blocks)
 
 
-def build_summary(store, rates, now: float, balance_usd: Optional[Decimal] = None, ledger=None) -> str:
-    return render_summary(summary_numbers(store, rates, now, balance_usd, ledger), now)
+def build_summary(store, rates, now: float, balance_usd: Optional[Decimal] = None, ledger=None,
+                  timeweb_balance: Optional[str] = None) -> str:
+    return render_summary(summary_numbers(store, rates, now, balance_usd, ledger, timeweb_balance), now)
 
 
 def check_alert(ledger, store, rates, now: float, threshold_rub: Decimal) -> Optional[str]:

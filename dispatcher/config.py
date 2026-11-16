@@ -38,6 +38,9 @@ class FleetConfig:
     # DESTROYED (not stopped) when idle. A warm that cannot resume (host busy) is destroyed and the next instance becomes warm.
     warm_instances: int = 1                  # SONYA_WARM_INSTANCES (0 = old behaviour: every instance is burst-like)
     allow_old_cpu: bool = True               # SONYA_ALLOW_OLD_CPU - last-resort class 2 (Xeon E5 etc.) when no modern-CPU offer
+    warm_storage_rub_total: int = 0          # SONYA_WARM_STORAGE_RUB_TOTAL: all warms' paused disks together <= this RUB/month
+                                             # (0 = no total cap; each warm is still under max_storage_gb_month). Owner 2026-11-16:
+                                             # 2 warms ~330-650 RUB/month -> 650 in prod
     warm_fallback: bool = False              # SONYA_WARM_FALLBACK - no European RTX 3060 offered: may a European fallback class
                                              # (4060 Ti / A4000 ..., same storage cap) be the warm? Owner decided 3060 -> off
     warm_old_cpu: bool = False               # SONYA_WARM_OLD_CPU - no class 0/1 host in Europe: a class-2 (old CPU) one may be the warm
@@ -138,7 +141,8 @@ class FleetConfig:
             max_instances=_int(e, "SONYA_FLEET_MAX_INSTANCES", 3, lo=1, hi=8),
             jobs_per_instance=_int(e, "SONYA_JOBS_PER_INSTANCE", 2, lo=1, hi=4),
             slot2_min_cpu_cores=float(_int(e, "SONYA_SLOT2_MIN_CPU_CORES", 0, lo=0, hi=256)),
-            warm_instances=_int(e, "SONYA_WARM_INSTANCES", 1, lo=0, hi=1),
+            warm_instances=_int(e, "SONYA_WARM_INSTANCES", 1, lo=0, hi=2),
+            warm_storage_rub_total=_int(e, "SONYA_WARM_STORAGE_RUB_TOTAL", 0, lo=0, hi=100000),
             warm_prime=e.get("SONYA_WARM_PRIME", "true").lower() in TRUE,
             warm_old_cpu=e.get("SONYA_WARM_OLD_CPU", "false").lower() in TRUE,
             warm_min_cpu_cores=float(_int(e, "SONYA_WARM_MIN_CPU_CORES", 12, lo=4, hi=256)),
