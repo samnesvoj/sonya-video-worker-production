@@ -132,11 +132,11 @@ def test_finish_and_join_hook_plus_clip(tmp_path, monkeypatch):
     _clip(main, 6.0, "blue")
     fin = tmp_path / "hf.mp4"
     hooks.finish_teaser(str(raw), str(fin), hooks.HookConfig(), FF)
-    assert abs(_dur(fin) - 2.4) < 0.15
+    assert abs(_dur(fin) - (2.4 + hooks.HookConfig().white_hold_sec)) < 0.15   # + the white hold
     out = tmp_path / "o.mp4"
     how = hooks.join(str(fin), str(main), str(out), FF)
     assert how in ("copy", "reencode")
-    assert abs(_dur(out) - 8.4) < 0.3
+    assert abs(_dur(out) - (8.4 + hooks.HookConfig().white_hold_sec)) < 0.3
     # the last hook frame is the white flash
     png = tmp_path / "f.png"
     subprocess.run([FF, "-v", "error", "-y", "-sseof", "-0.04", "-i", str(fin), "-frames:v", "1", str(png)], check=True)
@@ -200,3 +200,18 @@ def test_teaser_report_is_plain_json_even_from_numpy_maths(tmp_path):
     write_selected_segments(str(tmp_path), "virality", [seg], [str(tmp_path / "viral_clip_01.mp4")])
     d = json.loads((tmp_path / "selected_segments.json").read_text(encoding="utf-8"))
     assert d["segments"][0]["teaser"]["score"] == 2.5
+
+
+@pytest.mark.skipif(not FF, reason="ffmpeg")
+def test_white_hold_is_white_and_configurable(tmp_path, monkeypatch):
+    monkeypatch.setenv("SONYA_RENDER_ARGS", json.dumps(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]))
+    raw = tmp_path / "h.mp4"
+    _clip(raw, 2.0, "red")
+    monkeypatch.setenv("SONYA_HOOK_WHITE_HOLD", "1.0")
+    fin = tmp_path / "hf.mp4"
+    hooks.finish_teaser(str(raw), str(fin), hooks.HookConfig(), FF)
+    assert abs(_dur(fin) - 3.0) < 0.15
+    png = tmp_path / "w.png"   # middle of the hold: fully white
+    subprocess.run([FF, "-v", "error", "-y", "-ss", "2.5", "-i", str(fin), "-frames:v", "1", str(png)], check=True)
+    import cv2
+    assert cv2.imread(str(png)).mean() > 245
