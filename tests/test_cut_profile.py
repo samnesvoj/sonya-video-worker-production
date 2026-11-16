@@ -39,8 +39,13 @@ def test_site_job_gets_the_desktop_settings(video, tmp_path):
 def test_hooks_and_styles_map_like_the_site(video, tmp_path):
     p = dict(SITE_VIRALITY_PARAMS, clipType="hooks", settings={"subtitleStyle": "basic"})
     out = cp.apply_profile("virality", p, video, str(tmp_path), ass_supported=True, editor=True)
-    assert out["story"] == {"strategy": "hooks", "editor": True}
+    # owner 2026-11-16: hooks = the virality clips (same strategy / editor) + a hook in front of each
+    assert out["story"] == {"strategy": "qa", "editor": True} and out["teaser"] is True
     assert out["crop"]["subtitles"]["style"] == "minimal" and "font" not in out["crop"]["subtitles"]
+    viral = cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS), video, str(tmp_path), ass_supported=True, editor=True)
+    assert "teaser" not in viral and viral["story"] == out["story"]
+    assert cp.apply_profile("virality", dict(SITE_VIRALITY_PARAMS, hook=1), video, str(tmp_path),
+                            ass_supported=True, editor=False)["teaser"] is True
 
 
 def test_legacy_settings_in_a_job_no_longer_select_the_old_path(video, tmp_path):

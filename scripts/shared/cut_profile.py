@@ -8,7 +8,7 @@ Cut settings (``selection`` / ``crop``). This module turns every such job into t
 on the Mac mini (the virality runner runs nothing else):
 
   * selection ``story`` (cut-local-rank-v3: true sentences, question → whole answer, promo never a clip),
-    strategy ``qa`` (``hooks`` when the user picked Hooks); the LLM editor (Gemini via Timeweb / OpenRouter)
+    strategy ``qa`` (Hooks = the same + a hook in front, scripts/shared/hooks.py); the LLM editor (Gemini via Timeweb / OpenRouter)
     re-ranks the pool when a provider key is configured, else the local order is used;
   * crop ``tracked`` / ``per_clip`` / ``smart``: per clip cuts + YuNet faces, full-screen 9:16, split for two;
   * subtitles burned (ASS), font Dela Gothic One for the Viral style, never a hook title on top.
@@ -259,7 +259,12 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
     out = dict(params)
     clip_type = str(params.get("clipType") or "").lower()
     settings = params.get("settings") if isinstance(params.get("settings"), dict) else {}
-    story = {"strategy": "hooks" if clip_type == "hooks" else "qa"}
+    # Hooks (owner 2026-11-16: «просто режим вирал + добавить именно хук»): the SAME clips as virality (strategy qa,
+    # same editor prompt and pool) + a 1.5-3 s hook in front of each (scripts/shared/hooks.py). params hook=1 / teaser
+    # asks for the same on a virality job; SONYA_HOOKS_TEASER=off on the worker turns hooks jobs into plain virality.
+    story = {"strategy": "qa"}
+    if clip_type == "hooks" or str(params.get("hook") or "").lower() in ("1", "true", "on", "yes"):
+        out["teaser"] = params.get("teaser") if isinstance(params.get("teaser"), dict) else True
     if editor if editor is not None else editor_available():
         story["editor"] = True
     out["selection"] = "story"
@@ -284,6 +289,7 @@ def apply_profile(mode: str, params: Dict[str, Any], input_video_path: str, work
         ensure_render_args()
     except Exception as exc:         # noqa: BLE001 - the renderer's libx264 default still works
         logger.warning("[cut_profile] encoder probe failed: %s", exc)
-    logger.info("[cut_profile] %s: strategy=%s editor=%s subtitles=%s max_clips=%d", PROFILE_VERSION, story["strategy"],
-                bool(story.get("editor")), (crop.get("subtitles") or {}).get("style", "off"), out["max_clips"])
+    logger.info("[cut_profile] %s: strategy=%s hooks=%s editor=%s subtitles=%s max_clips=%d", PROFILE_VERSION,
+                out["story"]["strategy"], bool(out.get("teaser")), bool(story.get("editor")),
+                (crop.get("subtitles") or {}).get("style", "off"), out["max_clips"])
     return out
