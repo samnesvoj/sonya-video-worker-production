@@ -863,10 +863,12 @@ def track_graph(track: Dict[str, Any]) -> str:
 
 def render_tracked(input_video_path: str, output_path: str, start_time: float, duration: float,
                    track: Dict[str, Any], encoder_args: Optional[List[str]] = None,
-                   subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None) -> str:
+                   subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None,
+                   audio_gain_db: Optional[float] = None) -> str:
     """Single ffmpeg pass: accurate seek → crop along the track → 1080x1920
     [→ burn-in ASS subtitles, same pass]. A failed / hung NVENC encode is re-run on libx264 (cut_profile.run_encode);
-    ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s."""
+    ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s.
+    ``audio_gain_db``: one linear gain + limiter on the audio (scripts/shared/loudness.py), None = untouched."""
     vf = track_graph(track)
     cwd = None
     # ffmpeg runs from the subtitle directory (below): relative source / output paths would point there
@@ -891,8 +893,10 @@ def render_tracked(input_video_path: str, output_path: str, start_time: float, d
     from scripts.shared.cut_profile import encode_timeout, run_encode
     make = lambda enc: [ffmpeg_bin(), "-y", "-hide_banner", "-loglevel", "error", "-nostdin",          # noqa: E731
                         "-ss", f"{max(0.0, start_time):.3f}", "-i", input_video_path, "-t", f"{duration:.3f}",
-                        "-vf", vf, *enc,
+                        "-vf", vf, *enc, *af,
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", output_path]
+    from scripts.shared.loudness import audio_filter
+    af = ["-af", audio_filter(audio_gain_db)] if audio_filter(audio_gain_db) else []
     enc = encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]
     result, used, secs = run_encode(make, enc, timeout=encode_timeout(duration), cwd=cwd, what=Path(output_path).name)
     if report is not None:

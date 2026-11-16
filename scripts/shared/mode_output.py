@@ -38,7 +38,8 @@ _BOUNDARY_KEYS = ("semantic_start", "semantic_end", "render_start", "render_end"
                   "game_chat_overlap", "webcam_detector_box",
                   # streamer v2 dynamics: jump cuts, hook title, SONYA's own ad
                   "tight_sec", "jump_cuts", "body_sec", "cut_sec", "output_duration", "render_pieces",
-                  "sonya_ad", "sonya_ad_gain_db", "clip_lufs", "ad_lufs")
+                  "sonya_ad", "sonya_ad_gain_db", "clip_lufs", "ad_lufs",
+                  "audio_gain_db")     # even loudness, scripts/shared/loudness.py
 SCHEMA_VERSION = 1
 
 
