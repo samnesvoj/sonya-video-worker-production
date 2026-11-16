@@ -50,7 +50,8 @@ def parse_integrated(stderr: str) -> Optional[float]:
     found = re.findall(r"I:\s+(-?[0-9.]+|-inf)\s+LUFS", stderr or "")
     if not found or found[-1] == "-inf":
         return None
-    return float(found[-1])
+    v = float(found[-1])
+    return None if v > -1.0 else v      # "0.0" = the filter never ran (no real clip is that loud)
 
 
 def measure(ffmpeg: str, path: str, start: float = 0.0, duration: Optional[float] = None,
@@ -59,11 +60,15 @@ def measure(ffmpeg: str, path: str, start: float = 0.0, duration: Optional[float
     cmd = [ffmpeg, "-hide_banner", "-nostdin", "-nostats", "-ss", f"{max(0.0, start):.3f}", "-i", path]
     if duration:
         cmd += ["-t", f"{duration:.3f}"]
-    cmd += ["-vn", "-sn", "-af", "ebur128=framelog=quiet", "-f", "null", "-"]
+    # framelog=verbose (not "quiet": Debian ffmpeg 5.1 in the Vast image rejects it and prints a bogus "I: 0.0 LUFS")
+    cmd += ["-vn", "-sn", "-af", "ebur128=framelog=verbose", "-f", "null", "-"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except Exception as exc:     # noqa: BLE001 - loudness is a polish step, never a reason to lose a clip
         logger.warning("[loudness] measure failed: %s", exc)
+        return None
+    if r.returncode != 0:
+        logger.warning("[loudness] ffmpeg ebur128 failed (rc=%s) - clip audio left untouched", r.returncode)
         return None
     return parse_integrated(r.stderr)
 

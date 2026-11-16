@@ -36,6 +36,15 @@ def test_parse_summary():
     assert L.parse_integrated(err) == -17.3
     assert L.parse_integrated("I: -inf LUFS") is None
     assert L.parse_integrated("") is None
+    # Debian ffmpeg 5.1 (Vast image): a filter that failed to init still prints a 0.0 summary -> must not read as "loud"
+    assert L.parse_integrated("Summary:\n  Integrated loudness:\n    I:           0.0 LUFS\n") is None
+
+
+def test_measure_failed_ffmpeg_is_none(monkeypatch):
+    class R:
+        returncode, stderr = 1, "    I:           0.0 LUFS\n"
+    monkeypatch.setattr(L.subprocess, "run", lambda *a, **k: R())
+    assert L.measure("ffmpeg", "x.mp4", 0, 5) is None
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not installed")
