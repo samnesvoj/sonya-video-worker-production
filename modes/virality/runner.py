@@ -377,14 +377,16 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         gain = seg["audio_gain_db"]
         if filler:
             tmp = str(Path(out).with_suffix(".top.mp4"))
-            render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg, audio_gain_db=gain)
+            render_tracked(input_video_path, tmp, start, dur, track, subtitle_path=None, report=seg, audio_gain_db=gain,
+                           freeze_edges=True)
             if split_filler.apply(tmp, out, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=seg,
                                   ffmpeg=ffmpeg_bin()):
                 os.remove(tmp)
             else:
                 os.replace(tmp, out)
         else:
-            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg, audio_gain_db=gain)
+            render_tracked(input_video_path, out, start, dur, track, subtitle_path=sub_path, report=seg, audio_gain_db=gain,
+                           freeze_edges=True)
         return out
 
     def one(i: int, seg: Dict[str, Any]) -> Optional[str]:

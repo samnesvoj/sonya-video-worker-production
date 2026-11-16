@@ -861,15 +861,50 @@ def track_graph(track: Dict[str, Any]) -> str:
     return vf
 
 
+EDGE_HEAD_MAX = 0.6     # a shot cut this close to the clip start: the old shot only flashes
+EDGE_TAIL_MAX = 0.45    # … this close to the end: the next shot only flashes
+
+
+def edge_freeze(cuts: Optional[List[float]], duration: float) -> Tuple[float, float]:
+    """(head, tail) seconds of video to replace by a still: production 2026-11-15, 10 of 40 clips opened with
+    0.1-0.5 s of the PREVIOUS shot (speech starts over the source's J-cut) and 7 ended on a flash of the next one.
+    head = the first cut if <= EDGE_HEAD_MAX s in; tail = duration - last cut if <= EDGE_TAIL_MAX. Audio untouched.
+    SONYA_EDGE_FREEZE=off -> (0, 0)."""
+    if os.environ.get("SONYA_EDGE_FREEZE", "on").strip().lower() in ("off", "0", "false", "no"):
+        return 0.0, 0.0
+    cs = sorted(float(c) for c in (cuts or []) if 0.0 < float(c) < duration)
+    head = cs[0] if cs and cs[0] <= EDGE_HEAD_MAX else 0.0
+    tail = duration - cs[-1] if cs and duration - cs[-1] <= EDGE_TAIL_MAX and cs[-1] > head else 0.0
+    if duration - head - tail < 1.0:                    # a tiny clip: leave it alone
+        return 0.0, 0.0
+    return round(head, 3), round(tail, 3)
+
+
+def edge_freeze_graph(head: float, tail: float, duration: float) -> str:
+    """-vf tail (after the crop, before subtitles): hold the new shot's first frame over the head and the old shot's
+    last frame over the tail, same length and timing."""
+    if head <= 0 and tail <= 0:
+        return ""
+    end = duration - tail
+    return (f",trim=start={head:.3f}:end={end:.3f},setpts=PTS-STARTPTS,"
+            f"tpad=start_duration={head:.3f}:start_mode=clone:stop_duration={tail:.3f}:stop_mode=clone")
+
+
 def render_tracked(input_video_path: str, output_path: str, start_time: float, duration: float,
                    track: Dict[str, Any], encoder_args: Optional[List[str]] = None,
                    subtitle_path: Optional[str] = None, report: Optional[Dict[str, Any]] = None,
-                   audio_gain_db: Optional[float] = None) -> str:
+                   audio_gain_db: Optional[float] = None, freeze_edges: bool = False) -> str:
     """Single ffmpeg pass: accurate seek → crop along the track → 1080x1920
     [→ burn-in ASS subtitles, same pass]. A failed / hung NVENC encode is re-run on libx264 (cut_profile.run_encode);
     ``report`` (if given) gets render_encoder ("nvenc" | "cpu" | "nvenc->cpu") and render_s.
-    ``audio_gain_db``: one linear gain + limiter on the audio (scripts/shared/loudness.py), None = untouched."""
+    ``audio_gain_db``: one linear gain + limiter on the audio (scripts/shared/loudness.py), None = untouched.
+    ``freeze_edges``: a shot cut in the first 0.6 s / last 0.45 s (track["cuts"]) is hidden by a still (edge_freeze)."""
     vf = track_graph(track)
+    if freeze_edges:
+        head, tail = edge_freeze(track.get("cuts"), duration)
+        vf += edge_freeze_graph(head, tail, duration)
+        if report is not None and (head or tail):
+            report["edge_freeze"] = [head, tail]
     cwd = None
     # ffmpeg runs from the subtitle directory (below): relative source / output paths would point there
     input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
