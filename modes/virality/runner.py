@@ -46,6 +46,9 @@ def run(
         progress_callback=progress_callback,
     )
 
+    if str(params.get("clipType") or "").lower() == "trailer":
+        return _trailer(input_video_path, enrichment, params, output_dir)
+
     clips, selection = _select_and_compose(
         input_video_path=input_video_path,
         enrichment=enrichment,
@@ -61,6 +64,26 @@ def run(
         "warnings": enrichment.get("warnings", []),
         "selection": selection,
     }
+
+
+def _trailer(input_video_path: str, enrichment: Dict[str, Any], params: Dict[str, Any], output_dir: Path) -> Dict[str, Any]:
+    """Trailer (site card «Трейлер», clipType trailer; admins only until the owner approves — the API decides who may
+    create it): one storyline of the film told by its hero → ~60–100 s trailer + up to 2 shorts
+    (scripts/shared/trailer). SONYA_TRAILER=off on the worker refuses these jobs with a clear error."""
+    from scripts.shared.trailer import pipeline
+    if not pipeline.enabled():
+        raise RuntimeError("TRAILER_DISABLED: trailer jobs are switched off on this worker (SONYA_TRAILER=off)")
+    words = enrichment.get("word_timestamps") or []
+    if not words:
+        raise RuntimeError("ASR_FAILED: no word timestamps - the trailer needs the speech of the film")
+    from scripts.shared.profiling import stage
+    with stage("trailer"):
+        res = pipeline.run(input_video_path, words, str(output_dir), str(output_dir.parent / "trailer_work"), params)
+    meta = res["meta"]
+    return {"clips": res["clips"], "mode": "virality", "warnings": enrichment.get("warnings", []),
+            "selection": {"selection": "trailer", "count": len(res["clips"]), "version": meta["version"],
+                          "llm": {"cost_rub_est": meta["llm"]["rub"]}, "title": meta["title"],
+                          "voice": meta["voice"], "timings": meta["timings"]}}
 
 
 def _select_and_compose(
