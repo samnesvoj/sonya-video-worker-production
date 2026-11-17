@@ -346,7 +346,19 @@ class Relay:
             self._st(job_id, state="claimed")
             ka.start()
             os.environ["SONYA_YTDLP_MAX_HEIGHT"] = str(req.get("max_height") or "1080")
-            got = fetch_source(req["sf"], req.get("mode") or "virality", req["s3_key"], wd, progress=prog)
+            for attempt in range(3):
+                try:
+                    got = fetch_source(req["sf"], req.get("mode") or "virality", req["s3_key"], wd, progress=prog)
+                    break
+                except SourceFetchError as exc:
+                    # a dropped connection mid-download ("x bytes read, y more expected") is worth another go here
+                    # before the job is handed to the slower relay
+                    if attempt == 2 or exc.code not in ("SOURCE_DOWNLOAD_FAILED", "SOURCE_FORBIDDEN"):
+                        raise
+                    logger.warning("[yt_relay] job=%s %s, retry %d", job_id, exc.code, attempt + 1)
+                    shutil.rmtree(wd, ignore_errors=True)
+                    wd.mkdir(parents=True, exist_ok=True)
+                    time.sleep(10)
             stop.set()
             ka.join(5)
             self._st(job_id, state="done", duration=got.get("duration"), bytes=got.get("bytes"),
