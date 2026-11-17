@@ -498,11 +498,12 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         stem = f"viral_clip_{i+1:02d}_hook"
         raw, fin, joined = (str(tmpd / f"{stem}.mp4"), str(tmpd / f"{stem}_fx.mp4"), str(tmpd / f"{stem}_joined.mp4"))
         rep: Dict[str, Any] = {"audio_gain_db": seg.get("audio_gain_db"),     # same loudness step as its clip
+                               **({"fps": seg["fps"]} if seg.get("fps") else {}),
                                **({"title_top": seg["title"]} if seg.get("story") and seg.get("title") else {})}
         try:
             piece(rep, raw, float(tz["start"]), float(tz["duration"]))
             with stage("clip:hook_join"):
-                hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin())
+                hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin(), match=out)
                 offset = float((hooks._probe(fin).get("format") or {}).get("duration") or tz["duration"])
                 how = hooks.join(fin, out, joined, ffmpeg_bin())
             os.replace(joined, out)
