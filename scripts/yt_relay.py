@@ -171,6 +171,8 @@ def fetch_via_relay(job_id: str, sf: Dict[str, Any], mode: str, s3_key: str, wor
             alive = {n for n, h in hbs.items() if h.get("fresh")}
             failed = {n: s for n, s in sts.items() if s.get("state") == "failed"}
             running = [n for n, s in sts.items() if s.get("state") not in TERMINAL and now - float(s.get("ts") or 0) <= STATUS_STALE]
+            if any(h.get("fresh") and job_id in (h.get("active") or []) for h in hbs.values()):
+                last_move = now                           # a live relay holds the job (its heartbeat says so)
             if failed:
                 for code in _USER_CODES_ORDER:            # a real answer about the video: no other relay changes it
                     for s in failed.values():
@@ -271,30 +273,51 @@ class Relay:
         from scripts.source_fetch import SourceFetchError, fetch_source
         job_id = req["job_id"]
         wd = Path(tempfile.mkdtemp(prefix=f"ytr_{job_id[:8]}_", dir=str(self.work_root)))
-        last = {"t": 0.0}
+        last = {"t": 0.0, "pct": None}
+        stop = threading.Event()
 
         def prog(pct: float) -> None:
+            last["pct"] = round(float(pct), 1)
             if time.time() - last["t"] > 10:
                 last["t"] = time.time()
                 try:
-                    self._st(job_id, state="downloading", pct=round(float(pct), 1))
+                    self._st(job_id, state="downloading", pct=last["pct"])
                 except Exception:  # noqa: BLE001
                     pass
+
+        def keepalive() -> None:
+            # a segment download (ffmpeg) reports no progress: the status still moves every 30 s while we work
+            while not stop.wait(30):
+                if time.time() - last["t"] >= 25:
+                    last["t"] = time.time()
+                    try:
+                        self._st(job_id, state="downloading", pct=last["pct"])
+                    except Exception:  # noqa: BLE001
+                        pass
         t0 = time.time()
+        ka = threading.Thread(target=keepalive, name=f"relay-ka-{job_id[:8]}", daemon=True)
         try:
             self._st(job_id, state="claimed")
+            ka.start()
             os.environ["SONYA_YTDLP_MAX_HEIGHT"] = str(req.get("max_height") or "1080")
             got = fetch_source(req["sf"], req.get("mode") or "virality", req["s3_key"], wd, progress=prog)
+            stop.set()
+            ka.join(5)
             self._st(job_id, state="done", duration=got.get("duration"), bytes=got.get("bytes"),
                      seconds=round(time.time() - t0, 1))
             logger.info("[yt_relay] done job=%s %.0f s %d bytes", job_id, time.time() - t0, got.get("bytes") or 0)
         except SourceFetchError as exc:
+            stop.set()
+            ka.join(5)
             logger.warning("[yt_relay] failed job=%s code=%s", job_id, exc.code)
             self._st(job_id, state="failed", code=exc.code, message=exc.message, seconds=round(time.time() - t0, 1))
         except Exception as exc:  # noqa: BLE001
+            stop.set()
+            ka.join(5)
             logger.exception("[yt_relay] crashed job=%s", job_id)
             self._st(job_id, state="failed", code="RELAY_ERROR", message=str(exc)[:200])
         finally:
+            stop.set()
             shutil.rmtree(wd, ignore_errors=True)
             with self.lock:
                 self.active.pop(job_id, None)

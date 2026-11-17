@@ -145,8 +145,17 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
             raise SourceFetchError("SOURCE_TRIM_RANGE", "Начало отрезка позже конца видео. Выберите отрезок заново.")
         lim = url_ingest.long_source_overrides(trim or total or cap, mode)
         _check_free_space(work_dir, trim or total)
-        path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None,
-                                               trim_start=start, **lim)
+        via_full = int(os.environ.get("SONYA_YT_TRIM_VIA_FULL_MAX_SEC", "0") or 0)
+        if trim and platform == "youtube" and total and total <= via_full:
+            # Throttled relay (Mac mini, ~120 KB/s per connection): a segment comes through ffmpeg on ONE connection
+            # (5 min of 1080p took >8 min); the whole video in 16 parallel fragments + a local cut is faster.
+            _check_free_space(work_dir, total)
+            path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode,
+                                                   **url_ingest.long_source_overrides(total, mode))
+            path = url_ingest.trim_file(path, int(trim), start=int(start or 0))
+        else:
+            path, _ext = url_ingest.download_video(url, platform, progress_cb=progress, mode=mode, trim_sec=trim or None,
+                                                   trim_start=start, **lim)
     except url_ingest.DownloadLimitExceeded as exc:
         raise SourceFetchError("SOURCE_TOO_LONG", exc.user_message) from exc
     except url_ingest.UnsafeUrlError as exc:

@@ -151,3 +151,20 @@ def test_low_disk_fails_before_download(monkeypatch, tmp_path):
     with pytest.raises(source_fetch.SourceFetchError) as e:
         source_fetch._check_free_space(tmp_path, 4740)            # 79 min needs ~6.7 GB
     assert e.value.code == "SOURCE_NO_SPACE"
+
+
+def test_throttled_relay_downloads_whole_video_then_cuts(monkeypatch, tmp_path):
+    # Mac mini relay (SONYA_YT_TRIM_VIA_FULL_MAX_SEC): a segment via ffmpeg runs on one throttled connection
+    up = []
+    _patch(monkeypatch, tmp_path, 300, up)
+    monkeypatch.setenv("SONYA_YT_TRIM_VIA_FULL_MAX_SEC", "5400")
+    monkeypatch.setattr(url_ingest, "probe", lambda *a, **k: {"duration": 1800})
+    f = str(tmp_path / "dl" / "v.mp4")
+    seen = {}
+    monkeypatch.setattr(url_ingest, "download_video",
+                        lambda *a, **k: (seen.update(trim=k.get("trim_sec")), (f, ".mp4"))[1])
+    monkeypatch.setattr(url_ingest, "trim_file", lambda p, sec, start=0: (seen.update(cut=(sec, start)), p)[1])
+    from scripts.source_fetch import fetch_source
+    fetch_source({"url": "https://youtu.be/abcdefghijk", "platform": "youtube", "max_source_sec": 600,
+                  "trim_start_sec": 60, "trim_end_sec": 360}, "virality", "k", tmp_path / "w")
+    assert seen["trim"] is None and seen["cut"] == (300, 60)
