@@ -42,7 +42,29 @@ def build_fleet(env=os.environ) -> FleetManager:
     cfg = FleetConfig.from_env(dict(env))
     STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     return FleetManager(cfg, FleetStore(str(STATE_DIR / "fleet.db")), VastClient(_vast_key(env), dry_run=cfg.dry_run),
-                        PostgresQueueView(env["DATABASE_URL"], dedicated=cfg.dedicated), release_token_provider(cfg.release_repo, env), env)
+                        PostgresQueueView(env["DATABASE_URL"], dedicated=cfg.dedicated), release_token_provider(cfg.release_repo, env), env,
+                        nvenc_missing=_nvenc_missing_checker(env))
+
+
+def _nvenc_missing_checker(env=os.environ):  # pragma: no cover - S3 on the VPS
+    """label -> True when the worker published fleet-metrics/<label>/nvenc_missing.json (scripts/ops/readiness.py).
+    Off when SONYA_NVENC_MISSING is not "replace" or there are no S3 credentials."""
+    bucket = env.get("S3_BUCKET_NAME") or env.get("S3_BUCKET")
+    if env.get("SONYA_NVENC_MISSING", "").strip().lower() != "replace" or not bucket or not env.get("S3_ACCESS_KEY_ID"):
+        return None
+    import boto3
+    from botocore.config import Config
+    client = boto3.client("s3", endpoint_url=env.get("S3_ENDPOINT_URL") or None, region_name=env.get("S3_REGION") or None,
+                          aws_access_key_id=env["S3_ACCESS_KEY_ID"], aws_secret_access_key=env.get("S3_SECRET_ACCESS_KEY"),
+                          config=Config(connect_timeout=3, read_timeout=5, retries={"max_attempts": 1}))
+
+    def check(label: str) -> bool:
+        try:
+            client.head_object(Bucket=bucket, Key=f"fleet-metrics/{label}/nvenc_missing.json")
+            return True
+        except Exception:  # noqa: BLE001 - 404 = fine
+            return False
+    return check
 
 
 def build_accounting(fleet: FleetManager, env=os.environ):

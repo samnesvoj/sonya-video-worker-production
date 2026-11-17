@@ -497,3 +497,36 @@ def test_youtube_bot_check_bans_machine_and_replaces_instance():
     assert banned_machine in store.banned_machines(clock())
     mgr.tick(); mgr.tick()
     assert vast.n("create") == 2                           # replacement on another machine picks the job up
+
+
+def test_host_without_working_nvenc_is_banned_and_replaced_within_a_minute():
+    # 2026-11-17: 4 of 23 production hosts had a GeForce whose NVENC does not encode (jobs on the CPU, 2-4x slower).
+    # Their worker publishes fleet-metrics/<label>/nvenc_missing.json and takes no job; the fleet replaces the host.
+    mgr, vast, queue, store, clock = make()
+    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.12, "dph_base": 0.12})
+    broken = set()
+    mgr._nvenc_missing = lambda label: label in broken
+    iid, label = boot_one(mgr, vast, queue, clock)          # j1 queued, the worker never claims it
+    mgr.tick()
+    assert vast.n("destroy") == 0                           # no marker: nothing happens
+    broken.add(label)
+    clock.advance(31)
+    mgr.tick()
+    assert vast.n("destroy") == 1 and any(e["event"] == "nvenc_missing" for e in store.events(iid))
+    mgr.tick(); mgr.tick()
+    assert vast.n("create") == 2                            # another machine for the waiting job
+    assert [c for c in vast.calls if c[0] == "create"][-1][1] != [c for c in vast.calls if c[0] == "create"][0][1]
+
+
+def test_nvenc_check_never_touches_a_worker_that_already_worked():
+    mgr, vast, queue, store, clock = make()
+    on = [False]
+    mgr._nvenc_missing = lambda label: on[0]
+    iid, label = boot_one(mgr, vast, queue, clock)
+    queue.set("j1", "processing", label, clock())
+    mgr.tick()
+    on[0] = True                                            # a marker that shows up after real work is ignored
+    queue.set("j1", "completed", label, clock())
+    clock.advance(31)
+    mgr.tick()
+    assert not any(e["event"] == "nvenc_missing" for e in store.events(iid))

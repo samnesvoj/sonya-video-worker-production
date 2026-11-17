@@ -56,8 +56,13 @@ VAST_STOPPED = ("exited", "stopped", "created", "inactive")
 
 class FleetManager:
     def __init__(self, cfg: FleetConfig, store: FleetStore, vast: VastClient, queue: QueueView,
-                 token_provider: Callable[[], str], environ: Mapping[str, str], clock: Callable[[], float] = time.time):
+                 token_provider: Callable[[], str], environ: Mapping[str, str], clock: Callable[[], float] = time.time,
+                 nvenc_missing: Optional[Callable[[str], bool]] = None):
         self.cfg, self.store, self.vast, self.queue = cfg, store, vast, queue
+        # 2026-11-17: label -> True when that worker published fleet-metrics/<label>/nvenc_missing.json (its GeForce NVENC
+        # does not encode; SONYA_NVENC_MISSING=replace). None = feature off (tests, simulators).
+        self._nvenc_missing = nvenc_missing
+        self._nvenc_checked: Dict[int, float] = {}
         self._token, self._env, self.now = token_provider, environ, clock
         self._dry_seen: set = set()
         self._create_backoff_until = 0.0
@@ -207,6 +212,18 @@ class FleetManager:
         if s == "running":
             self._maybe_stop(inst, snap, now, actions)
 
+    def _nvenc_broken(self, inst: Inst, terminal: Optional[float], now: float) -> bool:
+        """Only instances that never worked yet, in their first 30 min of running, polled at most every 30 s."""
+        if self._nvenc_missing is None or terminal or inst.last_work_at:
+            return False
+        if now - (inst.running_since or now) > 1800 or now - self._nvenc_checked.get(inst.id, float("-inf")) < 30:
+            return False
+        self._nvenc_checked[inst.id] = now
+        try:
+            return bool(self._nvenc_missing(inst.label))
+        except Exception:  # noqa: BLE001 - S3 trouble never stops the fleet
+            return False
+
     # ----------------------------------------------------------------- stop
     def _maybe_stop(self, inst: Inst, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         busy = snap.active_by_worker.get(inst.label, 0) > 0
@@ -222,6 +239,14 @@ class FleetManager:
                 return
         if busy:
             self.store.touch(inst.id, last_work_at=now)
+            return
+        if self._nvenc_broken(inst, terminal, now):
+            # 4 of 23 production hosts in two days (2026-11-15/16): NVENC refused -> every clip on the CPU, jobs 2-4x
+            # slower. Its worker takes no job; ban the machine for a week and let demand / prime start another one.
+            self.store.event(now, inst.id, "nvenc_missing", pending=snap.pending)
+            if inst.machine_id:
+                self.store.ban_machine(inst.machine_id, now + 7 * 86400, "nvenc_missing")
+            self._destroy(inst, now, actions, reason="nvenc_missing")
             return
         if snap.pending > 0 and snap.active_unassigned == 0:
             # Jobs are waiting and this worker holds none. Normally it claims one within a poll interval. If it has been up

@@ -21,7 +21,9 @@ SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3
                       "SONYA_JOBS_PER_GPU_MAX",
                       # owner 2026-11-16: every source at <=1080p H.264 (no normalize; 1080 beats the worker's 1440 default),
                       # and where the worker puts the Gemini token counts for the accountant (scripts/shared/llm_usage.py)
-                      "SONYA_YTDLP_MAX_HEIGHT", "SONYA_LONG_SOURCE_SEC", "SONYA_LLM_USAGE_PREFIX")
+                      "SONYA_YTDLP_MAX_HEIGHT", "SONYA_LONG_SOURCE_SEC", "SONYA_LLM_USAGE_PREFIX",
+                      # 2026-11-17: a host whose NVENC does not encode publishes it and takes no job (dispatcher replaces it)
+                      "SONYA_NVENC_MISSING")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 DIGEST_RE = re.compile(r"@sha256:[0-9a-f]{64}$")
 
