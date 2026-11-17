@@ -26,6 +26,16 @@ from scripts import url_ingest
     ("https://www.vk.com/video-12345_67890", "vk"),
     ("https://www.twitch.tv/videos/123456", "twitch"),
     ("https://clips.twitch.tv/SomeClipSlug", "twitch"),
+    ("https://rutube.ru/video/f0b55f029e48940b44301a9ae7d7aacb/", "rutube"),
+    ("https://rutube.ru/video/f0b55f029e48940b44301a9ae7d7aacb", "rutube"),
+    ("https://rutube.ru/shorts/0013d544915b2d8280421236a513ea1a/", "rutube"),
+    ("https://rutube.ru/play/embed/f0b55f029e48940b44301a9ae7d7aacb", "rutube"),
+    ("https://rutube.ru/play/embed/6722881", "rutube"),
+    ("https://m.rutube.ru/video/f0b55f029e48940b44301a9ae7d7aacb/?r=wd", "rutube"),
+    ("https://rutube.ru/video/private/884fb55f07a97ab673c7d654553e0f48/?p=x2Qoj", "rutube"),
+    ("https://rutube.ru/channel/23704195/", "unsupported"),
+    ("https://rutube.ru/plst/12345/", "unsupported"),
+    ("https://rutube.ru/", "unsupported"),
     ("https://example.com/path/movie.mp4", "direct"),
     ("https://example.com/path/movie.mkv", "direct"),
     ("https://example.com/stream.m3u8", "direct"),
@@ -45,6 +55,46 @@ def test_detect_platform_rejects_lookalike_host():
     # like youtube.com.evil.example — a classic SSRF/phishing bypass shape.
     assert url_ingest.detect_platform("https://youtube.com.evil.example/watch?v=x") == "unsupported"
     assert url_ingest.detect_platform("https://notvk.com/video-1_1") == "unsupported"
+    assert url_ingest.detect_platform("https://rutube.ru.evil.example/video/f0b55f029e48940b44301a9ae7d7aacb/") == "unsupported"
+    assert url_ingest.detect_platform("https://notrutube.ru/video/f0b55f029e48940b44301a9ae7d7aacb/") == "unsupported"
+
+
+def test_rutube_shorts_become_video_links():
+    sid = "0013d544915b2d8280421236a513ea1a"
+    assert url_ingest.canonical_url(f"https://rutube.ru/shorts/{sid}/?r=a", "rutube") == f"https://rutube.ru/video/{sid}/"
+    v = f"https://rutube.ru/video/{sid}/"
+    assert url_ingest.canonical_url(v, "rutube") == v
+    assert url_ingest.canonical_url("https://youtu.be/x", "youtube") == "https://youtu.be/x"
+
+
+def test_rutube_download_is_1080p_canonical_and_parallel(monkeypatch, tmp_path):
+    seen = {}
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen["opts"] = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download):
+            seen["url"] = url
+            out = seen["opts"]["outtmpl"].replace("%(ext)s", "mp4")
+            open(out, "wb").write(b"x")
+            return {"requested_downloads": [{"filepath": out}]}
+
+    monkeypatch.setattr(url_ingest, "YT_DLP_AVAILABLE", True)
+    monkeypatch.setattr(url_ingest, "yt_dlp", type("M", (), {"YoutubeDL": FakeYDL}), raising=False)
+    monkeypatch.setattr(url_ingest, "assert_safe_url", lambda u: None)
+    monkeypatch.setenv("SONYA_YTDLP_MAX_HEIGHT", "1440")   # the GPU worker's default for YouTube
+    path, _ = url_ingest.download_video("https://rutube.ru/shorts/0013d544915b2d8280421236a513ea1a/", "rutube")
+    assert seen["url"] == "https://rutube.ru/video/0013d544915b2d8280421236a513ea1a/"
+    assert "height<=1080" in seen["opts"]["format"] and "1440" not in seen["opts"]["format"]
+    assert seen["opts"]["concurrent_fragment_downloads"] == 4
+    url_ingest.cleanup(path)
 
 
 # ── assert_safe_url (SSRF guard) ────────────────────────────────────────

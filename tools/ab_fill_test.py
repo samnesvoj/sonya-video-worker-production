@@ -92,9 +92,10 @@ def main() -> int:  # pragma: no cover - real Vast/S3
                       aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"], region_name=os.environ.get("S3_REGION", "ru-1"))
     bucket = os.environ["S3_BUCKET_NAME"]
     keys = []
-    for n, (name, src, _) in enumerate(jobs_in):
+    for n, (name, src, jp) in enumerate(jobs_in):
         key = f"fast-start-test/{run_id}/input{n}.mp4"
-        s3.copy({"Bucket": bucket, "Key": src}, bucket, key)       # server side: never re-uploaded
+        if not jp.get("source_fetch"):   # a link job (params.source_fetch): the worker downloads and uploads it here
+            s3.copy({"Bucket": bucket, "Key": src}, bucket, key)       # server side: never re-uploaded
         keys.append(key)
     print("sources copied:", len(keys))
     environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket}
