@@ -1026,22 +1026,6 @@ def process_job(job: dict, worker_id: str) -> None:
                 ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=mode in ("streamer", "educational"))
             output_files = [f for f in output_dir.rglob("*") if f.is_file()]
 
-        # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
-        if mode in _PREVIEW_MODES:
-            # 2026-11-17: in parallel (they were made one after another, ~5-8 s each on the CPU); same files
-            from concurrent.futures import ThreadPoolExecutor as _TPE
-            _clips = [c for c in sorted(output_dir.rglob("*.mp4")) if not c.stem.endswith("_preview")]
-            with _prof.stage("previews"), \
-                    _TPE(max_workers=max(1, min(len(_clips) or 1, int(os.environ.get("SONYA_PREVIEW_WORKERS", "4"))))) as _pp:
-                list(_pp.map(_make_preview_assets, _clips))
-            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
-
-        # ── 5. Upload outputs to S3 ───────────────────────────────────────────
-        _update_status(job_id, JOB_STATUS_UPLOADING_RESULT)
-        s3_output_key = None
-        enrichment_keys = result.get("enrichment_keys", []) if isinstance(result, dict) else []
-        clip_count = 0
-
         def _upload_one(f: Path):
             ext = f.suffix.lower()
             ct  = _CONTENT_TYPES.get(ext, "application/octet-stream")
@@ -1061,13 +1045,40 @@ def process_job(job: dict, worker_id: str) -> None:
                 return None
             return f, ft, s3k, ct
 
+        # 2026-11-17: the clips themselves start going to S3 while their previews are being made (S3 PUTs and the
+        # CPU preview encodes overlap); previews / posters follow as soon as they exist. Records stay in order below.
+        from concurrent.futures import ThreadPoolExecutor
+        _t_up = time.monotonic()
+        _pool = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("SONYA_UPLOAD_WORKERS", "6"))))
+        _futs = {f: _pool.submit(_upload_one, f) for f in sorted(output_files)}
+
+        # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
+        if mode in _PREVIEW_MODES:
+            # 2026-11-17: in parallel (they were made one after another, ~5-8 s each on the CPU); same files
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            _clips = [c for c in sorted(output_dir.rglob("*.mp4")) if not c.stem.endswith("_preview")]
+            with _prof.stage("previews"), \
+                    _TPE(max_workers=max(1, min(len(_clips) or 1, int(os.environ.get("SONYA_PREVIEW_WORKERS", "4"))))) as _pp:
+                list(_pp.map(_make_preview_assets, _clips))
+            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
+
+        # ── 5. Upload outputs to S3 ───────────────────────────────────────────
+        _update_status(job_id, JOB_STATUS_UPLOADING_RESULT)
+        s3_output_key = None
+        enrichment_keys = result.get("enrichment_keys", []) if isinstance(result, dict) else []
+        clip_count = 0
+
         # Load test 2026-11-16: 8 clips + previews + posters one after another took ~30 s; S3 PUTs in parallel, the
         # API records (add_file) stay in the original order (the first output = s3_output_key, as before)
-        from concurrent.futures import ThreadPoolExecutor
         output_files = sorted(output_files)
-        with _prof.stage("upload"), \
-                ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("SONYA_UPLOAD_WORKERS", "6")))) as _pool:
-            uploaded = list(_pool.map(_upload_one, output_files))
+        try:
+            for f in output_files:
+                if f not in _futs:
+                    _futs[f] = _pool.submit(_upload_one, f)
+            uploaded = [_futs[f].result() for f in output_files]
+        finally:
+            _pool.shutdown(wait=True)
+        _prof.add("upload", time.monotonic() - _t_up, start=_t_up)      # wall time incl. the overlap with previews
         for item in uploaded:
             if item is None:
                 continue

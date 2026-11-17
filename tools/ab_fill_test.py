@@ -97,7 +97,7 @@ def main() -> int:  # pragma: no cover - real Vast/S3
         keys.append(key)
     print("sources copied:", len(keys))
     environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket}
-    cfg = FleetConfig(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_instances=1, jobs_per_instance=a.jobs_per_instance, min_cpu_cores=a.min_cpu_cores,
+    cfg = FleetConfig(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_instances=1, jobs_per_instance=a.jobs_per_instance, pool_modes=tuple(sorted(set(modes) | {"virality", "beep"})), min_cpu_cores=a.min_cpu_cores,
                       stopped_retention_seconds=600, max_creates_per_hour=2, label_prefix=PREFIX)
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
