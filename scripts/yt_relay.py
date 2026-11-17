@@ -138,8 +138,12 @@ def statuses(job_id: str) -> Dict[str, Dict[str, Any]]:
 # ── the decision rule (pure, unit-tested) ─────────────────────────────────────
 def should_take(me: str, my_priority: int, req: Dict[str, Any], sts: Dict[str, Dict[str, Any]],
                 hbs: Dict[str, Dict[str, Any]], now: float) -> bool:
-    if me in sts or any(s.get("state") == "done" for s in sts.values()):
+    if any(s.get("state") == "done" for s in sts.values()):
         return False
+    mine = sts.get(me)
+    if mine is not None:
+        # my own status that stopped moving = this relay restarted mid-download: take it again
+        return mine.get("state") not in TERMINAL and now - float(mine.get("ts") or 0) > STATUS_STALE
     age = now - float(req.get("created") or now)
     for name, hb in hbs.items():
         if name == me or int(hb.get("priority", 99)) >= my_priority or not hb.get("fresh"):
