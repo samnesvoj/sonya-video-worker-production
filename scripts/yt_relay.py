@@ -43,6 +43,31 @@ CANARY_URL = os.environ.get("SONYA_YT_CANARY_URL", "https://www.youtube.com/watc
 TERMINAL = ("done", "failed")
 
 
+def install_s3_tunnel() -> None:
+    """Mac mini: the home ISP sometimes drops every connection to the S3 host (TCP opens, TLS dies; 2026-11-17).
+    SONYA_S3_TUNNEL=127.0.0.1:19443 (an `ssh -L 19443:s3.twcstorage.ru:443` to the VPS, run.sh keeps it up) makes THIS
+    process connect to the tunnel for the S3 host only; TLS still verifies s3.twcstorage.ru end to end."""
+    spec = os.environ.get("SONYA_S3_TUNNEL", "").strip()
+    host = (os.environ.get("S3_ENDPOINT_URL", "").split("//")[-1].split("/")[0].split(":")[0]).lower()
+    if not spec or not host:
+        return
+    import socket
+    th, tp = spec.rsplit(":", 1)
+    orig = socket.getaddrinfo
+    if getattr(orig, "_sonya_tunnel", False):
+        return
+
+    def gai(h, port, *a, **kw):
+        if isinstance(h, str) and h.lower() == host and int(port or 443) == 443:
+            return orig(th, int(tp), *a, **kw)
+        return orig(h, port, *a, **kw)
+    gai._sonya_tunnel = True  # type: ignore[attr-defined]
+    socket.getaddrinfo = gai
+
+
+install_s3_tunnel()
+
+
 def prefix() -> str:
     p = os.environ.get("SONYA_YT_RELAY_PREFIX", "worker-v2/yt-relay/")
     return p if p.endswith("/") else p + "/"
@@ -400,6 +425,10 @@ class Relay:
         while True:
             now = time.time()
             try:
+                ck = os.environ.get("SONYA_YT_COOKIES", "")
+                mt = os.path.getmtime(ck) if ck and os.path.exists(ck) else 0.0
+                if mt != getattr(self, "_ck_mtime", None):      # new / rotated / removed cookies: check now
+                    self._ck_mtime, self.cookies_checked = mt, 0.0
                 if now - self.cookies_checked > 6 * 3600:
                     self.cookies, self.cookies_checked = check_cookies(), now
                 if now - last_canary > float(os.environ.get("SONYA_YT_CANARY_EVERY", "3600")):
