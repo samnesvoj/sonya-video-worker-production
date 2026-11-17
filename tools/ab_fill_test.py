@@ -50,6 +50,7 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     ap.add_argument("--extra", action="append", default=[],
                     help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY[|PARAMS_JSON[|MODE]] (files go to OUT/NAME)")
     ap.add_argument("--mode", default="virality", help="worker mode of the first job (educational, beep, streamer ...)")
+    ap.add_argument("--ban-machine", action="append", type=int, default=[], help="Vast machine_id never to use (e.g. broken NVENC)")
     ap.add_argument("--min-cpu-cores", type=float, default=8.0, help="effective cores of the test host (prod 'good server': 12+)")
     ap.add_argument("--jobs-per-instance", type=int, default=2, help="1 = one job at a time (clean per-stage timings)")
     ap.add_argument("--params", default="", help="JSON merged into the first job's params (e.g. {\"ad_banner\": \"mini\"})")
@@ -101,6 +102,8 @@ def main() -> int:  # pragma: no cover - real Vast/S3
                       stopped_retention_seconds=600, max_creates_per_hour=2, label_prefix=PREFIX)
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
+    for m in a.ban_machine:
+        store.ban_machine(m, time.time() + 86400, "test_ban")
     def nvenc_missing(label: str) -> bool:      # SONYA_NVENC_MISSING=replace: same rule as the production dispatcher
         try:
             s3.head_object(Bucket=bucket, Key=f"fleet-metrics/{label}/nvenc_missing.json")
