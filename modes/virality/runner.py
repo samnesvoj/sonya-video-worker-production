@@ -109,24 +109,31 @@ def _select_and_compose(
             from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
             cache = (params.get("crop") or {}).get("clip_cache_dir")
             cache = str(Path(cache).parent / "audio_energy.json") if cache else None
-            story["energy"] = zscores(loudness_per_second(input_video_path, ffmpeg_bin(), cache))
+            from scripts.shared.profiling import stage
+            with stage("audio_energy"):
+                story["energy"] = zscores(loudness_per_second(input_video_path, ffmpeg_bin(), cache))
         except Exception as exc:             # ranking still works on words alone; say so
             logger.warning("[virality] audio energy unavailable: %s", exc)
     if story.get("strategy") == "story" and not params.get("promo"):
         from scripts.shared import story_mode
         if story_mode.enabled():
-            return _story_super(input_video_path, enrichment, params, output_dir, words, story, max_clips)
+            from scripts.shared.profiling import stage
+            with stage("story_select"):
+                return _story_super(input_video_path, enrichment, params, output_dir, words, story, max_clips)
     if params.get("promo"):          # advertiser conditions shape WHICH moments are picked
         story["promo"] = params["promo"]
-    top, selection = select_story_clips(words, max_clips, StoryConfig(**story))
+    from scripts.shared.profiling import stage
+    with stage("select"):
+        top, selection = select_story_clips(words, max_clips, StoryConfig(**story))
     if not top:
         raise RuntimeError("NO_CLIPS: no complete story / question+answer found in the speech "
                            f"({len(words)} words)")
 
     # ── Exact boundaries on real ASR words (does not change WHICH moments) ──
     from scripts.shared.boundaries import BoundaryConfig, refine_segments
-    selected = refine_segments(top[:max_clips], words,
-                               BoundaryConfig(**(params.get("boundaries") or {})))
+    with stage("boundaries"):
+        selected = refine_segments(top[:max_clips], words,
+                                   BoundaryConfig(**(params.get("boundaries") or {})))
     return _compose(input_video_path, enrichment, selected, output_dir, params, selection), selection
 
 
@@ -240,7 +247,9 @@ def _compose(input_video_path: str, enrichment: Dict[str, Any], selected: List[D
     from scripts.shared import hooks
     if hooks.enabled(params):
         crop = dict(crop, teaser=True)
-        _attach_teasers(input_video_path, enrichment, selected, params, selection)
+        from scripts.shared.profiling import stage
+        with stage("hooks_pick"):
+            _attach_teasers(input_video_path, enrichment, selected, params, selection)
     elif any(s.get("teaser") for s in selected):
         crop = dict(crop, teaser=True)              # storytelling: the story's own hook line (story_mode)
     from scripts.shared import split_filler
@@ -346,6 +355,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     meta = (analysis or {}).get("meta") or {}
     W, H = (meta.get("width"), meta.get("height")) if analysis else _source_dims(input_video_path)
     subs = crop.get("subtitles") or {}
+    from scripts.shared.profiling import stage
+
     def piece(seg: Dict[str, Any], out: str, start: float, dur: float) -> str:
         """Analysis → track → subtitles → render of one interval into ``out`` (a clip, or a clip's hook); the crop /
         subtitle / encoder report goes into ``seg``. Raises when the render fails. ``seg["pieces"]`` (storytelling):
@@ -358,7 +369,8 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         if fit:
             track = fit_track(W, H, dur, "blur" if crop.get("layout") == "blur" else "black")
         elif per_clip:
-            clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
+            with stage("clip:analysis"):
+                clip_an, cache, err = _clip_analysis(crop, input_video_path, start, dur)
             fill = crop.get("layout") == FILL_LAYOUT
             speaker_fn = identity_fn = None
             if fill and clip_an is not None:      # who talks: audio-visual speaker model on this clip (optional)
@@ -370,9 +382,10 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
                 def identity_fn(ref, cands, _s=start):
                     from scripts.shared.crop import face_id
                     return face_id.similarities(input_video_path, _s, ref, cands)
-            track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
-                or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn,
-                                 identity_fn=identity_fn)
+            with stage("clip:track"):
+                track = (game_track(clip_an, dur, width=W, height=H) if crop.get("layout") == "game" else None) \
+                    or crop_track_v2(clip_an, dur, width=W, height=H, fill=fill, speaker_fn=speaker_fn,
+                                     identity_fn=identity_fn)
             if speaker_fn is not None:
                 seg["crop_speaker_model"] = active_speaker.status()
             if clip_an is None:
@@ -422,8 +435,13 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         # even loudness (-14 LUFS, one linear gain per clip); the hook piece arrives with its clip's gain in seg
         if "audio_gain_db" not in seg:
             from scripts.shared.loudness import clip_gain
-            seg["audio_gain_db"] = clip_gain(ffmpeg_bin(), input_video_path, start, dur)
+            with stage("clip:gain"):
+                seg["audio_gain_db"] = clip_gain(ffmpeg_bin(), input_video_path, start, dur)
         gain = seg["audio_gain_db"]
+        with stage("clip:render"):
+            return _render_piece(seg, out, start, dur, cuts, track, sub_path, gain)
+
+    def _render_piece(seg, out, start, dur, cuts, track, sub_path, gain) -> str:
         if cuts:
             from scripts.shared.crop.smart_crop_adapter import render_pieces
             fps = float(seg.get("fps") or 30.0)
@@ -480,12 +498,14 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
         stem = f"viral_clip_{i+1:02d}_hook"
         raw, fin, joined = (str(tmpd / f"{stem}.mp4"), str(tmpd / f"{stem}_fx.mp4"), str(tmpd / f"{stem}_joined.mp4"))
         rep: Dict[str, Any] = {"audio_gain_db": seg.get("audio_gain_db"),     # same loudness step as its clip
+                               **({"fps": seg["fps"]} if seg.get("fps") else {}),
                                **({"title_top": seg["title"]} if seg.get("story") and seg.get("title") else {})}
         try:
             piece(rep, raw, float(tz["start"]), float(tz["duration"]))
-            hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin())
-            offset = float((hooks._probe(fin).get("format") or {}).get("duration") or tz["duration"])
-            how = hooks.join(fin, out, joined, ffmpeg_bin())
+            with stage("clip:hook_join"):
+                hooks.finish_teaser(raw, fin, hooks.HookConfig(), ffmpeg_bin(), match=out)
+                offset = float((hooks._probe(fin).get("format") or {}).get("duration") or tz["duration"])
+                how = hooks.join(fin, out, joined, ffmpeg_bin())
             os.replace(joined, out)
             if seg.get("subtitle_path"):
                 hooks.merge_ass(str(tmpd / f"{stem}.ass"), str(output_dir / seg["subtitle_path"]), offset)
@@ -507,7 +527,7 @@ def _compose_tracked(input_video_path: str, selected: List[Dict[str, Any]], outp
     from concurrent.futures import ThreadPoolExecutor
     from scripts.shared.clip_parallel import clip_workers      # 2 before 2026-11-16; more on an idle server
     workers = clip_workers(len(selected))
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    with stage("compose"), ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(lambda a: one(*a), enumerate(selected)))
     import shutil
     shutil.rmtree(output_dir.parent / "hooks_tmp", ignore_errors=True)

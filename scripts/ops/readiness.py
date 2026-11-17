@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -147,6 +148,20 @@ def check_gpu() -> List[str]:
         state = f"cuda OK {g.cuda_ms} ms, nvenc: {nv}" if g.cuda_ok else f"NOT USED: {g.error}"
         _p(f"{g.short()}: {state}")
     usable = [g for g in gpus if g.usable]
+    if usable and _STATE.get("nvenc_compiled") and not any(g.nvenc_ok for g in usable) \
+            and os.environ.get("SONYA_NVENC_MISSING", "").strip().lower() == "replace":
+        # 2026-11-17: 4 of 23 production hosts in two days had a GeForce whose NVENC does not encode; their jobs rendered
+        # on the CPU 2-4x slower. Publish it at once (the dispatcher bans the machine and starts another) and take no job.
+        timeline.mark("nvenc_missing", gpu=usable[0].name, reason=(usable[0].nvenc_error or "")[:120])
+        timeline.upload()
+        try:
+            from scripts.prod_s3_storage import upload_bytes
+            wid = "".join(c for c in os.environ.get("WORKER_ID", "") if c.isalnum() or c in "-_") or "unknown"
+            upload_bytes(json.dumps({"gpu": usable[0].name, "t": int(time.time())}).encode(),
+                         f"fleet-metrics/{wid}/nvenc_missing.json", content_type="application/json")
+        except Exception as exc:  # noqa: BLE001 - the stall rule of the dispatcher still replaces it later
+            _p(f"nvenc_missing marker upload failed: {type(exc).__name__}")
+        return ["h264_nvenc does not encode on this host (SONYA_NVENC_MISSING=replace): the dispatcher replaces it"]
     if usable:
         timeline.mark("cuda_init_done", ms=max(g.cuda_ms or 0 for g in usable), gpu=usable[0].name, gpus=len(usable))
     if len(usable) < len(gpus):

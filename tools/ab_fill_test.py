@@ -48,7 +48,11 @@ def main() -> int:  # pragma: no cover - real Vast/S3
     ap.add_argument("--stub-port", type=int, default=8787)
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--extra", action="append", default=[],
-                    help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY[|PARAMS_JSON] (files go to OUT/NAME)")
+                    help="more jobs on the same instance: NAME|SOURCE_KEY|SEGMENTS_JSON|ONLY[|PARAMS_JSON[|MODE]] (files go to OUT/NAME)")
+    ap.add_argument("--mode", default="virality", help="worker mode of the first job (educational, beep, streamer ...)")
+    ap.add_argument("--ban-machine", action="append", type=int, default=[], help="Vast machine_id never to use (e.g. broken NVENC)")
+    ap.add_argument("--min-cpu-cores", type=float, default=8.0, help="effective cores of the test host (prod 'good server': 12+)")
+    ap.add_argument("--jobs-per-instance", type=int, default=2, help="1 = one job at a time (clean per-stage timings)")
     ap.add_argument("--params", default="", help="JSON merged into the first job's params (e.g. {\"ad_banner\": \"mini\"})")
     a = ap.parse_args()
 
@@ -64,9 +68,11 @@ def main() -> int:  # pragma: no cover - real Vast/S3
         # no crop_mode: since 2026-11-15 fill_9x16 is the worker default (this checks the default path)
         return dict(SITE_VIRALITY_PARAMS, fixed_segments=fixed)
     jobs_in = [("", a.source_key, dict(job_params(a.segments, a.only), **json.loads(a.params or "{}")))]
+    modes = [a.mode]
     for e in a.extra:
-        name, src, segp, only, extra = (e.split("|") + ["", ""])[:5]
+        name, src, segp, only, extra, mode = (e.split("|") + ["", "", ""])[:6]
         jobs_in.append((name, src, dict(job_params(pathlib.Path(segp), only), **json.loads(extra or "{}"))))
+        modes.append(mode or "virality")
     params = jobs_in[0][2]
     print(f"release {a.release_sha[:12]} | {[len(j[2].get('fixed_segments') or []) or 'full' for j in jobs_in]} fixed moments | "
           f"max ${a.max_usd} | {'APPLY' if a.apply else 'dry'}")
@@ -92,13 +98,22 @@ def main() -> int:  # pragma: no cover - real Vast/S3
         keys.append(key)
     print("sources copied:", len(keys))
     environ = {**os.environ, "BACKEND_API_URL": a.backend_url, "WORKER_SECRET": secret, "S3_BUCKET_NAME": bucket}
-    cfg = FleetConfig(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_instances=1,
+    cfg = FleetConfig(enabled=True, dry_run=False, image=a.image, release_sha=a.release_sha, max_instances=1, jobs_per_instance=a.jobs_per_instance, pool_modes=tuple(sorted(set(modes) | {"virality", "beep"})), min_cpu_cores=a.min_cpu_cores,
                       stopped_retention_seconds=600, max_creates_per_hour=2, label_prefix=PREFIX)
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
-    mgr = FleetManager(cfg, store, vast, stub, static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]), environ)
+    for m in a.ban_machine:
+        store.ban_machine(m, time.time() + 86400, "test_ban")
+    def nvenc_missing(label: str) -> bool:      # SONYA_NVENC_MISSING=replace: same rule as the production dispatcher
+        try:
+            s3.head_object(Bucket=bucket, Key=f"fleet-metrics/{label}/nvenc_missing.json")
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    mgr = FleetManager(cfg, store, vast, stub, static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]), environ,
+                       nvenc_missing=nvenc_missing if os.environ.get("SONYA_NVENC_MISSING") == "replace" else None)
     t0 = time.time()
-    jids = [stub.enqueue("virality", k, j[2], user_id="ab-fill-test") for k, j in zip(keys, jobs_in)]
+    jids = [stub.enqueue(m, k, j[2], user_id="ab-fill-test") for m, k, j in zip(modes, keys, jobs_in)]
     jid = jids[0]
     say = lambda m: print(f"[+{time.time() - t0:5.0f}s] {m}", flush=True)
     say(f"jobs {[x[:8] for x in jids]} queued")

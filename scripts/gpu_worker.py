@@ -43,6 +43,7 @@ if _os.environ.get("SONYA_CPU_AFFINITY") and hasattr(_os, "sched_setaffinity"):
         pass
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -117,16 +118,33 @@ HEARTBEAT_INTERVAL_SEC = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "12
 _PREVIEW_MODES = ("virality", "hooks", "educational", "streamer", "beep")
 
 
+def _preview_nvenc() -> bool:
+    try:
+        from scripts.shared.cut_profile import encoder_family
+        return encoder_family() == "nvenc"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _make_preview_assets(clip: Path) -> None:
     """Best effort: <stem>_preview.mp4 (720p, <=2.5 Mb/s, +faststart) and <stem>_poster.jpg.
     The full-quality clip stays the download file. Never fails the job."""
     import subprocess
     try:
         prev = clip.with_name(clip.stem + "_preview.mp4")
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-vf", "scale=-2:720",
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-maxrate", "2500k",
-                        "-bufsize", "5000k", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
-                        "-movflags", "+faststart", str(prev)], check=True, timeout=300)
+
+        def cmd(venc):
+            return ["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-vf", "scale=-2:720", *venc,
+                    "-maxrate", "2500k", "-bufsize", "5000k", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "+faststart", str(prev)]
+        done = False
+        # 2026-11-17: on the card's encoder when it works (a 3-min BEEP preview took 29 s on the CPU); else as before
+        if _preview_nvenc():
+            r = subprocess.run(cmd(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "27", "-b:v", "0"]),
+                               capture_output=True, timeout=300)
+            done = r.returncode == 0
+        if not done:
+            subprocess.run(cmd(["-c:v", "libx264", "-preset", "veryfast", "-crf", "27"]), check=True, timeout=300)
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", str(clip), "-frames:v", "1",
                         "-vf", "scale=-2:720", "-q:v", "4", str(clip.with_name(clip.stem + "_poster.jpg"))],
                        check=True, timeout=60)
@@ -209,6 +227,51 @@ def _prewarm(modes) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[worker] prewarm skipped: %s", type(exc).__name__)
     _timeline("prewarm_done", seconds=round(time.monotonic() - t0, 2))
+
+
+@contextlib.contextmanager
+def _maybe_cprofile(job_id: str):
+    """SONYA_PROFILE=1 (Vast tests only): cProfile of the mode run (main thread) -> S3 worker-v2/profile/<job>/."""
+    from scripts.shared import profiling
+    if not profiling.enabled_full():
+        yield
+        return
+    import cProfile
+    prof = cProfile.Profile()
+    prof.enable()
+    try:
+        yield
+    finally:
+        prof.disable()
+        try:
+            import io
+            import pstats
+            buf = io.StringIO()
+            pstats.Stats(prof, stream=buf).sort_stats("cumulative").print_stats(120)
+            _PROFILE_TEXT["cprofile"] = buf.getvalue()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_PROFILE_TEXT: Dict[str, str] = {}
+
+
+def _log_timings(job_id: str, mode: str) -> None:
+    """One [timing] line per finished job (always); full stages + cProfile to S3 with SONYA_PROFILE=1. Never fatal."""
+    try:
+        from scripts.shared import profiling
+        summ = profiling.summary()
+        logger.info("[timing] job_id=%s mode=%s %s", job_id, mode, json.dumps(summ, separators=(",", ":")))
+        if profiling.enabled_full():
+            import tempfile as _tf
+            d = Path(_tf.mkdtemp(prefix="sonya_prof_"))
+            (d / "timings.json").write_text(json.dumps({"summary": summ, "events": profiling.events()}, indent=1))
+            (d / "cprofile.txt").write_text(_PROFILE_TEXT.pop("cprofile", ""))
+            for f in d.iterdir():
+                upload_file(f, f"worker-v2/profile/{job_id}/{f.name}", content_type="text/plain")
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[timing] skipped: %s", type(exc).__name__)
 
 
 def _worker_id() -> str:
@@ -784,6 +847,8 @@ def process_job(job: dict, worker_id: str) -> None:
         return
 
     t_start = time.monotonic()
+    from scripts.shared import profiling as _prof      # per-stage wall clock of this job ([timing] line at job_done)
+    _prof.begin()
     sweep_stale_tmp()
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"sonya_{job_id}_p{os.getpid()}_"))
     _job_tmp_enter(tmp_dir)
@@ -807,6 +872,7 @@ def process_job(job: dict, worker_id: str) -> None:
             input_path = tmp_dir / "no_input"      # text -> image: there is no input video
             input_path.touch()
         elif isinstance(sf, dict) and sf.get("url"):
+            _t_fetch = time.monotonic()
             # The VPS could not fetch this link (YouTube etc.): download here, upload to s3_input_key, continue as usual.
             from scripts.source_fetch import SourceFetchError, fetch_source
             try:
@@ -814,6 +880,7 @@ def process_job(job: dict, worker_id: str) -> None:
                                    background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
                 _SRC_COPY["got"] = got
                 input_path = got["path"]
+                _prof.add("download", time.monotonic() - _t_fetch, start=_t_fetch)
             except SourceFetchError as exc:
                 if exc.code == "SOURCE_BOT_CHECK":
                     _HOST_BLOCKED.set()          # before _fail: never re-claim the requeued job on this host
@@ -834,7 +901,8 @@ def process_job(job: dict, worker_id: str) -> None:
                 return
         try:
             if mode != "sonya_gen" and not (isinstance(sf, dict) and sf.get("url")):
-                download_file(s3_input, input_path)
+                with _prof.stage("download"):
+                    download_file(s3_input, input_path)
             logger.info(
                 "[worker] input downloaded: %s (%d bytes)",
                 input_path, input_path.stat().st_size,
@@ -846,7 +914,8 @@ def process_job(job: dict, worker_id: str) -> None:
         # ── 2. Ensure models ──────────────────────────────────────────────────
         _update_status(job_id, JOB_STATUS_MODEL_DOWNLOADING)
         try:
-            ensure_models_for_mode(mode)
+            with _prof.stage("models"):
+                ensure_models_for_mode(mode)
         except RuntimeError as exc:
             _fail(job_id, "MODEL_DOWNLOAD_FAILED", str(exc), retry=False)
             return
@@ -930,16 +999,18 @@ def process_job(job: dict, worker_id: str) -> None:
                 # Desktop ingest: VFR / rotated / non-H.264 sources are normalized before the mode
                 # (scripts/shared/source_normalize.py; virality + beep only)
                 from scripts.shared.source_normalize import normalize_source
-                norm = normalize_source(str(input_path), str(output_dir.parent / "ingest"), mode)
+                with _prof.stage("normalize"):
+                    norm = normalize_source(str(input_path), str(output_dir.parent / "ingest"), mode)
                 if norm["normalized"]:
                     logger.info("[worker] job_id=%s source normalized: %s", job_id, ",".join(norm["reasons"]))
                 runner = get_runner(mode)
-                result = runner(
-                    input_video_path=norm["path"],
-                    output_dir=str(output_dir),
-                    params=params,
-                    progress_callback=_progress,
-                )
+                with _prof.stage("mode_total"), _maybe_cprofile(job_id):
+                    result = runner(
+                        input_video_path=norm["path"],
+                        output_dir=str(output_dir),
+                        params=params,
+                        progress_callback=_progress,
+                    )
         except Exception as exc:
             from scripts.shared.source_normalize import NormalizeError
             if isinstance(exc, NormalizeError):       # speedfix: a clear message, not hours of CPU libx264
@@ -968,21 +1039,9 @@ def process_job(job: dict, worker_id: str) -> None:
         from scripts.shared import ad_banner
         if ad_banner.kind_of(params) and mode in ad_banner.MODES:
             _update_status(job_id, "assembling")
-            ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=mode in ("streamer", "educational"))
+            with _prof.stage("ad_banner"):
+                ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=mode in ("streamer", "educational"))
             output_files = [f for f in output_dir.rglob("*") if f.is_file()]
-
-        # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
-        if mode in _PREVIEW_MODES:
-            for _clip in sorted(output_dir.rglob("*.mp4")):
-                if not _clip.stem.endswith("_preview"):
-                    _make_preview_assets(_clip)
-            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
-
-        # ── 5. Upload outputs to S3 ───────────────────────────────────────────
-        _update_status(job_id, JOB_STATUS_UPLOADING_RESULT)
-        s3_output_key = None
-        enrichment_keys = result.get("enrichment_keys", []) if isinstance(result, dict) else []
-        clip_count = 0
 
         def _upload_one(f: Path):
             ext = f.suffix.lower()
@@ -1003,12 +1062,40 @@ def process_job(job: dict, worker_id: str) -> None:
                 return None
             return f, ft, s3k, ct
 
+        # 2026-11-17: the clips themselves start going to S3 while their previews are being made (S3 PUTs and the
+        # CPU preview encodes overlap); previews / posters follow as soon as they exist. Records stay in order below.
+        from concurrent.futures import ThreadPoolExecutor
+        _t_up = time.monotonic()
+        _pool = ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("SONYA_UPLOAD_WORKERS", "6"))))
+        _futs = {f: _pool.submit(_upload_one, f) for f in sorted(output_files)}
+
+        # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
+        if mode in _PREVIEW_MODES:
+            # 2026-11-17: in parallel (they were made one after another, ~5-8 s each on the CPU); same files
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            _clips = [c for c in sorted(output_dir.rglob("*.mp4")) if not c.stem.endswith("_preview")]
+            with _prof.stage("previews"), \
+                    _TPE(max_workers=max(1, min(len(_clips) or 1, int(os.environ.get("SONYA_PREVIEW_WORKERS", "4"))))) as _pp:
+                list(_pp.map(_make_preview_assets, _clips))
+            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
+
+        # ── 5. Upload outputs to S3 ───────────────────────────────────────────
+        _update_status(job_id, JOB_STATUS_UPLOADING_RESULT)
+        s3_output_key = None
+        enrichment_keys = result.get("enrichment_keys", []) if isinstance(result, dict) else []
+        clip_count = 0
+
         # Load test 2026-11-16: 8 clips + previews + posters one after another took ~30 s; S3 PUTs in parallel, the
         # API records (add_file) stay in the original order (the first output = s3_output_key, as before)
-        from concurrent.futures import ThreadPoolExecutor
         output_files = sorted(output_files)
-        with ThreadPoolExecutor(max_workers=max(1, int(os.environ.get("SONYA_UPLOAD_WORKERS", "6")))) as _pool:
-            uploaded = list(_pool.map(_upload_one, output_files))
+        try:
+            for f in output_files:
+                if f not in _futs:
+                    _futs[f] = _pool.submit(_upload_one, f)
+            uploaded = [_futs[f].result() for f in output_files]
+        finally:
+            _pool.shutdown(wait=True)
+        _prof.add("upload", time.monotonic() - _t_up, start=_t_up)      # wall time incl. the overlap with previews
         for item in uploaded:
             if item is None:
                 continue
@@ -1046,6 +1133,7 @@ def process_job(job: dict, worker_id: str) -> None:
             "[worker] job_done job_id=%s clips=%d ms=%d backend=%s trace=%s",
             job_id, clip_count, processing_ms, _WORKER_MODE, trace_id,
         )
+        _log_timings(job_id, mode)
 
     finally:
         try:                                   # never delete the source while its S3 copy is still reading it

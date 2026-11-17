@@ -145,6 +145,36 @@ def test_finish_and_join_hook_plus_clip(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not FF, reason="ffmpeg")
+def test_hook_matching_a_bt709_clip_joins_by_stream_copy(tmp_path, monkeypatch):
+    """Vast 2026-11-17: the flash filters dropped the transfer tag -> the hook's SPS differed from the clip's in one
+    byte and every join re-encoded the whole clip (25-56 s each). The hook now carries the clip's colour tags."""
+    enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
+    monkeypatch.setenv("SONYA_RENDER_ARGS", json.dumps(enc))
+    tags = ["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"]
+
+    def clip(path, dur, color, tg):
+        subprocess.run([FF, "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={color}:s=270x480:r=30000/1001:d={dur}",
+                        "-f", "lavfi", "-i", f"sine=f=440:d={dur}:sample_rate=44100", "-shortest", *enc, *tg,
+                        "-c:a", "aac", "-b:a", "192k", str(path)], check=True)
+    raw, main, fin, out = (tmp_path / n for n in ("h.mp4", "m.mp4", "hf.mp4", "o.mp4"))
+    clip(raw, 2.0, "red", [])           # the hook piece lost its tags on the way (ffmpeg 5.1 filter chain)
+    clip(main, 5.0, "blue", tags)
+    hooks.finish_teaser(str(raw), str(fin), hooks.HookConfig(), FF, match=str(main))
+    assert hooks._sig(hooks._probe(str(fin))) == hooks._sig(hooks._probe(str(main)))
+    assert hooks.join(str(fin), str(main), str(out), FF) == "copy"
+    err = subprocess.run([FF, "-v", "error", "-i", str(out), "-f", "null", "-"], capture_output=True, text=True).stderr
+    assert not err.strip()
+
+
+def test_sig_ignores_the_aac_profile_string_but_not_its_config():
+    a = {"streams": [{"codec_type": "audio", "codec_name": "aac", "profile": "LC", "extradata": "1210"}]}
+    b = {"streams": [{"codec_type": "audio", "codec_name": "aac", "extradata": "1210"}]}
+    c = {"streams": [{"codec_type": "audio", "codec_name": "aac", "profile": "LC", "extradata": "1190"}]}
+    assert hooks._sig(a) == hooks._sig(b) and hooks._sig(a) != hooks._sig(c)
+    assert hooks._color_args({"color_transfer": "bt709", "color_space": "unknown"}) == ["-color_trc", "bt709"]
+
+
+@pytest.mark.skipif(not FF, reason="ffmpeg")
 def test_attach_teasers_local_and_editor(tmp_path):
     src = tmp_path / "src.mp4"
     _clip(src, 40.0, "gray")

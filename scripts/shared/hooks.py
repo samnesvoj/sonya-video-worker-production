@@ -799,34 +799,69 @@ def _plain(v: Any) -> Any:
 def _probe(path: str, ffprobe: str = "ffprobe") -> Dict[str, Any]:
     r = subprocess.run([ffprobe, "-v", "error", "-show_entries",
                         "stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,r_frame_rate,"
-                        "sample_rate,channels,extradata:format=duration", "-show_data", "-of", "json", path],
+                        "sample_rate,channels,extradata,color_range,color_space,color_transfer,color_primaries:format=duration", "-show_data", "-of", "json", path],
                        capture_output=True, text=True, timeout=60)
     return json.loads(r.stdout or "{}")
 
 
 def _sig(p: Dict[str, Any]) -> List[Tuple]:
+    """What must match for a stream-copy join. AAC: the extradata (AudioSpecificConfig) IS the decoder config; the
+    ffprobe "profile" string of the same config reads "LC" or nothing depending on the file (seen on Vast 2026-11-17)
+    -> not compared for audio."""
     out = []
     for s in p.get("streams") or []:
-        out.append(tuple(s.get(k) for k in ("codec_type", "codec_name", "profile", "level", "width", "height",
-                                             "pix_fmt", "r_frame_rate", "sample_rate", "channels", "extradata")))
+        row = [s.get(k) for k in ("codec_type", "codec_name", "profile", "level", "width", "height",
+                                  "pix_fmt", "r_frame_rate", "sample_rate", "channels", "extradata")]
+        if row[0] == "audio":
+            row[2] = None
+        out.append(tuple(row))
     return out
 
 
-def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg") -> str:
+def _color_args(v: Dict[str, Any]) -> List[str]:
+    """The clip's colour tags for the hook encode: they are written into the H.264 SPS (VUI), and the flash filters
+    drop the transfer tag -> SPS differed in one byte from the clip's and every join re-encoded (Vast 2026-11-17)."""
+    out: List[str] = []
+    for key, opt in (("color_primaries", "-color_primaries"), ("color_transfer", "-color_trc"),
+                     ("color_space", "-colorspace"), ("color_range", "-color_range")):
+        val = v.get(key)
+        if val and val not in ("unknown", "reserved"):
+            out += [opt, str(val)]
+    return out
+
+
+def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg", match: Optional[str] = None) -> str:
     """The hook piece's tail: a short white flash and a quiet whoosh straddling the cut (one short re-encode with the
-    job's encoder, so the stream-copy join with the clip stays possible)."""
+    job's encoder, so the stream-copy join with the clip stays possible). ``match`` = the finished clip: the hook is
+    encoded at ITS frame rate and audio rate / channels (2026-11-17: a storytelling clip is 48 kHz at the rounded source
+    fps, the hook piece came out at 44.1 kHz / the raw rate -> every join re-encoded the whole clip, up to 6 min)."""
     from .cut_profile import run_encode
     from .crop.smart_crop_adapter import _env_encoder_args
     p = _probe(raw, os.path.join(os.path.dirname(ffmpeg), "ffprobe") if os.path.dirname(ffmpeg) else "ffprobe")
     d = float((p.get("format") or {}).get("duration") or 0.0)
     has_a = any(s.get("codec_type") == "audio" for s in p.get("streams") or [])
     sr = next((int(s.get("sample_rate") or 48000) for s in p.get("streams") or [] if s.get("codec_type") == "audio"), 48000)
+    fps_f, ach, col = "", [], []
+    if match:
+        try:
+            pm = _probe(match, os.path.join(os.path.dirname(ffmpeg), "ffprobe") if os.path.dirname(ffmpeg) else "ffprobe")
+            mv = next((s for s in pm.get("streams") or [] if s.get("codec_type") == "video"), {})
+            ma = next((s for s in pm.get("streams") or [] if s.get("codec_type") == "audio"), {})
+            if mv.get("r_frame_rate") and mv.get("r_frame_rate") != "0/0":
+                fps_f = f",fps={mv['r_frame_rate']}"
+            if ma.get("sample_rate"):
+                sr = int(ma["sample_rate"])
+            if ma.get("channels"):
+                ach = ["-ac", str(int(ma["channels"]))]
+            col = _color_args(mv)
+        except Exception:  # noqa: BLE001 - no match info: the join simply re-encodes as before
+            pass
     fl = cfg.flash_sec
     wd = min(0.45, d)
     hold = 0.08                                     # the last ~2 frames are fully white: a real flash at the cut
     wh_hold = max(0.0, float(os.environ.get("SONYA_HOOK_WHITE_HOLD", cfg.white_hold_sec)))
     vf = (f"[0:v]fade=t=out:st={max(0.0, d - fl - hold):.3f}:d={fl:.3f}:color=white,"
-          f"tpad=stop_mode=add:stop_duration={wh_hold:.3f}:color=white[v]")
+          f"tpad=stop_mode=add:stop_duration={wh_hold:.3f}:color=white{fps_f}[v]")
     total = d + wh_hold
     # whoosh: band-passed pink noise with a fast rise and a short tail, quiet, ending at the cut
     wh = (f"anoisesrc=d={wd:.3f}:c=pink:r={sr}:a=0.6,highpass=f=500,lowpass=f=5000,"
@@ -841,8 +876,8 @@ def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg") -
 
     def make(e):
         return [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", raw,
-                "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", *e, "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-ar", str(sr), "-movflags", "+faststart", out]
+                "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", *e, "-pix_fmt", "yuv420p", *col,
+                "-c:a", "aac", "-b:a", "192k", "-ar", str(sr), *ach, "-movflags", "+faststart", out]
     r, _, _ = run_encode(make, enc, timeout=120.0, what=os.path.basename(out))
     if r.returncode != 0:
         raise RuntimeError(f"teaser finish failed: {(r.stderr or '')[-300:]}")
@@ -871,7 +906,10 @@ def join(teaser: str, main: str, out: str, ffmpeg: str = "ffmpeg") -> str:
     else:
         names = ("type", "codec", "profile", "level", "w", "h", "pix_fmt", "fps", "sample_rate", "channels", "extradata")
         diff = sorted({names[k] for a, b in zip(_sig(pt), _sig(pm)) for k in range(len(names)) if a[k] != b[k]})
-        logger.info("[hooks] join re-encodes: hook and clip encodes differ in %s", ",".join(diff) or "stream count")
+        logger.info("[hooks] join re-encodes: hook and clip encodes differ in %s%s", ",".join(diff) or "stream count",
+                    "" if "extradata" not in diff else " (%s)" % "; ".join(
+                        f"{a[1]} {a[2]}/{a[3]} {str(a[10])[:60]} vs {b[2]}/{b[3]} {str(b[10])[:60]}"
+                        for a, b in zip(_sig(pt), _sig(pm)) if a[0] == "video"))
     d = float((pm.get("format") or {}).get("duration") or 60.0)
     enc = _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p"]
     has_a = all(any(s.get("codec_type") == "audio" for s in p.get("streams") or []) for p in (pt, pm))

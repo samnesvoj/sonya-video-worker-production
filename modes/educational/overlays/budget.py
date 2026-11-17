@@ -59,13 +59,34 @@ class Ledger:
         if float(self.data["total_rub"]) + forecast > self.total_limit_rub:
             raise BudgetExceeded(f"total limit: {self.data['total_rub']:.2f} + {forecast:.2f} > {self.total_limit_rub:.2f} RUB")
 
-    def book(self, video_id: str, rub: float) -> None:
+    def _reload(self) -> None:
+        """Clips of one job plan their cards in parallel threads (2026-11-17), each with its own Ledger on the same
+        file: re-read it under the lock so no booking of a sibling is lost (last write used to win)."""
+        if self.path and self.path.exists():
+            try:
+                self.data = json.loads(self.path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+
+    def reserve(self, video_id: str, forecast: float) -> None:
+        """Atomic check + book of the pessimistic forecast (parallel clips can never pass the limit together);
+        after the answer book only the difference: book(video_id, real - forecast, call=False)."""
         with _lock:
-            self.data["videos"][video_id] = round(self.spent(video_id) + rub, 4)
-            self.data["total_rub"] = round(float(self.data["total_rub"]) + rub, 4)
-            self.data["calls"] = int(self.data["calls"]) + 1
-            if self.path:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
-                tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
-                os.replace(tmp, self.path)
+            self._reload()
+            self.check(video_id, forecast)
+            self._book_locked(video_id, forecast, True)
+
+    def book(self, video_id: str, rub: float, call: bool = True) -> None:
+        with _lock:
+            self._reload()
+            self._book_locked(video_id, rub, call)
+
+    def _book_locked(self, video_id: str, rub: float, call: bool) -> None:
+        self.data["videos"][video_id] = round(self.spent(video_id) + rub, 4)
+        self.data["total_rub"] = round(float(self.data["total_rub"]) + rub, 4)
+        self.data["calls"] = int(self.data["calls"]) + int(call)
+        if self.path:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
+            os.replace(tmp, self.path)
