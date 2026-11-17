@@ -83,8 +83,10 @@ def enrich_video_for_mode(
         return not tracked and _flag(name, default)
 
     def _step(name: str, progress: float, fn: Callable) -> None:
+        from scripts.shared import profiling
         try:
-            value = fn()
+            with profiling.stage("enrich:" + name):
+                value = fn()
             if value is not None:
                 result[name] = value
             if progress_callback:

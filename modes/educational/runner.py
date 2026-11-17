@@ -61,7 +61,9 @@ def run(
     # ── Educational v4: which parts become clips ─────────────────────────────
     # one rouble ledger per job: the editor and every clip's card planner share the per-video limit
     params = {**params, "edu_ledger_path": params.get("edu_ledger_path") or str(output_dir / "edu_llm_ledger.json")}
-    selection = select_segments(input_video_path, word_timestamps, params, output_dir, enrichment)
+    from scripts.shared.profiling import stage
+    with stage("select"):
+        selection = select_segments(input_video_path, word_timestamps, params, output_dir, enrichment)
     top = selection["segments"]
 
     # ── Build layout-aware crop hints ─────────────────────────────────────────
@@ -86,15 +88,17 @@ def run(
         other_aspect = isinstance(overlays_opt, dict) and overlays_opt.get("aspect", "9:16") != "9:16"
         try:
             if not other_aspect:    # compose_vertical_clip only makes 9:16; other aspects re-cut the source themselves
-                frame, why = _frame_choice(params, input_video_path, seg_start, seg_duration, layout_mode)
+                with stage("clip:frame_choice"):
+                    frame, why = _frame_choice(params, input_video_path, seg_start, seg_duration, layout_mode)
                 seg["frame_layout"], seg["frame_reason"] = frame, why
                 st = None
                 if frame == "stage":
                     try:
                         from modes.educational.stage import render_stage
                         from modes.educational.templates import get_template
-                        st = render_stage(input_video_path, out, seg_start, seg_duration,
-                                          get_template(look["template"]).stage)
+                        with stage("clip:render_stage"):
+                            st = render_stage(input_video_path, out, seg_start, seg_duration,
+                                              get_template(look["template"]).stage)
                         if overlays_opt is not None:
                             overlays_opt.update(on_stage=True, protect_rect=st["video_rect"])
                     except Exception as exc:  # noqa: BLE001 — the user still gets the clip, cropped as before
@@ -102,21 +106,23 @@ def run(
                         enrichment.setdefault("warnings", []).append(f"edu_stage_failed: {type(exc).__name__}")
                         seg["frame_layout"] = "crop"
                 if st is None:
-                    compose_vertical_clip(
-                        input_video_path=input_video_path,
-                        output_path=out,
-                        crop_hints=layout_crop_hints,
-                        start_time=seg_start,
-                        duration=seg_duration,
-                    )
+                    with stage("clip:render_crop"):
+                        compose_vertical_clip(
+                            input_video_path=input_video_path,
+                            output_path=out,
+                            crop_hints=layout_crop_hints,
+                            start_time=seg_start,
+                            duration=seg_duration,
+                        )
                 output_paths.append(out)
             logger.info(
                 "[educational] Clip %d: start=%.1fs dur=%.1fs words=%d layout=%s",
                 i + 1, seg_start, seg_duration, len(seg_words), layout_mode,
             )
             if overlays_opt:
-                done = _apply_overlays(out, input_video_path, word_timestamps, seg_start, seg_duration, i + 1,
-                                       {**params, "edu_overlays": overlays_opt}, enrichment)
+                with stage("clip:overlays"):
+                    done = _apply_overlays(out, input_video_path, word_timestamps, seg_start, seg_duration, i + 1,
+                                           {**params, "edu_overlays": overlays_opt}, enrichment)
                 if other_aspect:
                     if not done:    # no plain clip exists yet in this path: the user still gets one
                         compose_vertical_clip(input_video_path=input_video_path, output_path=out,
@@ -193,7 +199,9 @@ def select_segments(input_video_path: str, words: List[Dict], params: Dict[str, 
     v5_result = None
     try:
         from scripts.legacy_gpu.educational_mode_v5 import run_educational_mode_v5
-        v5_result = run_educational_mode_v5(input_video_path, _asr_segments(words), None, None)
+        from scripts.shared.profiling import stage
+        with stage("select:v5"):
+            v5_result = run_educational_mode_v5(input_video_path, _asr_segments(words), None, None)
         trace["v5"] = {"status": "ok", "stats": v5_result.get("stats"),
                        "topics": len(v5_result.get("topic_segments") or [])}
     except Exception as exc:  # noqa: BLE001 — selection still works on the words alone
@@ -213,7 +221,9 @@ def select_segments(input_video_path: str, words: List[Dict], params: Dict[str, 
             from modes.educational.overlays import budget as bg
             ledger = bg.Ledger(params.get("edu_ledger_path"))
             editor_fn = ed.make_editor(video_id=Path(input_video_path).stem, ledger=ledger, want=max_clips)
-        segments, meta = sl.select_lesson_clips(words, cfg, v5_result, editor_fn)
+        from scripts.shared.profiling import stage
+        with stage("select:editor"):
+            segments, meta = sl.select_lesson_clips(words, cfg, v5_result, editor_fn)
         trace["selection"] = meta
         if meta.get("llm", {}).get("status") not in ("off", "ok"):
             warnings.append(f"educational_editor_{meta['llm'].get('status')}")

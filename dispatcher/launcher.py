@@ -15,7 +15,7 @@ SECRET_PASSTHROUGH = ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3
                       "TIMEWEB_GEMINI_API_KEY", "TIMEWEB_GEMINI_BASE_URL", "TIMEWEB_GEMINI_MODEL",
                       "SONYA_LLM_TIMEWEB_ENABLED", "OPENROUTER_API_KEY", "SONYA_LLM_OPENROUTER_MODEL",
                       # load tests only (not secrets): resource sampler, clips rendered in parallel inside one job
-                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC",
+                      "SONYA_RES_SAMPLER", "SONYA_CLIP_WORKERS", "SONYA_REQUIRE_NVENC", "SONYA_PROFILE",
                       # multi-GPU sizing overrides (not secrets; scripts/ops/gpu_plan.py, MULTIGPU_NOTES.md)
                       "SONYA_NVENC_MAX_SESSIONS", "SONYA_VRAM_PER_JOB_MB", "SONYA_RAM_PER_JOB_MB", "SONYA_CPU_THREADS_PER_JOB",
                       "SONYA_JOBS_PER_GPU_MAX",
