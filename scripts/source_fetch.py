@@ -1,6 +1,7 @@
 """Worker-side "download the source by link" (params.source_fetch).
 
-The Moscow VPS cannot reach youtube.com, so the site hands such a job to the GPU worker with
+The Moscow VPS cannot reach youtube.com, so the site hands such a job to the GPU worker with (Rutube too since
+2026-11-17: the VPS only probes it, the heavy HLS download runs here, <=1080p)
 params.source_fetch = {"url", "platform", "max_source_sec"}. The worker downloads the best <=1080p (H.264 preferred) with
 yt-dlp (+deno), checks the length against the plan, uploads the file to the job's s3_input_key and carries on as usual."""
 from __future__ import annotations
@@ -46,13 +47,28 @@ _REASONS = (
     # still 403 after the in-place retries (url_ingest): requeued once (retry=True in gpu_worker), may land on another host
     (("http error 403", "403: forbidden"),
      ("SOURCE_FORBIDDEN", "YouTube временно не отдал видео серверу обработки. Попробуйте ещё раз через несколько минут или загрузите файл.")),
-    (("unsupported url",), ("SOURCE_UNSUPPORTED", "Ссылка не поддерживается. Поддерживаются YouTube, VK, Twitch.")),
+    (("unsupported url",), ("SOURCE_UNSUPPORTED", "Ссылка не поддерживается. Поддерживаются YouTube, VK, Rutube, Twitch.")),
 )
 _GENERIC = ("SOURCE_DOWNLOAD_FAILED", "Не удалось скачать видео по ссылке. Проверьте, что она рабочая и видео публичное.")
 
 
-def classify_error(exc: BaseException) -> tuple[str, str]:
+# Rutube answers its video JSON with 404 (deleted / wrong id) or 403 (private, paid, or closed to the server's country).
+# A Rutube 403 is not YouTube's transient one: no requeue, a Rutube message.
+_RUTUBE_REASONS = (
+    (("http error 404", "404: not found"),
+     ("SOURCE_UNAVAILABLE", "Видео на Rutube недоступно или удалено. Проверьте ссылку.")),
+    (("http error 403", "403: forbidden", "no video formats found"),
+     ("SOURCE_PRIVATE", "Rutube не отдал видео: оно приватное, платное или закрыто для сервера обработки. "
+                        "Откройте публичный доступ или загрузите файл.")),
+)
+
+
+def classify_error(exc: BaseException, platform: str = "") -> tuple[str, str]:
     text = f"{exc} {exc.__cause__ or ''}".lower()
+    if platform == "rutube":
+        for needles, res in _RUTUBE_REASONS:
+            if any(n in text for n in needles):
+                return res
     for needles, res in _REASONS:
         if any(n in text for n in needles):
             return res
@@ -139,7 +155,7 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
         raise SourceFetchError(*_REASONS[-1][1]) from exc
     except url_ingest.DownloadFailed as exc:
         logger.warning("[source_fetch] failed platform=%s: %s", platform, str(exc)[:300])
-        raise SourceFetchError(*classify_error(exc)) from exc
+        raise SourceFetchError(*classify_error(exc, platform)) from exc
     try:
         dur = _duration(path)
         if trim and dur is not None and dur > trim + 3:    # keyframe-rounded section came out longer: cut exactly

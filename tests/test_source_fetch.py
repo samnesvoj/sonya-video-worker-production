@@ -18,6 +18,22 @@ def test_classify(msg, code):
     assert sfm.classify_error(url_ingest.DownloadFailed(msg))[0] == code
 
 
+@pytest.mark.parametrize("msg,code", [
+    ("[rutube] x: Unable to download video JSON: HTTP Error 404: Not Found", "SOURCE_UNAVAILABLE"),
+    ("[rutube] x: Unable to download video JSON: HTTP Error 403: Forbidden", "SOURCE_PRIVATE"),
+    ("boom", "SOURCE_DOWNLOAD_FAILED"),
+])
+def test_classify_rutube(msg, code):
+    code_got, text = sfm.classify_error(url_ingest.DownloadFailed(msg), "rutube")
+    assert code_got == code
+    if code != "SOURCE_DOWNLOAD_FAILED":
+        assert "Rutube" in text and "YouTube" not in text
+
+
+def test_youtube_403_still_requeue_code():
+    assert sfm.classify_error(url_ingest.DownloadFailed("HTTP Error 403: Forbidden"), "youtube")[0] == "SOURCE_FORBIDDEN"
+
+
 def _patch(monkeypatch, tmp_path, duration, uploaded):
     f = tmp_path / "dl" / "v.mp4"
     f.parent.mkdir()

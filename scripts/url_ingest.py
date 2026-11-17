@@ -7,9 +7,10 @@ Supported sources:
   - YouTube  (youtube.com, youtu.be)
   - VK Video (vk.com, vkvideo.ru)
   - Twitch   (twitch.tv) — same public-VOD path as YouTube/VK, no extra code
+  - Rutube   (rutube.ru/video/…, /shorts/…, /play/embed/…) — yt-dlp's Rutube extractor, <=1080p (2026-11-17)
   - Direct HTTP(S) links to a video file (checked by Content-Type / extension)
 
-All three platform sources go through plain `yt-dlp` (a standard, widely
+All platform sources go through plain `yt-dlp` (a standard, widely
 used open-source extractor) — nothing here impersonates another app, spoofs
 a device/bundle ID, or calls an undocumented third-party proxy API. No
 cookies file, no authenticated/paid-content bypass: only what is publicly
@@ -66,7 +67,7 @@ class UrlIngestError(Exception):
 
 
 class UnsupportedUrlError(UrlIngestError):
-    user_message = "Ссылка не поддерживается. Используйте YouTube, VK или прямую ссылку на видеофайл."
+    user_message = "Ссылка не поддерживается. Используйте YouTube, VK, Rutube, Twitch или прямую ссылку на видеофайл."
 
 
 class UnsafeUrlError(UrlIngestError):
@@ -133,8 +134,29 @@ _FORBIDDEN_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 # ── Platform detection ───────────────────────────────────────────────────
 
+YTDLP_PLATFORMS = ("youtube", "vk", "twitch", "rutube")
+
+_RUTUBE_HOSTS = ("rutube.ru", "www.rutube.ru", "m.rutube.ru")
+# /video/<32 hex>/, /video/private/<id>/, /shorts/<id>/, /play/embed/<id or number>, /video/embed/<number>
+_RUTUBE_VIDEO_RE = re.compile(r"^/(?:video/(?:private/)?[0-9a-f]{32}|shorts/[0-9a-f]{32}|(?:play|video)/embed/[0-9a-z]+)(?:/|$)", re.I)
+_RUTUBE_SHORTS_RE = re.compile(r"^/shorts/([0-9a-f]{32})(?:/|$)", re.I)
+RUTUBE_MAX_HEIGHT = 1080   # Rutube serves up to 1080p H.264 HLS (one stream with audio)
+
+
+def canonical_url(url: str, platform: str) -> str:
+    """rutube.ru/shorts/<id> -> rutube.ru/video/<id>/ (the same id; the video extractor knows it for sure)."""
+    if platform == "rutube":
+        try:
+            m = _RUTUBE_SHORTS_RE.match(urlparse(url.strip()).path or "")
+        except ValueError:
+            m = None
+        if m:
+            return f"https://rutube.ru/video/{m.group(1).lower()}/"
+    return url
+
+
 def detect_platform(url: str) -> str:
-    """Returns 'youtube' | 'vk' | 'twitch' | 'direct' | 'unsupported'."""
+    """Returns 'youtube' | 'vk' | 'twitch' | 'rutube' | 'direct' | 'unsupported'."""
     if not url or not isinstance(url, str):
         return "unsupported"
 
@@ -164,6 +186,10 @@ def detect_platform(url: str) -> str:
         return "twitch"
     if host.endswith(".twitch.tv"):
         return "twitch"
+
+    if host in _RUTUBE_HOSTS:
+        # a single video only (channels / playlists / tags would be a playlist or "unsupported" in yt-dlp)
+        return "rutube" if _RUTUBE_VIDEO_RE.match(parsed.path or "") else "unsupported"
 
     # Direct video URL: only if the path looks like a real video file, or
     # (checked later, over the network) the server reports a video
@@ -227,7 +253,7 @@ def _safe_filename(name: str, max_len: int = 200) -> str:
     return safe or "video.mp4"
 
 
-# ── yt-dlp path (youtube / vk / twitch) ─────────────────────────────────
+# ── yt-dlp path (youtube / vk / twitch / rutube) ─────────────────────────────────
 
 _YTDLP_FORMAT = (
     "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/"
@@ -264,7 +290,7 @@ def probe(url: str, platform: str, mode: Optional[str] = None,
     assert_safe_url(url)
     duration_cap = max_duration_sec or _max_duration_sec(mode)
 
-    if platform not in ("youtube", "vk", "twitch"):
+    if platform not in YTDLP_PLATFORMS:
         # 'direct' is probed via a lightweight HEAD/range request instead —
         # see _probe_direct().
         return _probe_direct(url, mode=mode)
@@ -282,7 +308,7 @@ def probe(url: str, platform: str, mode: Optional[str] = None,
     }
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False) or {}
+            info = ydl.extract_info(canonical_url(url, platform), download=False) or {}
     except Exception as exc:
         logger.warning("[url_ingest] probe_failed platform=%s url_host=%s: %s",
                         platform, urlparse(url).hostname, exc)
@@ -369,7 +395,7 @@ def download_video(
 
     tmp_dir = tempfile.mkdtemp(prefix="sonya_url_ingest_")
 
-    if platform in ("youtube", "vk", "twitch"):
+    if platform in YTDLP_PLATFORMS:
         return _download_via_ytdlp(url, platform, tmp_dir, progress_cb, mode=mode, trim_sec=trim_sec,
                                    trim_start=trim_start, max_bytes=max_bytes, max_height=max_height)
     if platform == "direct":
@@ -389,6 +415,10 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         raise DownloadFailed("yt-dlp is not installed")
 
     outtmpl = os.path.join(tmp_dir, f"{platform}_{uuid.uuid4().hex}.%(ext)s")
+    url = canonical_url(url, platform)
+    if platform == "rutube":
+        # 1080p is Rutube's top quality; one HLS stream (video+audio), fetched in parallel fragments
+        max_height = min(int(max_height or RUTUBE_MAX_HEIGHT), RUTUBE_MAX_HEIGHT)
 
     def _hook(d: dict) -> None:
         if not progress_cb:
@@ -420,6 +450,8 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         # unauthenticated content is supported.
     }
 
+    if platform == "rutube":
+        opts["concurrent_fragment_downloads"] = int(os.environ.get("SONYA_YTDLP_FRAGMENTS", "4"))
     if trim_sec and trim_sec > 0:
         from yt_dlp.utils import download_range_func
         st = max(0, int(trim_start or 0))
@@ -433,7 +465,7 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         except Exception as exc:
             # Load test 2026-11-16: YouTube answered "HTTP Error 403: Forbidden" to one fresh server for a public video
             # that downloads fine a minute later / elsewhere. A new extract_info gets new signed URLs: retry.
-            if attempt < tries and _is_transient_403(exc):
+            if attempt < tries and platform != "rutube" and _is_transient_403(exc):   # Rutube 403 = private/closed
                 logger.warning("[url_ingest] youtube 403, retry %d/%d platform=%s", attempt, tries - 1, platform)
                 time.sleep(3 * attempt)
                 continue
