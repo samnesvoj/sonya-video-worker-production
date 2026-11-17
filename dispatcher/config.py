@@ -54,6 +54,9 @@ class FleetConfig:
     host_error_grace_seconds: int = 60       # Vast reports a docker/GPU start error this long -> drop the host now
     stall_seconds: int = 900                 # jobs wait, worker is up but claims nothing for this long -> replace the instance
     max_creates_per_hour: int = 6            # runaway-cost guard
+    # 2026-11-17: 11 creates in a day for YouTube "not a bot" (every Vast IP is refused). The worker now hands such links
+    # to the relay (scripts/yt_relay.py) and keeps working; a host is replaced for a bot check at most this often a day.
+    botcheck_replace_per_day: int = 2
     max_running_hours: int = 24              # hard cap for a single continuous run
     pool_modes: Tuple[str, ...] = ("virality", "beep")
     label_prefix: str = "sonya-pool-"
@@ -156,6 +159,7 @@ class FleetConfig:
             host_error_grace_seconds=_int(e, "SONYA_HOST_ERROR_GRACE_SECONDS", 60, lo=20, hi=900),
             stall_seconds=_int(e, "SONYA_STALL_SECONDS", 900, lo=300, hi=7200),
             max_creates_per_hour=_int(e, "SONYA_MAX_CREATES_PER_HOUR", 6, lo=1, hi=60),
+            botcheck_replace_per_day=_int(e, "SONYA_BOTCHECK_REPLACE_PER_DAY", 2, lo=0, hi=50),
             pool_modes=tuple(m.strip() for m in e.get("SONYA_POOL_MODES", "virality,beep").split(",") if m.strip()),
             disk_gb=_int(e, "SONYA_DISK_GB", 40, lo=20, hi=500),
             max_dph=Decimal(e.get("SONYA_MAX_DPH", "0.18")),

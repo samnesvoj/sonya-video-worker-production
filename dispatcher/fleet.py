@@ -63,6 +63,7 @@ class FleetManager:
         # does not encode; SONYA_NVENC_MISSING=replace). None = feature off (tests, simulators).
         self._nvenc_missing = nvenc_missing
         self._nvenc_checked: Dict[int, float] = {}
+        self._botcheck_seen: set = set()    # instance ids already handled for a YouTube bot check
         self._token, self._env, self.now = token_provider, environ, clock
         self._dry_seen: set = set()
         self._create_backoff_until = 0.0
@@ -228,13 +229,20 @@ class FleetManager:
     def _maybe_stop(self, inst: Inst, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         busy = snap.active_by_worker.get(inst.label, 0) > 0
         terminal = snap.last_terminal_by_worker.get(inst.label)
-        if inst.label in snap.bot_check_workers:
-            # YouTube answered "confirm you're not a bot" to this host's IP; its worker requeued the job and stopped
-            # claiming. Ban the machine for a week (other hosts download the same link fine) and replace the instance.
+        if inst.label in snap.bot_check_workers and inst.id not in self._botcheck_seen:
+            # YouTube answered "confirm you're not a bot" to this host AND no relay could fetch the link (the worker
+            # tries scripts/yt_relay.py first and keeps claiming other jobs). Ban the machine for a week; replace the
+            # instance only within SONYA_BOTCHECK_REPLACE_PER_DAY (2026-11-17: 11 replacements/day, ~800 RUB, 0 clips:
+            # every Vast IP is refused, a new host does not help).
+            self._botcheck_seen.add(inst.id)
             if inst.machine_id:
                 self.store.ban_machine(inst.machine_id, now + 7 * 86400, "youtube_bot_check")
-            if not busy:
-                self.store.event(now, inst.id, "youtube_bot_check", pending=snap.pending)
+            day_ago = now - 86400
+            n = sum(1 for e in self.store.events() if e["event"] == "youtube_bot_check" and e["ts"] > day_ago
+                    and (e.get("detail") or {}).get("replaced"))
+            replace = not busy and n < self.cfg.botcheck_replace_per_day
+            self.store.event(now, inst.id, "youtube_bot_check", pending=snap.pending, replaced=replace)
+            if replace:
                 self._destroy(inst, now, actions, reason="youtube_bot_check")
                 return
         if busy:

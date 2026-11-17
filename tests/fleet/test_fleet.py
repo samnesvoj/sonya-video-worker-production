@@ -530,3 +530,18 @@ def test_nvenc_check_never_touches_a_worker_that_already_worked():
     clock.advance(31)
     mgr.tick()
     assert not any(e["event"] == "nvenc_missing" for e in store.events(iid))
+
+
+def test_youtube_bot_check_replacements_capped_per_day():
+    # 2026-11-17: every Vast IP was refused -> 11 replacements in a day, ~800 RUB, 0 clips. With the cap at 0 the host
+    # is banned (new instances avoid it) but kept: its worker fetched other jobs and the YouTube one goes via the relay.
+    mgr, vast, queue, store, clock = make({"botcheck_replace_per_day": 0})
+    vast.offers.append({**vast.offers[0], "id": 2, "machine_id": 8, "dph_total": 0.12, "dph_base": 0.12})
+    iid, label = boot_one(mgr, vast, queue, clock)
+    machine = store.get(iid).machine_id
+    queue.add("j1", status="queued", worker_id=label, ts=clock(), last_error="SOURCE_BOT_CHECK")
+    mgr.tick(); mgr.tick(); mgr.tick()
+    assert vast.n("destroy") == 0
+    ev = [e for e in store.events(iid) if e["event"] == "youtube_bot_check"]
+    assert len(ev) == 1 and ev[0]["detail"]["replaced"] is False      # handled once, not every tick
+    assert machine in store.banned_machines(clock())
