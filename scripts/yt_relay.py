@@ -419,6 +419,10 @@ class Relay:
 
     def serve(self) -> None:
         self.work_root.mkdir(parents=True, exist_ok=True)
+        # yt-dlp/url_ingest temp files go to the work dir: /tmp is a ~1 GB RAM tmpfs on the bot server (Ubuntu 26.04),
+        # a 1-hour video filled it (ENOSPC, 2026-11-17)
+        os.environ["TMPDIR"] = str(self.work_root)
+        tempfile.tempdir = str(self.work_root)
         last_hb = last_canary = last_jan = 0.0
         last_update = time.time()
         restart = False
