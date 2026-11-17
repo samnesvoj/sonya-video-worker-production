@@ -84,7 +84,7 @@ def propose(words: List[Dict[str, Any]], *, video_id: str, ledger: bg.Ledger, op
     model = providers[0].model
     forecast = bg.forecast_rub(messages, MAX_OUTPUT_TOKENS, model)
     try:
-        ledger.check(video_id, forecast)
+        ledger.reserve(video_id, forecast)      # atomic: clips plan in parallel threads
     except bg.BudgetExceeded as e:
         logger.warning("[edu-overlays] LLM skipped: %s", e)
         return {"items": [], "telemetry": {"llm": "budget_stop", "forecast_rub": round(forecast, 3)}, "error": "budget"}
@@ -94,7 +94,7 @@ def propose(words: List[Dict[str, Any]], *, video_id: str, ledger: bg.Ledger, op
                            retries=1, max_request_bytes=120_000)
     except (lp.LLMDisabled, lp.LLMError) as e:
         logger.warning("[edu-overlays] LLM failed: %s", getattr(e, "kind", type(e).__name__))
-        ledger.book(video_id, forecast)     # a failed request may still be billed: book the pessimistic forecast
+        pass                                # a failed request may still be billed: the forecast stays booked
         return {"items": [], "telemetry": {"llm": "failed", "forecast_rub": round(forecast, 3)},
                 "error": getattr(e, "kind", "unknown")}
     if res.input_tokens is not None and res.output_tokens is not None:
@@ -103,7 +103,7 @@ def propose(words: List[Dict[str, Any]], *, video_id: str, ledger: bg.Ledger, op
         booked = forecast
     if res.cost_usd is not None:
         booked = max(booked, float(res.cost_usd) * bg.RUB_PER_USD)
-    ledger.book(video_id, booked)
+    ledger.book(video_id, booked - forecast, call=False)
     return {"items": _parse(res.text), "error": None,
             "telemetry": {"llm": "ok", "provider": res.provider, "model": res.model, "prompt_version": PROMPT_VERSION,
                           "input_tokens": res.input_tokens, "output_tokens": res.output_tokens,

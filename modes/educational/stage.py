@@ -70,7 +70,8 @@ def render_stage(src: str, out: str, start: float, duration: float, color: Tuple
            "-i", src, "-loop", "1", "-i", mask, "-t", f"{duration:.3f}", "-filter_complex", graph, "-map", "[o]",
            "-map", "0:a?", *(_env_encoder_args() or ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast"]),
            "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out]
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    from scripts.shared import nvenc_guard     # clips render in parallel: the GeForce session cap -> CPU, never a failure
+    r = nvenc_guard.run(cmd, capture_output=True, text=True)
     Path(mask).unlink(missing_ok=True)
     if r.returncode != 0:
         raise RuntimeError(f"stage render failed: {r.stderr[-300:]}")

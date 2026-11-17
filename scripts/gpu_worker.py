@@ -1028,10 +1028,12 @@ def process_job(job: dict, worker_id: str) -> None:
 
         # ── 4b. Light preview copy (720p ~2.5 Mb/s, faststart) + poster per clip ─
         if mode in _PREVIEW_MODES:
-            with _prof.stage("previews"):
-                for _clip in sorted(output_dir.rglob("*.mp4")):
-                    if not _clip.stem.endswith("_preview"):
-                        _make_preview_assets(_clip)
+            # 2026-11-17: in parallel (they were made one after another, ~5-8 s each on the CPU); same files
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+            _clips = [c for c in sorted(output_dir.rglob("*.mp4")) if not c.stem.endswith("_preview")]
+            with _prof.stage("previews"), \
+                    _TPE(max_workers=max(1, min(len(_clips) or 1, int(os.environ.get("SONYA_PREVIEW_WORKERS", "4"))))) as _pp:
+                list(_pp.map(_make_preview_assets, _clips))
             output_files = [f for f in output_dir.rglob("*") if f.is_file()]
 
         # ── 5. Upload outputs to S3 ───────────────────────────────────────────

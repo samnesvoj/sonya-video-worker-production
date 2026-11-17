@@ -72,8 +72,13 @@ def run(
     look = _look_options(params)
 
     from scripts.shared.crop.smart_crop_adapter import compose_vertical_clip
-    output_paths = []
-    for i, seg in enumerate(top):
+    import threading
+    _out_lock = threading.Lock()
+    done_paths: Dict[int, str] = {}
+
+    def _one(i: int, seg: Dict[str, Any]) -> None:
+        """One clip (a worker thread since 2026-11-17: clips were rendered one after another, ~70 % of the job)."""
+        output_paths: List[str] = []
         out = str(output_dir / f"edu_clip_{i+1:02d}.mp4")
         seg_start    = float(seg.get("start", 0))
         seg_duration = float(seg.get("duration", 60.0))
@@ -131,6 +136,15 @@ def run(
                     output_paths.append(out)
         except Exception as exc:
             logger.warning("[educational] Clip %d failed: %s", i + 1, exc)
+        with _out_lock:
+            if output_paths:
+                done_paths[i] = output_paths[-1]
+
+    from concurrent.futures import ThreadPoolExecutor
+    from scripts.shared.clip_parallel import clip_workers
+    with stage("compose"), ThreadPoolExecutor(max_workers=clip_workers(len(top))) as pool:
+        list(pool.map(lambda a: _one(*a), enumerate(top)))
+    output_paths = [done_paths[k] for k in sorted(done_paths)]
 
     from scripts.shared.mode_output import write_selected_segments
     names = [str(output_dir / f"edu_clip_{i+1:02d}.mp4") for i in range(len(top))]

@@ -103,7 +103,8 @@ def composite(base: str, out: str, layers: List[PlacedLayer], *, subtitle_path: 
         cmd += ["-map", "0:v"]
     cmd += ["-map", "0:a?", *(encoder_args or _env_encoder_args() or ["-c:v", "libx264", "-crf", "20", "-preset", "medium"]),
             "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart", out_path]
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    from scripts.shared import nvenc_guard     # clips render in parallel: the GeForce session cap -> CPU, never a failure
+    r = nvenc_guard.run(cmd, capture_output=True, text=True, cwd=cwd)
     if r.returncode != 0:
         raise RuntimeError(f"overlay composite failed: {r.stderr[-400:]}")
     return out
