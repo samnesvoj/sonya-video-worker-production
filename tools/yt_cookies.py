@@ -109,6 +109,8 @@ def ingest(st: dict) -> bool:
     if not INCOMING.is_dir():
         return False
     for p in sorted(INCOMING.glob("*.txt")):
+        if p.name.upper().startswith("README") or p.name.endswith(".rejected.txt"):
+            continue
         data = p.read_bytes()
         why = validate(data)
         if why:
