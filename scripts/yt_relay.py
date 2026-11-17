@@ -153,21 +153,38 @@ def fetch_via_relay(job_id: str, sf: Dict[str, Any], mode: str, s3_key: str, wor
                                               "max_height": os.environ.get("SONYA_YTDLP_MAX_HEIGHT", "1080")})
     logger.info("[yt_relay] request job_id=%s", job_id)
     last_move, last_sig, last_tick = t0, None, 0.0
+    net_err_since: Optional[float] = None
     try:
         while True:
             now = time.time()
-            sts = statuses(job_id)
+            try:
+                sts = statuses(job_id)
+                hbs = heartbeats(now)
+                net_err_since = None
+            except Exception as exc:  # noqa: BLE001 - a network blip to S3 must not drop the job
+                net_err_since = net_err_since or now
+                logger.warning("[yt_relay] poll error %s", type(exc).__name__)
+                if now - net_err_since > 300:
+                    raise RelayUnavailable(f"S3 unreachable: {type(exc).__name__}") from exc
+                time.sleep(max(poll, 5))
+                continue
             done = [n for n, s in sts.items() if s.get("state") == "done"]
             if done:
                 dest = work_dir / "input.mp4"
-                download_file(s3_key, dest)
+                for i in range(5):
+                    try:
+                        download_file(s3_key, dest)
+                        break
+                    except Exception:  # noqa: BLE001
+                        if i == 4:
+                            raise
+                        time.sleep(5 * (i + 1))
                 st = sts[done[0]]
                 logger.info("[yt_relay] done job_id=%s relay=%s in %.0f s", job_id, done[0], now - t0)
                 return {"path": dest, "duration": st.get("duration"), "relay": done[0], "wait_s": round(now - t0, 1)}
             sig = json.dumps({n: (s.get("state"), s.get("ts")) for n, s in sts.items()}, sort_keys=True)
             if sig != last_sig:
                 last_sig, last_move = sig, now
-            hbs = heartbeats(now)
             alive = {n for n, h in hbs.items() if h.get("fresh")}
             failed = {n: s for n, s in sts.items() if s.get("state") == "failed"}
             running = [n for n, s in sts.items() if s.get("state") not in TERMINAL and now - float(s.get("ts") or 0) <= STATUS_STALE]
