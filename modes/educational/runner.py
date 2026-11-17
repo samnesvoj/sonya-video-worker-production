@@ -38,6 +38,14 @@ def run(
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 2026-11-17 profile: the NVENC args were set only by Cut / Streamer (process-wide SONYA_RENDER_ARGS), so a worker
+    # process whose FIRST job was educational encoded every stage + overlay pass with libx264 on the CPU (8.6 min for a
+    # 9-min lecture). Same quality preset as Cut (NVENC p7 hq, 6 Mb/s cap; libx264 where NVENC does not work).
+    try:
+        from scripts.shared.cut_profile import ensure_render_args
+        ensure_render_args()
+    except Exception as exc:  # noqa: BLE001 - the CPU fallback in every encode stays
+        logger.warning("[educational] render encoder probe failed: %s", exc)
 
     from scripts.shared.enhancers.sonya_enhancer import enrich_video_for_mode
     enrichment = enrich_video_for_mode(
