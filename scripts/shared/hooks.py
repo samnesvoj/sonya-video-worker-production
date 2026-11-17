@@ -799,16 +799,34 @@ def _plain(v: Any) -> Any:
 def _probe(path: str, ffprobe: str = "ffprobe") -> Dict[str, Any]:
     r = subprocess.run([ffprobe, "-v", "error", "-show_entries",
                         "stream=index,codec_type,codec_name,profile,level,width,height,pix_fmt,r_frame_rate,"
-                        "sample_rate,channels,extradata:format=duration", "-show_data", "-of", "json", path],
+                        "sample_rate,channels,extradata,color_range,color_space,color_transfer,color_primaries:format=duration", "-show_data", "-of", "json", path],
                        capture_output=True, text=True, timeout=60)
     return json.loads(r.stdout or "{}")
 
 
 def _sig(p: Dict[str, Any]) -> List[Tuple]:
+    """What must match for a stream-copy join. AAC: the extradata (AudioSpecificConfig) IS the decoder config; the
+    ffprobe "profile" string of the same config reads "LC" or nothing depending on the file (seen on Vast 2026-11-17)
+    -> not compared for audio."""
     out = []
     for s in p.get("streams") or []:
-        out.append(tuple(s.get(k) for k in ("codec_type", "codec_name", "profile", "level", "width", "height",
-                                             "pix_fmt", "r_frame_rate", "sample_rate", "channels", "extradata")))
+        row = [s.get(k) for k in ("codec_type", "codec_name", "profile", "level", "width", "height",
+                                  "pix_fmt", "r_frame_rate", "sample_rate", "channels", "extradata")]
+        if row[0] == "audio":
+            row[2] = None
+        out.append(tuple(row))
+    return out
+
+
+def _color_args(v: Dict[str, Any]) -> List[str]:
+    """The clip's colour tags for the hook encode: they are written into the H.264 SPS (VUI), and the flash filters
+    drop the transfer tag -> SPS differed in one byte from the clip's and every join re-encoded (Vast 2026-11-17)."""
+    out: List[str] = []
+    for key, opt in (("color_primaries", "-color_primaries"), ("color_transfer", "-color_trc"),
+                     ("color_space", "-colorspace"), ("color_range", "-color_range")):
+        val = v.get(key)
+        if val and val not in ("unknown", "reserved"):
+            out += [opt, str(val)]
     return out
 
 
@@ -823,7 +841,7 @@ def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg", m
     d = float((p.get("format") or {}).get("duration") or 0.0)
     has_a = any(s.get("codec_type") == "audio" for s in p.get("streams") or [])
     sr = next((int(s.get("sample_rate") or 48000) for s in p.get("streams") or [] if s.get("codec_type") == "audio"), 48000)
-    fps_f, ach = "", []
+    fps_f, ach, col = "", [], []
     if match:
         try:
             pm = _probe(match, os.path.join(os.path.dirname(ffmpeg), "ffprobe") if os.path.dirname(ffmpeg) else "ffprobe")
@@ -835,6 +853,7 @@ def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg", m
                 sr = int(ma["sample_rate"])
             if ma.get("channels"):
                 ach = ["-ac", str(int(ma["channels"]))]
+            col = _color_args(mv)
         except Exception:  # noqa: BLE001 - no match info: the join simply re-encodes as before
             pass
     fl = cfg.flash_sec
@@ -857,7 +876,7 @@ def finish_teaser(raw: str, out: str, cfg: HookConfig, ffmpeg: str = "ffmpeg", m
 
     def make(e):
         return [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", raw,
-                "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", *e, "-pix_fmt", "yuv420p",
+                "-filter_complex", vf + ";" + af, "-map", "[v]", "-map", "[a]", *e, "-pix_fmt", "yuv420p", *col,
                 "-c:a", "aac", "-b:a", "192k", "-ar", str(sr), *ach, "-movflags", "+faststart", out]
     r, _, _ = run_encode(make, enc, timeout=120.0, what=os.path.basename(out))
     if r.returncode != 0:
