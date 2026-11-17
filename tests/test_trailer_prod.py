@@ -163,3 +163,19 @@ def test_runner_refuses_when_switched_off(monkeypatch, tmp_path):
     monkeypatch.setenv("SONYA_TRAILER", "off")
     with pytest.raises(RuntimeError, match="TRAILER_DISABLED"):
         runner._trailer("x.mp4", {"word_timestamps": [{"word": "a", "start": 0, "end": 1}]}, {}, tmp_path / "out")
+
+
+# ── subtitles never outside the frame, without shrinking everything ────────────────────────────────────────────
+
+def test_fit_ass_shrinks_only_the_too_wide_cues():
+    from scripts.shared.trailer import render
+    segs = [{"n": 1, "fn": "hook", "text": "Мои кореша постоянно упарывались всякой дрянью."},
+            {"n": 2, "fn": "cliffhanger", "text": "Я пришёл один на их поляну."}]
+    tl = edit.timeline(segs, narration.reading(segs)["segments"])
+    txt, info = render.fit_ass(render.ass(tl, "Он вернулся не туда", "highlight", "dela"))
+    assert info["widest_px"] <= render.SAFE_W
+    cues = [l for l in txt.splitlines() if l.startswith("Dialogue: 0")]
+    plain = [c for c in cues if "\\fs" not in c.split(",", 9)[9].replace("\\fscx", "").replace("\\fscy", "")]
+    assert plain, "short lines keep the style size"
+    for row, _ in render.ass_widths(txt):
+        assert len(row.replace("\\N", "")) <= 2 * render.SUB_MAX_CHARS + 12

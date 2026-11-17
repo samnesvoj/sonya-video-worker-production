@@ -155,10 +155,11 @@ def _wrap_hook(hook: str, max_w: float = 900.0, font: str = "Montserrat Black") 
 def to_ass(words: List[Word], preset_id: str, clip_duration: float, play_res: Tuple[int, int] = (1080, 1920),
            centered=None, avoid=None, base: Optional[SubtitleStyle] = None,
            keywords: Optional[List[str]] = None, hook: Optional[str] = None, font: Optional[str] = None,
-           promo: Optional[Dict] = None, hook_top: Optional[int] = None) -> str:
+           promo: Optional[Dict] = None, hook_top: Optional[int] = None, max_chars: Optional[int] = None) -> str:
     """keywords: words to keep emphasised (Submagic-style); hook: a title shown on top for the first seconds
     (Opus-style), on a translucent graphite plate. hook_top: its top edge in px (default: the style's 230 px;
-    the streamer layout puts it higher, over the webcam's headroom, so it does not cover the face)."""
+    the streamer layout puts it higher, over the webcam's headroom, so it does not cover the face).
+    max_chars: cap on the preset's characters per line (None = the preset's own)."""
     p = PRESETS.get(preset_id) or PRESETS[DEFAULT]
     hook_font = "Montserrat Black"
     if font and font in available_fonts():
@@ -168,6 +169,8 @@ def to_ass(words: List[Word], preset_id: str, clip_duration: float, play_res: Tu
         probe = "ГДЕ ТЫ БЕРЁШЬ СТОЛЬКО" if p.upper else "где ты берёшь столько"
         ratio = _text_width(probe, p.font, p.size) / max(1.0, _text_width(probe, name, p.size))
         p = replace(p, font=name, size=int(round(p.size * min(1.0, ratio))))
+    if max_chars:                       # shorter lines (the trailer: big text on a 3:4 picture, never clipped)
+        p = replace(p, max_chars=min(p.max_chars, int(max_chars)))
     w, h = play_res
     st = replace(base or SubtitleStyle(), font=p.font, size=p.size, outline=p.outline, shadow=p.shadow,
                  max_chars_per_line=p.max_chars, max_lines=p.lines)

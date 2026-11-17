@@ -29,6 +29,7 @@ TEXT_FADE = 0.045        # longer fades at cuts when the film's sound is up fron
 TITLE_TOP = 300
 SUB_MARGIN_V = 400       # subtitle bottom 400 px above the frame bottom: on the picture, clear of the TikTok UI
 SAFE_W = 1080 - 2 * 80
+SUB_MAX_CHARS = 12       # characters per subtitle line: 2 short lines of big text instead of one shrunken line
 
 
 def geometry(src_w: int, src_h: int, aspect: str = "3:4") -> Dict[str, int]:
@@ -230,7 +231,7 @@ def ass(tl: Dict[str, Any], title: str, preset: str, font: Optional[str] = None)
     total = tl["total"]
     card0, _ = tl["end_card"]
     text = to_ass(words, preset, card0, base=SubtitleStyle(margin_v=SUB_MARGIN_V), hook=title or None,
-                  font=font, hook_top=TITLE_TOP)
+                  font=font, hook_top=TITLE_TOP, max_chars=SUB_MAX_CHARS)
     card_style = "Style: Card,Montserrat Black,86,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,2,0,1,0,0,5,0,0,0,204"
     text = re.sub(r"^(Style: Hook,[^\n]*)$", lambda m: m.group(1) + "\n" + card_style, text, count=1, flags=re.M)
     end = [f"Dialogue: 2,{_t(card0 + 0.12)},{_t(total)},Card,,0,0,0,,{{\\an5\\pos({W // 2},{H // 2 - 30})\\fad(120,0)}}SONYA",
@@ -277,29 +278,47 @@ def ass_widths(text: str) -> List[Tuple[str, float]]:
         raw = parts[9]
         sc = re.search(r"\\fscx(\d+)", raw)
         scale = (int(sc.group(1)) / 100.0) if sc and parts[3].strip() == "Hook" else 1.0
+        fsm = re.search(r"\\fs(\d+)", raw)                 # a per-cue size (fit_ass) wins over the style's
+        size = int(fsm.group(1)) if fsm else st[1]
         clean = re.sub(r"\{[^}]*\}", "", raw)
         grow = 1.12 if "\\fscx1" in raw and parts[3].strip() != "Hook" else 1.0
         for row in clean.split("\\N"):
-            wdt = _text_width(row.upper() if st[2] == 1 else row, st[0], st[1]) * grow * scale
+            wdt = _text_width(row.upper() if st[2] == 1 else row, st[0], size) * grow * scale
             out.append((row, wdt))
     return out
 
 
 def fit_ass(text: str) -> Tuple[str, Dict[str, Any]]:
-    """Shrink the subtitle style until every line fits SAFE_W (never outside the frame)."""
-    ws = ass_widths(text)
-    widest = max((w for _, w in ws), default=0.0)
-    info = {"widest_px": round(widest, 1), "safe_px": SAFE_W, "scaled": 1.0}
-    if widest > SAFE_W:
-        k = SAFE_W / widest
-        def fix(m):
-            p = m.group(0).split(",")
-            p[2] = str(int(int(float(p[2])) * k))
-            return ",".join(p)
-        text = re.sub(r"^Style: Sonya,[^\n]*", fix, text, flags=re.M)
-        info["scaled"] = round(k, 3)
-        info["widest_px"] = round(max((w for _, w in ass_widths(text)), default=0.0), 1)
-    return text, info
+    """Every subtitle line inside SAFE_W (never outside the frame): a cue whose widest row is too wide gets its own
+    smaller font size (\\fs at the start of that cue only — the active-word grow is scale, so it stays relative);
+    the rest of the subtitles keep their size."""
+    styles = {}
+    for line in text.splitlines():
+        if line.startswith("Style:"):
+            p = line[6:].split(",")
+            styles[p[0].strip()] = int(float(p[2]))
+    out, shrunk, min_k = [], 0, 1.0
+    for line in text.splitlines():
+        if line.startswith("Dialogue:"):
+            parts = line.split(",", 9)
+            if parts[3].strip() == "Sonya":
+                wd = max((w for _, w in ass_widths(_one_style_doc(text, line))), default=0.0)
+                if wd > SAFE_W:
+                    k = SAFE_W / wd * 0.985
+                    fs = max(24, int(styles["Sonya"] * k))
+                    parts[9] = "{\\fs%d}" % fs + parts[9]
+                    line = ",".join(parts)
+                    shrunk += 1
+                    min_k = min(min_k, k)
+        out.append(line)
+    res = "\n".join(out) + ("\n" if text.endswith("\n") else "")
+    rows = ass_widths(res)
+    widest = max((w for _, w in rows), default=0.0)
+    return res, {"widest_px": round(widest, 1), "safe_px": SAFE_W, "shrunk_cues": shrunk, "min_scale": round(min_k, 3)}
+
+
+def _one_style_doc(text: str, dialogue: str) -> str:
+    return "\n".join(l for l in text.splitlines() if l.startswith("Style:")) + "\n" + dialogue
 
 
 # ── the final encode ──────────────────────────────────────────────────────────────────────────────────────────────
