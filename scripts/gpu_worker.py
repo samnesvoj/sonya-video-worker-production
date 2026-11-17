@@ -118,16 +118,33 @@ HEARTBEAT_INTERVAL_SEC = int(os.environ.get("WORKER_HEARTBEAT_INTERVAL_SEC", "12
 _PREVIEW_MODES = ("virality", "hooks", "educational", "streamer", "beep")
 
 
+def _preview_nvenc() -> bool:
+    try:
+        from scripts.shared.cut_profile import encoder_family
+        return encoder_family() == "nvenc"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _make_preview_assets(clip: Path) -> None:
     """Best effort: <stem>_preview.mp4 (720p, <=2.5 Mb/s, +faststart) and <stem>_poster.jpg.
     The full-quality clip stays the download file. Never fails the job."""
     import subprocess
     try:
         prev = clip.with_name(clip.stem + "_preview.mp4")
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-vf", "scale=-2:720",
-                        "-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-maxrate", "2500k",
-                        "-bufsize", "5000k", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
-                        "-movflags", "+faststart", str(prev)], check=True, timeout=300)
+
+        def cmd(venc):
+            return ["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip), "-vf", "scale=-2:720", *venc,
+                    "-maxrate", "2500k", "-bufsize", "5000k", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "+faststart", str(prev)]
+        done = False
+        # 2026-11-17: on the card's encoder when it works (a 3-min BEEP preview took 29 s on the CPU); else as before
+        if _preview_nvenc():
+            r = subprocess.run(cmd(["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "27", "-b:v", "0"]),
+                               capture_output=True, timeout=300)
+            done = r.returncode == 0
+        if not done:
+            subprocess.run(cmd(["-c:v", "libx264", "-preset", "veryfast", "-crf", "27"]), check=True, timeout=300)
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", str(clip), "-frames:v", "1",
                         "-vf", "scale=-2:720", "-q:v", "4", str(clip.with_name(clip.stem + "_poster.jpg"))],
                        check=True, timeout=60)

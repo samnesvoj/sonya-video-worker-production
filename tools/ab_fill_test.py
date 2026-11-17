@@ -101,7 +101,14 @@ def main() -> int:  # pragma: no cover - real Vast/S3
                       stopped_retention_seconds=600, max_creates_per_hour=2, label_prefix=PREFIX)
     vast = VastClient(_vast_key(os.environ), dry_run=False)
     store = FleetStore(str(pathlib.Path(tempfile.mkdtemp()) / "fleet.db"))
-    mgr = FleetManager(cfg, store, vast, stub, static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]), environ)
+    def nvenc_missing(label: str) -> bool:      # SONYA_NVENC_MISSING=replace: same rule as the production dispatcher
+        try:
+            s3.head_object(Bucket=bucket, Key=f"fleet-metrics/{label}/nvenc_missing.json")
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+    mgr = FleetManager(cfg, store, vast, stub, static_token_provider(os.environ["GITHUB_RELEASE_TOKEN"]), environ,
+                       nvenc_missing=nvenc_missing if os.environ.get("SONYA_NVENC_MISSING") == "replace" else None)
     t0 = time.time()
     jids = [stub.enqueue(m, k, j[2], user_id="ab-fill-test") for m, k, j in zip(modes, keys, jobs_in)]
     jid = jids[0]
