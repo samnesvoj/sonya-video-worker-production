@@ -13,8 +13,11 @@ Supported sources:
 All platform sources go through plain `yt-dlp` (a standard, widely
 used open-source extractor) — nothing here impersonates another app, spoofs
 a device/bundle ID, or calls an undocumented third-party proxy API. No
-cookies file, no authenticated/paid-content bypass: only what is publicly
-reachable without logging in is supported. (SONYA's own recovered
+authenticated/paid-content bypass: only what is publicly reachable without
+logging in is supported. (2026-11-17, owner's consent: YouTube's "confirm you're
+not a bot" on server IPs may be answered with the cookies of a separate,
+non-personal YouTube account -- SONYA_YT_COOKIES, used ONLY on a bot-check retry,
+never printed; still only public videos. See docs/YOUTUBE_FETCH.md.) (SONYA's own recovered
 `scripts/shared/download/downloader.py` — ported from a decompiled
 third-party binary — intentionally is NOT used here: its fallback paths
 impersonate the Any4k Android app and call an unrelated product's
@@ -276,6 +279,71 @@ def _ytdlp_format_opts(max_height: Optional[int] = None) -> dict:
             "format_sort": ["res", "vcodec:h264", "fps"]}
 
 
+def _is_bot_check(exc: BaseException) -> bool:
+    t = str(exc).lower()
+    return "not a bot" in t or "sign in to confirm" in t
+
+
+def _youtube_opts(platform: str) -> dict:
+    """YouTube-only yt-dlp options from the environment (2026-11-17 bot-check fix, docs/YOUTUBE_FETCH.md):
+      SONYA_YT_POT_URL     bgutil PO-token HTTP server (e.g. http://127.0.0.1:4416) -> extractor arg youtubepot-bgutilhttp
+      SONYA_YT_CLIENTS     comma list of player clients (default: yt-dlp's own choice, it tracks what works)
+      SONYA_YT_DASHY=1     plain https formats as DASH fragments, so SONYA_YT_FRAGMENTS (e.g. 16) download in parallel:
+                           a throttled route (Russia, ~120 KB/s per connection) gets ~2-3 MB/s with 16."""
+    if platform != "youtube":
+        return {}
+    yt: dict = {}
+    clients = [c.strip() for c in os.environ.get("SONYA_YT_CLIENTS", "").split(",") if c.strip()]
+    if clients:
+        yt["player_client"] = clients
+    if os.environ.get("SONYA_YT_DASHY", "") in ("1", "true", "on"):
+        yt["formats"] = ["dashy"]
+    ea: dict = {}
+    if yt:
+        ea["youtube"] = yt
+    pot = os.environ.get("SONYA_YT_POT_URL", "").strip()
+    if pot:
+        ea["youtubepot-bgutilhttp"] = {"base_url": [pot]}
+    out: dict = {"extractor_args": ea} if ea else {}
+    frags = os.environ.get("SONYA_YT_FRAGMENTS", "").strip()
+    if frags.isdigit() and int(frags) > 1:
+        out["concurrent_fragment_downloads"] = int(frags)
+    return out
+
+
+class _CookieCopy:
+    """A private 0600 copy of SONYA_YT_COOKIES for ONE yt-dlp run (yt-dlp rewrites its cookie file; parallel downloads
+    must not clobber the master copy). None when no cookies are configured. Contents are never logged."""
+
+    def __init__(self):
+        self.path: Optional[str] = None
+
+    def __enter__(self) -> Optional[str]:
+        src = os.environ.get("SONYA_YT_COOKIES", "").strip()
+        if not src or not os.path.isfile(src):
+            return None
+        fd, self.path = tempfile.mkstemp(prefix="ytc_", suffix=".txt")
+        try:
+            os.fchmod(fd, 0o600)
+            with open(src, "rb") as f:
+                os.write(fd, f.read())
+        finally:
+            os.close(fd)
+        return self.path
+
+    def __exit__(self, *exc) -> None:
+        if self.path:
+            try:
+                os.unlink(self.path)
+            except OSError:
+                pass
+
+
+def cookies_configured() -> bool:
+    src = os.environ.get("SONYA_YT_COOKIES", "").strip()
+    return bool(src) and os.path.isfile(src)
+
+
 def probe(url: str, platform: str, mode: Optional[str] = None,
           max_duration_sec: Optional[int] = None, max_bytes: Optional[int] = None) -> dict:
     """Metadata-only lookup (no download). Raises DownloadLimitExceeded if
@@ -305,10 +373,19 @@ def probe(url: str, platform: str, mode: Optional[str] = None,
         "noplaylist": True,
         "socket_timeout": 30,
         "http_headers": {"User-Agent": _UA},
+        **_youtube_opts(platform),
     }
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(canonical_url(url, platform), download=False) or {}
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(canonical_url(url, platform), download=False) or {}
+        except Exception as exc0:
+            if not (platform == "youtube" and _is_bot_check(exc0) and cookies_configured()):
+                raise
+            logger.warning("[url_ingest] youtube bot check on probe: retry with the account cookies")
+            with _CookieCopy() as ck:
+                with yt_dlp.YoutubeDL({**opts, "cookiefile": ck}) as ydl:
+                    info = ydl.extract_info(canonical_url(url, platform), download=False) or {}
     except Exception as exc:
         logger.warning("[url_ingest] probe_failed platform=%s url_host=%s: %s",
                         platform, urlparse(url).hostname, exc)
@@ -446,8 +523,9 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         "max_filesize": max_bytes or _max_bytes(mode),
         "http_headers": {"User-Agent": _UA},
         "progress_hooks": [_hook],
-        # Deliberately no cookiefile / proxy / POT-provider — only public,
-        # unauthenticated content is supported.
+        # No proxy. YouTube: PO-token provider / parallel fragments / client list from the env (_youtube_opts);
+        # the account cookies only on a bot-check retry below. Only public content either way.
+        **_youtube_opts(platform),
     }
 
     if platform == "rutube":
@@ -457,6 +535,7 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         st = max(0, int(trim_start or 0))
         opts["download_ranges"] = download_range_func(None, [(st, st + int(trim_sec))])
     tries = 1 + max(0, int(os.environ.get("SONYA_YTDLP_403_RETRIES", "2")))
+    used_cookies = False
     for attempt in range(1, tries + 1):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -465,6 +544,16 @@ def _download_via_ytdlp(url: str, platform: str, tmp_dir: str,
         except Exception as exc:
             # Load test 2026-11-16: YouTube answered "HTTP Error 403: Forbidden" to one fresh server for a public video
             # that downloads fine a minute later / elsewhere. A new extract_info gets new signed URLs: retry.
+            if platform == "youtube" and not used_cookies and _is_bot_check(exc) and cookies_configured():
+                used_cookies = True
+                logger.warning("[url_ingest] youtube bot check on download: retry with the account cookies")
+                try:
+                    with _CookieCopy() as ck:
+                        with yt_dlp.YoutubeDL({**opts, "cookiefile": ck}) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                    break
+                except Exception as exc2:
+                    exc = exc2
             if attempt < tries and platform != "rutube" and _is_transient_403(exc):   # Rutube 403 = private/closed
                 logger.warning("[url_ingest] youtube 403, retry %d/%d platform=%s", attempt, tries - 1, platform)
                 time.sleep(3 * attempt)

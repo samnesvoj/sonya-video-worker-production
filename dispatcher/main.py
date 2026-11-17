@@ -154,6 +154,7 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
     svc = ledger = None
     if os.environ.get("SONYA_ACCOUNTING_ENABLED", "false").lower() == "true":
         svc, ledger = build_accounting(fleet)
+        svc.extra_lines = lambda now: [_balance_line(fleet, now)]
         if os.environ.get("VAST_REPORTS_ENABLED", "false").lower() == "true":
             start_accounting_api(fleet, svc)
     while True:
@@ -176,11 +177,72 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
                 k = check_alert(ledger, fleet.store, svc.rates, time.time(), Decimal(os.environ.get("SONYA_ACCOUNTING_ALERT_RUB_DAY", "500")))
                 if k:
                     log.info("report_built %s", k)
+                for k in watch_balance(fleet, ledger) + watch_youtube(ledger):
+                    log.info("report_built %s", k)
         except Exception as exc:  # noqa: BLE001
             log.error("tick_error %s", type(exc).__name__)
         if once:
             return 0
         time.sleep(fleet.cfg.tick_seconds)
+
+
+_BAL = {"t": 0.0, "v": None}
+
+
+def _balance(fleet: FleetManager, now: float, every: float = 300.0):  # pragma: no cover - network
+    """Vast credit (Decimal) read at most every 5 min; None if unknown."""
+    from decimal import Decimal
+    if now - _BAL["t"] >= every:
+        _BAL["t"] = now
+        try:
+            b = fleet.vast.balance_usd()
+            _BAL["v"] = Decimal(str(b)) if b is not None else None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("balance_error %s", type(exc).__name__)
+    return _BAL["v"]
+
+
+def _balance_line(fleet: FleetManager, now: float):  # pragma: no cover
+    from accounting import balance as bal
+    _BAL["t"] = 0.0                       # fresh value for the report
+    b = _balance(fleet, now)
+    return bal.balance_line(b, bal.burn_usd_per_hour(fleet.store, now) if b is not None else None)
+
+
+def watch_balance(fleet: FleetManager, ledger, env=os.environ) -> list:  # pragma: no cover - VPS loop
+    """Alert when the Vast balance is low (< $3) or critical (< $1). 2026-11-17: it ran out unnoticed."""
+    from decimal import Decimal
+    from accounting import balance as bal
+    now = time.time()
+    b = _balance(fleet, now)
+    if b is None:
+        return []
+    k = bal.check_balance_alert(ledger, b, bal.burn_usd_per_hour(fleet.store, now), now,
+                                low=Decimal(env.get("SONYA_VAST_BALANCE_LOW_USD", "3")),
+                                critical=Decimal(env.get("SONYA_VAST_BALANCE_CRITICAL_USD", "1")))
+    return [k] if k else []
+
+
+_YT = {"t": 0.0}
+
+
+def watch_youtube(ledger, env=os.environ, every: float = 300.0) -> list:  # pragma: no cover - S3 on the VPS
+    """YouTube relays (scripts/yt_relay.py): heartbeat + hourly canary + account cookies -> alerts via the outbox."""
+    now = time.time()
+    if now - _YT["t"] < every or env.get("SONYA_YT_WATCH", "on") == "off":
+        return []
+    _YT["t"] = now
+    if not env.get("S3_ACCESS_KEY_ID"):
+        return []
+    os.environ.setdefault("S3_BUCKET_NAME", env.get("MODELS_S3_BUCKET", ""))
+    from accounting import yt_watch
+    from scripts import yt_relay
+    try:
+        hbs = yt_relay.heartbeats(now)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("yt_watch_error %s", type(exc).__name__)
+        return []
+    return yt_watch.check(ledger, hbs, now)
 
 
 def import_confirmed(fleet: FleetManager, ledger) -> None:  # pragma: no cover

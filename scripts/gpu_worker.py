@@ -193,6 +193,36 @@ def _on_sigterm(signum, _frame) -> None:
     raise SystemExit(143)
 
 
+_YT_DIRECT: Dict[str, float] = {"blocked_at": 0.0}
+
+
+def _yt_direct_blocked(sf: Dict[str, Any]) -> bool:
+    """After a bot check this host goes straight to the relay for an hour (the direct try costs a few seconds only,
+    but YouTube counts every refused request against the IP)."""
+    plat = str(sf.get("platform") or "")
+    if plat and plat != "youtube":
+        return False
+    if "youtu" not in str(sf.get("url") or "") and plat != "youtube":
+        return False
+    if os.environ.get("SONYA_YT_DIRECT", "on") == "off":
+        return True
+    return time.time() - _YT_DIRECT["blocked_at"] < 3600
+
+
+def _fetch_via_relay(job_id: str, sf: Dict[str, Any], mode: str, s3_input: str, tmp_dir: Path) -> Dict[str, Any]:
+    """-> the same dict as fetch_source(); SourceFetchError for user-facing reasons, SOURCE_BOT_CHECK if no relay could."""
+    from scripts import yt_relay
+    from scripts.source_fetch import SourceFetchError
+    try:
+        got = yt_relay.fetch_via_relay(job_id, sf, mode, s3_input, tmp_dir, tick=lambda _s: _do_heartbeat(job_id))
+    except yt_relay.RelayUnavailable as exc:
+        logger.error("[worker] relay unavailable job_id=%s: %s", job_id, exc)
+        raise SourceFetchError("SOURCE_BOT_CHECK", "YouTube временно не отдаёт видео нашим серверам. Задание повторится "
+                               "автоматически; если не получится — загрузите файл.") from exc
+    got.setdefault("bytes", Path(got["path"]).stat().st_size)
+    return got
+
+
 _FIRST_JOB = {"claimed": False, "processing": False}
 _SRC_COPY: Dict[str, Any] = {}       # this process's background S3 copy of a fetched source (one job per process)
 
@@ -876,15 +906,26 @@ def process_job(job: dict, worker_id: str) -> None:
             # The VPS could not fetch this link (YouTube etc.): download here, upload to s3_input_key, continue as usual.
             from scripts.source_fetch import SourceFetchError, fetch_source
             try:
-                got = fetch_source(sf, mode, s3_input, tmp_dir,
-                                   background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
+                try:
+                    if _yt_direct_blocked(sf):
+                        raise SourceFetchError("SOURCE_BOT_CHECK", "direct path skipped: this host was refused recently")
+                    got = fetch_source(sf, mode, s3_input, tmp_dir,
+                                       background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
+                except SourceFetchError as exc0:
+                    if exc0.code != "SOURCE_BOT_CHECK" or os.environ.get("SONYA_YT_RELAY", "on") == "off":
+                        raise
+                    # 2026-11-17: YouTube refuses Vast IPs ("not a bot"). The job stays here; a relay (bot server,
+                    # then the owner's Mac mini) downloads it into s3_input and we read it from there.
+                    _YT_DIRECT["blocked_at"] = time.time()
+                    logger.warning("[worker] youtube_bot_check job_id=%s: fetching via relay", job_id)
+                    got = _fetch_via_relay(job_id, sf, mode, s3_input, tmp_dir)
                 _SRC_COPY["got"] = got
                 input_path = got["path"]
                 _prof.add("download", time.monotonic() - _t_fetch, start=_t_fetch)
             except SourceFetchError as exc:
                 if exc.code == "SOURCE_BOT_CHECK":
-                    _HOST_BLOCKED.set()          # before _fail: never re-claim the requeued job on this host
-                    logger.error("[worker] youtube_bot_check on this host: requeue job_id=%s, stop claiming", job_id)
+                    # every path refused: requeue (retry_count bounds it); the host keeps claiming other jobs
+                    logger.error("[worker] youtube_bot_check and no relay could fetch job_id=%s: requeue", job_id)
                     _fail(job_id, exc.code, exc.message, retry=True)
                     return
                 _fail(job_id, exc.code, exc.message, retry=exc.code in ("SOURCE_FORBIDDEN",))

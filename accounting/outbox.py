@@ -56,6 +56,7 @@ def _parse_mode(payload: str) -> Optional[str]:
 class ReportService:
     def __init__(self, ledger, store, rates, jobs_source, utc_cost: Callable[[date, float], dict], first_day: date):
         self.ledger, self.store, self.rates, self.jobs, self.utc_cost, self.first_day = ledger, store, rates, jobs_source, utc_cost, first_day
+        self.extra_lines: Optional[Callable[[float], List[str]]] = None   # e.g. the Vast balance + runway (dispatcher/main)
 
     def run_due(self, now: float) -> List[str]:
         built: List[str] = []
@@ -66,6 +67,13 @@ class ReportService:
             usage.compute_day(self.ledger, self.store, day, self.jobs, now)
             recon = self._reconcile_previous_utc_day(day, now)
             rep = reports.build_daily(self.ledger, day, self.rates.get(day), recon, now=now, first_day=self.first_day)
+            if self.extra_lines and day == daily_due(now, self.first_day)[-1]:   # only the fresh report, not a backfill
+                try:
+                    extra = [x for x in self.extra_lines(now) if x]
+                    if extra:
+                        rep["text"] = rep["text"] + "\n" + "\n".join(extra)
+                except Exception:  # noqa: BLE001 - a balance hiccup never blocks the report
+                    pass
             self._enqueue(rep, now)
             self.ledger.mark_adjustments_applied(rep["adj_keys"], day)
             built.append(key)
