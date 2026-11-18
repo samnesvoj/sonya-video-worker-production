@@ -127,7 +127,12 @@ def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: n
             import_gemini(svc.ledger, env)     # /vast shows the calls of the last minutes too
         except Exception as exc:  # noqa: BLE001
             log.warning("import_gemini_error %s", type(exc).__name__)
-        return build_summary(fleet.store, svc.rates, now, bal, svc.ledger, timeweb_balance(env))
+        text = build_summary(fleet.store, svc.rates, now, bal, svc.ledger, timeweb_balance(env))
+        try:
+            text += "\n\n" + "\n".join(_fleet_lines(fleet, now))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fleet_lines_error %s", type(exc).__name__)
+        return text
 
     api = AccountingApi(svc, _accounting_secret(env), summary=summary)
 
@@ -154,10 +159,14 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
     svc = ledger = None
     if os.environ.get("SONYA_ACCOUNTING_ENABLED", "false").lower() == "true":
         svc, ledger = build_accounting(fleet)
-        svc.extra_lines = lambda now: [_balance_line(fleet, now)]
+        svc.extra_lines = lambda now: [_balance_line(fleet, now), *_fleet_lines(fleet, now)]
         if os.environ.get("VAST_REPORTS_ENABLED", "false").lower() == "true":
             start_accounting_api(fleet, svc)
     while True:
+        try:
+            publish_release_pointer(fleet)
+        except Exception as exc:  # noqa: BLE001 - workers then simply stay on the release they have
+            log.warning("release_pointer_error %s", type(exc).__name__)
         try:
             for a in fleet.tick():
                 log.info("fleet_action %s", a)
@@ -179,11 +188,41 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
                     log.info("report_built %s", k)
                 for k in watch_balance(fleet, ledger) + watch_youtube(ledger):
                     log.info("report_built %s", k)
+                from accounting.fleet_stats import check_budget_alerts
+                for k in check_budget_alerts(ledger, fleet.store, time.time()):
+                    log.info("report_built %s", k)
         except Exception as exc:  # noqa: BLE001
             log.error("tick_error %s", type(exc).__name__)
         if once:
             return 0
         time.sleep(fleet.cfg.tick_seconds)
+
+
+_PTR = {"t": 0.0, "sha": ""}
+
+
+def publish_release_pointer(fleet: FleetManager, env=os.environ, every: float = 600.0) -> bool:  # pragma: no cover - S3
+    """SONYA_RELEASE_POINTER=on: worker-v2/release/current.json = this dispatcher's release + image (checked every 10 min;
+    written only when it differs). Deploy of a new Sonya version = new SONYA_RELEASE_SHA here + restart: no server is
+    re-created, each worker switches on its next start / resume (deploy/vast/run_worker.sh)."""
+    cfg = fleet.cfg
+    now = time.time()
+    if not cfg.release_pointer or fleet.dry or (now - _PTR["t"] < every and _PTR["sha"] == cfg.release_sha):
+        return False
+    _PTR["t"] = now
+    from scripts.ops import release_pointer
+    wrote = release_pointer.publish(cfg.release_sha, cfg.image, env=env)
+    _PTR["sha"] = cfg.release_sha
+    if wrote:
+        fleet.store.event(now, None, "release_pointer", sha=cfg.release_sha)
+        log.info("release_pointer_published %s", cfg.release_sha[:12])
+    return wrote
+
+
+def _fleet_lines(fleet: FleetManager, now: float) -> list:
+    from accounting import fleet_stats
+    spend = fleet.day_spend_usd(now) if fleet.cfg.day_budget_usd > 0 else None
+    return fleet_stats.lines(fleet.store, now, cfg=fleet.cfg, spend_usd=spend)
 
 
 _BAL = {"t": 0.0, "v": None}

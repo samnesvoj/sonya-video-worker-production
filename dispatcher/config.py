@@ -23,6 +23,16 @@ def _int(env: Dict[str, str], key: str, default: int, lo: int = 0, hi: int = 10*
     return v
 
 
+def _hours_range(v: str) -> Tuple[int, int]:
+    try:
+        a, b = (int(x) for x in v.split("-", 1))
+    except ValueError as exc:
+        raise ValueError("SONYA_NIGHT_HOURS_MSK must look like 0-8") from exc
+    if not (0 <= a <= 23 and 0 <= b <= 24):
+        raise ValueError("SONYA_NIGHT_HOURS_MSK must look like 0-8")
+    return a, b
+
+
 @dataclass(frozen=True)
 class FleetConfig:
     enabled: bool = False                    # SONYA_FLEET_ENABLED - nothing happens unless true
@@ -117,6 +127,36 @@ class FleetConfig:
     dedicated: bool = False                  # SONYA_DEDICATED
     dedicated_max_instances: int = 4         # SONYA_DEDICATED_MAX_INSTANCES: at most this many users on own servers at once
                                              # (inside max_instances); the next one waits for a free server, first in line
+    # ── CREATE ONLY WHEN THERE IS NO OTHER WAY (owner 2026-11-18: 25 servers created in a day instead of 2-3; every create
+    #    = ~7 GB image + models pulled at the host's traffic price + paid boot time). All off by default = the old behaviour.
+    spare_instances: int = 0                 # SONYA_SPARE_INSTANCES: an idle BURST is STOPPED (not destroyed) while fewer than this
+                                             # many stopped spares exist; demand resumes warm -> spares before any create
+    spare_retention_hours: int = 24          # SONYA_SPARE_RETENTION_HOURS: a spare stopped longer than this is destroyed
+    spare_max_storage_gb_month: Decimal = Decimal("0.40")  # SONYA_SPARE_MAX_STORAGE_GB_MONTH: dearer disks are not kept
+                                             # (40 GB x $0.133 = $0.0074/h; x $0.40 = $0.022/h vs ~$0.20 per create)
+    resume_retry_seconds: int = 0            # SONYA_RESUME_RETRY_SECONDS: a resume that timed out (GPU taken by another renter) ->
+                                             # the instance stays stopped, is skipped this long, the next stopped one is tried first;
+                                             # destroyed only after max_resume_failures (0 = old: no retry)
+    release_pointer: bool = False            # SONYA_RELEASE_POINTER: workers created now read worker-v2/release/current.json on every
+                                             # start/resume and switch to that release themselves -> a new release destroys nothing
+    release_compat: Tuple[str, ...] = ()     # SONYA_RELEASE_COMPAT_SHAS: older releases that are still fine to keep (comma list)
+    max_creates_per_day: int = 0             # SONYA_MAX_CREATES_PER_DAY (rolling 24 h; 0 = off)
+    day_budget_usd: Decimal = Decimal("0")   # SONYA_FLEET_DAY_BUDGET_USD: estimated spend of the MSK day (GPU + disk + image pull
+                                             # traffic per create); reached -> no create (resume still allowed). 0 = off
+    create_download_gb: int = 10             # SONYA_CREATE_DOWNLOAD_GB: image + models pulled by one create (traffic estimate/ranking)
+    max_inet_down_usd_tb: Decimal = Decimal("0")   # SONYA_MAX_INET_DOWN_USD_TB: skip hosts with dearer download traffic (0 = off)
+    rank_traffic: bool = False               # SONYA_RANK_TRAFFIC: ranking counts the image pull at the host's traffic price
+    proven_first: bool = False               # SONYA_PROVEN_FIRST: a host where our worker already did a job (NVENC ok) comes first
+    probes_per_day: int = -1                 # SONYA_PROBES_PER_DAY: creates on never-proven hosts per 24 h (-1 = no limit); past it
+                                             # only proven hosts, unless no server at all is up for a waiting job
+    nvenc_ban_forever: bool = False          # SONYA_NVENC_BAN_FOREVER: a host without working NVENC is never rented again
+    prime_min_interval_hours: int = 0        # SONYA_PRIME_MIN_INTERVAL_HOURS: at most one warm prime (create) per this many hours
+    night_warm_instances: int = -1           # SONYA_NIGHT_WARM_INSTANCES: warm target for PRIMING at night (-1 = off)
+    night_hours_msk: Tuple[int, int] = (0, 8)  # SONYA_NIGHT_HOURS_MSK "0-8"
+    futile_wakes_per_hour: int = 0           # SONYA_FUTILE_WAKES_PER_HOUR: this many servers woken/created for a job that none of
+                                             # them took within the hour -> no wake/create for futile_backoff_seconds (0 = off)
+    futile_backoff_seconds: int = 1200       # SONYA_FUTILE_BACKOFF_SECONDS
+    demand_live_only: bool = False           # SONYA_DEMAND_LIVE_ONLY: active jobs count as demand only on OUR live servers
     pin_machine_id: int = 0                  # LOAD TESTS ONLY (tools/load_test.py phase G): rent exactly this Vast machine, class rule
                                              # not applied (e.g. an L40S + EPYC host). Never read from the env: production stays 0
     # Release identity (passed to the worker as env; the token is minted per instance)
@@ -184,6 +224,26 @@ class FleetConfig:
             usd_rub=Decimal(e.get("SONYA_USD_RUB", "82")),
             dedicated=e.get("SONYA_DEDICATED", "off").lower() in TRUE,
             dedicated_max_instances=_int(e, "SONYA_DEDICATED_MAX_INSTANCES", 4, lo=0, hi=8),
+            spare_instances=_int(e, "SONYA_SPARE_INSTANCES", 0, lo=0, hi=8),
+            spare_retention_hours=_int(e, "SONYA_SPARE_RETENTION_HOURS", 24, lo=1, hi=24 * 14),
+            spare_max_storage_gb_month=Decimal(e.get("SONYA_SPARE_MAX_STORAGE_GB_MONTH", "0.40")),
+            resume_retry_seconds=_int(e, "SONYA_RESUME_RETRY_SECONDS", 0, lo=0, hi=86400),
+            release_pointer=e.get("SONYA_RELEASE_POINTER", "off").lower() in TRUE,
+            release_compat=tuple(x.strip().lower() for x in e.get("SONYA_RELEASE_COMPAT_SHAS", "").split(",") if len(x.strip()) >= 7),
+            max_creates_per_day=_int(e, "SONYA_MAX_CREATES_PER_DAY", 0, lo=0, hi=1000),
+            day_budget_usd=Decimal(e.get("SONYA_FLEET_DAY_BUDGET_USD", "0") or "0"),
+            create_download_gb=_int(e, "SONYA_CREATE_DOWNLOAD_GB", 10, lo=0, hi=500),
+            max_inet_down_usd_tb=Decimal(e.get("SONYA_MAX_INET_DOWN_USD_TB", "0") or "0"),
+            rank_traffic=e.get("SONYA_RANK_TRAFFIC", "off").lower() in TRUE,
+            proven_first=e.get("SONYA_PROVEN_FIRST", "off").lower() in TRUE,
+            probes_per_day=_int(e, "SONYA_PROBES_PER_DAY", -1, lo=-1, hi=1000),
+            nvenc_ban_forever=e.get("SONYA_NVENC_BAN_FOREVER", "off").lower() in TRUE,
+            prime_min_interval_hours=_int(e, "SONYA_PRIME_MIN_INTERVAL_HOURS", 0, lo=0, hi=168),
+            night_warm_instances=_int(e, "SONYA_NIGHT_WARM_INSTANCES", -1, lo=-1, hi=2),
+            night_hours_msk=_hours_range(e.get("SONYA_NIGHT_HOURS_MSK", "0-8")),
+            futile_wakes_per_hour=_int(e, "SONYA_FUTILE_WAKES_PER_HOUR", 0, lo=0, hi=100),
+            futile_backoff_seconds=_int(e, "SONYA_FUTILE_BACKOFF_SECONDS", 1200, lo=60, hi=86400),
+            demand_live_only=e.get("SONYA_DEMAND_LIVE_ONLY", "off").lower() in TRUE,
             image=e.get("SONYA_WORKER_IMAGE", ""),
             release_sha=e.get("SONYA_RELEASE_SHA", ""),
             release_repo=e.get("SONYA_RELEASE_REPO", "samnesvoj/sonya-video-worker-production"),

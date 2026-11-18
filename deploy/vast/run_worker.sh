@@ -23,6 +23,22 @@ export GEMINI_LAYOUT_ENABLED="${GEMINI_LAYOUT_ENABLED:-false}"
 export WEBCAM_DETECTOR_ENABLED="${WEBCAM_DETECTOR_ENABLED:-false}"
 export WORKER_ID="${WORKER_ID:-vast-${VAST_CONTAINERLABEL:-${HOSTNAME:-worker}}}"
 
+# Release pointer (owner 2026-11-18: a new Sonya version must not re-create servers). On every container start (create AND
+# resume) take the release the dispatcher published (scripts/ops/release_pointer.py); any problem -> stay on this one.
+_to() { if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi; }
+if [ "${SONYA_RELEASE_POINTER:-off}" = "on" ] && [ -z "${SONYA_RELEASE_HOPPED:-}" ]; then
+  NEW_SHA="$(cd "${REL}" && _to 20 python3 -m scripts.ops.release_pointer get 2>/dev/null | tail -n 1)" || NEW_SHA=""
+  if [[ "${NEW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+    log "release pointer: ${SONYA_RELEASE_SHA:0:12} -> ${NEW_SHA:0:12}"
+    if NEW_DIR="$(SONYA_RELEASE_SHA="${NEW_SHA}" SONYA_RELEASE_TAG='' _to 300 python3 "${BOOT}/sonya_bootstrap.py")" \
+        && [ -x "${NEW_DIR}/deploy/vast/run_worker.sh" ]; then
+      export SONYA_RELEASE_SHA="${NEW_SHA}" SONYA_RELEASE_DIR="${NEW_DIR}" PYTHONPATH="${NEW_DIR}" SONYA_RELEASE_HOPPED=1
+      exec "${NEW_DIR}/deploy/vast/run_worker.sh"
+    fi
+    log "release pointer: switch failed - staying on ${SONYA_RELEASE_SHA:0:12}"
+  fi
+fi
+
 CONC="${SONYA_WORKER_CONCURRENCY:-1}"
 # 1..32 = exactly that many worker processes (the dispatcher sends jobs_per_instance: 2 on the default RTX 3060; 5..32 only
 # for big-server load tests: RTX 4090 / 2x A40 + EPYC 128 threads, levels 24 / 32);
