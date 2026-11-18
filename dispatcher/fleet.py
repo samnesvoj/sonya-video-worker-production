@@ -33,6 +33,19 @@ Rules
     primed like the warm and kept STOPPED. Demand >= cfg.reserve_wake_at() wakes it (outside max_instances); idle after the
     rush -> stopped again. Not woken in resume_timeout_seconds (90 s) or the resume call fails -> destroyed + host banned
     and the next reserve-eligible power offer (pause <= power_reserve_max_storage_rub / month) is created at once.
+  * CREATE ONLY WHEN THERE IS NO OTHER WAY (owner 2026-11-18, 25 creates in a day; each pulls ~7 GB image + models at the
+    host's traffic price). Every rule below is off by default:
+      - spare_instances: an idle burst is STOPPED as role "spare" (cheap disk) and resumed before any create; destroyed after
+        spare_retention_hours / when more spares than allowed / disk dearer than spare_max_storage_gb_month.
+      - resume_retry_seconds: a resume that timed out (GPU taken) -> the next stopped server is tried, this one later again.
+      - release_pointer: instances created with it switch to the current release themselves (worker reads the S3 pointer
+        the dispatcher publishes) -> a new release is not "stale" for them; release_compat lists old SHAs still kept.
+      - max_creates_per_day / day_budget_usd (estimate: GPU + disk + image pull traffic) / prime_min_interval_hours /
+        probes_per_day (creates on never-proven hosts) / futile_wakes_per_hour -> no create, event create_blocked
+        (the dispatcher alerts the accounting bot); jobs wait for a running / stopped server.
+      - proven_first + nvenc_ban_forever + rank_traffic + max_inet_down_usd_tb: hosts where our worker did a job come first,
+        a host without NVENC is never rented again, the traffic price of the image pull is part of the choice.
+      - night_warm_instances: at night (MSK) no second warm is primed.
 All Vast calls are no-ops in dry-run. Repeated ticks are idempotent.
 """
 from __future__ import annotations
@@ -50,6 +63,12 @@ from dispatcher.store import FleetStore, Inst
 from dispatcher.vast_api import VastClient, VastError, VastInstance, is_host_error
 
 log = logging.getLogger("sonya.fleet")
+FOREVER = 4102444800.0          # 2100-01-01: "never again" for a ban
+
+
+def msk_midnight(now: float) -> float:
+    """00:00 Moscow time (UTC+3, no DST) of the day `now` falls in."""
+    return now - ((now + 3 * 3600) % 86400)
 RUNNING_LIKE = ("running",)
 VAST_STOPPED = ("exited", "stopped", "created", "inactive")
 
@@ -70,6 +89,12 @@ class FleetManager:
         self._prime_backoff_until = 0.0    # a failed warm prime must never delay a create for a real job
         self._reserve_backoff_until = 0.0
         self._spares_at = float("-inf")
+        self._woken: Dict[int, float] = {}       # instance id -> when it was created / resumed FOR A JOB (futile-wake guard)
+        self._proven_seen: set = set()
+        self._blocked_logged: Dict[str, float] = {}
+        self._spend_cache = (float("-inf"), Decimal(0))
+        if cfg.nvenc_ban_forever:
+            store.extend_bans("nvenc%", FOREVER)
 
     @property
     def dry(self) -> bool:
@@ -103,6 +128,44 @@ class FleetManager:
         """How many warm servers are still missing (cfg.warm_instances: 1, or 2 since owner 2026-11-16)."""
         return max(0, self.cfg.warm_instances - len(self._warm()))
 
+    def _night(self, now: float) -> bool:
+        a, b = self.cfg.night_hours_msk
+        h = int(((now + 3 * 3600) % 86400) // 3600)          # MSK = UTC+3, no DST
+        return (a <= h < b) if a <= b else (h >= a or h < b)
+
+    def _warm_target(self, now: float) -> int:
+        """How many warms to PRIME now: at night (SONYA_NIGHT_WARM_INSTANCES) fewer. Existing warms are never removed for it."""
+        if self.cfg.night_warm_instances >= 0 and self._night(now):
+            return min(self.cfg.warm_instances, self.cfg.night_warm_instances)
+        return self.cfg.warm_instances
+
+    def _release_ok(self, inst: Inst) -> bool:
+        """May this instance keep serving: built from the current release, from a listed compatible one, or it takes the
+        current release itself on every start (release pointer). A different base image always needs a new disk."""
+        if inst.image and self.cfg.image and inst.image != self.cfg.image:
+            return False
+        sha = (inst.release_sha or "").lower()
+        if sha == self.cfg.release_sha.lower():
+            return True
+        if sha and any(sha.startswith(c) for c in self.cfg.release_compat):
+            return True
+        return bool(self.cfg.release_pointer and inst.self_update)
+
+    def _spares(self, exclude: Optional[int] = None) -> List[Inst]:
+        return [i for i in self.store.all(("stop_pending", "stopping", "stopped", "starting"))
+                if i.role == "spare" and i.id != exclude]
+
+    def _spare_ok(self, inst: Inst) -> bool:
+        """May this idle burst be kept STOPPED as a spare instead of being destroyed?"""
+        c = self.cfg
+        if c.spare_instances <= 0 or inst.gpu_class == "power" or not self._release_ok(inst):
+            return False
+        if inst.storage_gb_month > c.spare_max_storage_gb_month:
+            return False
+        if inst.machine_id and inst.machine_id in self.store.banned_machines(self.now()):
+            return False
+        return len([s for s in self._spares(exclude=inst.id) if s.state != "starting"]) < c.spare_instances
+
     def _warm_storage_left(self, exclude: Optional[int] = None) -> Optional[Decimal]:
         """RUB / month the warms may still bill for their paused disks (cfg.warm_storage_rub_total; None = no total cap).
         Owner 2026-11-16: two warms, together about 330-650 RUB / month of storage."""
@@ -120,17 +183,20 @@ class FleetManager:
                 if i.role == "reserve" and i.id != exclude]
 
     def _idle_action(self, inst: Inst) -> str:
-        """What an idle instance becomes: 'stop' (it is / becomes the warm, or it is the power reserve) or 'destroy'."""
+        """What an idle instance becomes: 'stop' (it is / becomes the warm, or it is the power reserve), 'spare' (kept
+        stopped for the next load, cfg.spare_instances) or 'destroy'."""
         if inst.role == "reserve":                           # reserve switched off / stale release -> it goes away
-            return "stop" if self.cfg.power_reserve and inst.release_sha == self.cfg.release_sha else "destroy"
+            return "stop" if self.cfg.power_reserve and self._release_ok(inst) else "destroy"
         if inst.role == "warm" and inst.gpu_class != "power":
             return "stop"
         if inst.gpu_class == "power":                        # a rush server never becomes the warm (pause cost, owner scheme)
             return "destroy" if self.cfg.warm_instances > 0 else "stop"
         left = self._warm_storage_left(exclude=inst.id)
-        if len(self._warm(exclude=inst.id)) < self.cfg.warm_instances and inst.release_sha == self.cfg.release_sha \
+        if len(self._warm(exclude=inst.id)) < self.cfg.warm_instances and self._release_ok(inst) \
                 and (inst.note or "") == "warm_eligible" and (left is None or self._inst_pause_rub(inst) <= left):
             return "stop"                                    # promoted below, in _finish_stop, after the fence
+        if self.cfg.warm_instances > 0 and self._spare_ok(inst):
+            return "spare"
         return "destroy" if self.cfg.warm_instances > 0 else "stop"
 
     # ------------------------------------------------------------ reconcile
@@ -162,7 +228,8 @@ class FleetManager:
         if v is None:
             return
         if s in ("creating", "starting") and vs == "running":
-            self.store.cas(inst.id, s, inst.generation, "running", running_since=now)
+            extra = {"resume_failures": 0, "retry_after": None} if s == "starting" and (inst.resume_failures or inst.retry_after) else {}
+            self.store.cas(inst.id, s, inst.generation, "running", running_since=now, **extra)
             self.store.event(now, inst.id, "running", via=s)
             if inst.machine_id:
                 self.store.mark_good_machine(inst.machine_id, now)   # our image layers are now in this host's cache
@@ -247,13 +314,18 @@ class FleetManager:
                 return
         if busy:
             self.store.touch(inst.id, last_work_at=now)
+            self._woken.pop(inst.id, None)
+            if inst.machine_id and inst.id not in self._proven_seen:   # took a job: readiness + NVENC passed on this host
+                self._proven_seen.add(inst.id)
+                self.store.mark_proven(inst.machine_id, inst.host_id, now)
             return
         if self._nvenc_broken(inst, terminal, now):
             # 4 of 23 production hosts in two days (2026-11-15/16): NVENC refused -> every clip on the CPU, jobs 2-4x
             # slower. Its worker takes no job; ban the machine for a week and let demand / prime start another one.
             self.store.event(now, inst.id, "nvenc_missing", pending=snap.pending)
-            if inst.machine_id:
-                self.store.ban_machine(inst.machine_id, now + 7 * 86400, "nvenc_missing")
+            if inst.machine_id:   # owner 2026-11-18: such a host is never rented again (was: one week)
+                self.store.ban_machine(inst.machine_id, FOREVER if self.cfg.nvenc_ban_forever else now + 7 * 86400, "nvenc_missing")
+                self.store.unprove(inst.machine_id)
             self._destroy(inst, now, actions, reason="nvenc_missing")
             return
         if snap.pending > 0 and snap.active_unassigned == 0:
@@ -263,6 +335,8 @@ class FleetManager:
             since = max(terminal or 0.0, inst.last_work_at or 0.0, (inst.running_since or now) + self.cfg.boot_grace_seconds)
             if now - since > self.cfg.stall_seconds:
                 self.store.event(now, inst.id, "worker_stalled", pending=snap.pending, idle_s=int(now - since))
+                if self._woken.pop(inst.id, None) is not None and self.cfg.futile_wakes_per_hour:
+                    self.store.event(now, inst.id, "futile_wake", stalled=True)
                 if inst.machine_id:
                     self.store.ban_machine(inst.machine_id, now + 3600, "worker_stalled")
                 self._destroy(inst, now, actions, reason="worker_stalled")
@@ -277,6 +351,9 @@ class FleetManager:
         due = (last + self.cfg.idle_timeout_seconds) if worked else ((inst.running_since or now) + grace)
         too_old = inst.running_since and now - inst.running_since > self.cfg.max_running_hours * 3600
         if now >= due or too_old:
+            woke = self._woken.pop(inst.id, None)
+            if woke is not None and max(terminal or 0.0, inst.last_work_at or 0.0) < woke and self.cfg.futile_wakes_per_hour:
+                self.store.event(now, inst.id, "futile_wake", woke_s=int(now - woke))   # woken for a job nobody took
             self._begin_stop(inst, now, actions)
 
     def _begin_stop(self, inst: Inst, now: float, actions: List[str]) -> None:
@@ -294,12 +371,17 @@ class FleetManager:
             self.store.event(now, inst.id, "stop_cancelled", pending=fresh.pending)
             actions.append(f"stop_cancelled {inst.id}")
             return
-        if self._idle_action(inst) == "destroy":    # burst: never paused, its disk would keep billing
+        act = self._idle_action(inst)
+        if act == "destroy":                        # burst: never paused, its disk would keep billing
             if self.store.cas(inst.id, "stop_pending", inst.generation, "destroying", stop_requested_at=now):
                 self._call(lambda: self.vast.destroy(inst.id), inst, now, "destroy_requested", reason="burst_idle")
                 actions.append(f"destroy {inst.id} (burst_idle)")
             return
-        if inst.role not in ("warm", "reserve"):
+        if act == "spare":                          # kept paused for the next load (cheap disk instead of a new create)
+            if inst.role != "spare":
+                self.store.touch(inst.id, role="spare")
+                self.store.event(now, inst.id, "spare_assigned", storage=str(inst.storage_gb_month))
+        elif inst.role not in ("warm", "reserve"):
             self.store.touch(inst.id, role="warm")
             self.store.event(now, inst.id, "warm_assigned")
         try:
@@ -324,6 +406,11 @@ class FleetManager:
         (jobs_per_instance slots, at most dedicated_max_instances users); a server holding such a user counts as one
         server whatever its size (nobody else may join it); shared jobs are covered by the other servers as before."""
         demand = snap.pending + snap.active_total
+        if self.cfg.demand_live_only:
+            # 2026-11-18: an active job held by a worker that is not one of our live servers (Mac mini, a destroyed host
+            # whose job the API has not requeued yet) needs no new server: once requeued it is counted as pending
+            mine = {i.label for i in self.store.all(("creating", "running", "starting", "stop_pending", "stopping", "stopped"))}
+            demand = snap.pending + snap.active_unassigned + sum(n for w, n in snap.active_by_worker.items() if w in mine)
         if demand <= 0:
             return
         up = self.store.all(("creating", "running", "starting", "stop_pending", "stopping"))   # waking: let a stop finish,
@@ -343,16 +430,25 @@ class FleetManager:
             cap += self._wake_reserve(now, actions, used)
         if cap >= need or count >= self.cfg.max_instances:
             return
+        if self._futile_backoff(now):
+            return
+        proven = self.store.proven_machines() if self.cfg.proven_first else set()
         stopped = sorted((i for i in self.store.all(("stopped",)) if i.resume_failures < self.cfg.max_resume_failures
-                          and i.release_sha == self.cfg.release_sha and i.role != "reserve"),
-                         key=lambda i: (i.role != "warm", -(i.stopped_at or 0)))
+                          and self._release_ok(i) and i.role != "reserve" and (i.retry_after or 0) <= now),
+                         key=lambda i: (i.role != "warm", i.machine_id not in proven, -(i.stopped_at or 0)))
+        retry_next = self.cfg.resume_retry_seconds > 0
         while cap < need and count < self.cfg.max_instances:   # the whole gap in ONE tick: 6 jobs -> warm resume + 2 creates
             # a user waiting for an own server gets a default-class one first (a big power server would idle under one
             # user): gap 0 never picks the power class; the shared jobs come after
             gap = 0 if ded_left > 0 else need - cap
             if stopped:
                 inst = stopped.pop(0)
-                if self._resume(inst, now, actions) or not self.cfg.spares_enabled:
+                if self._resume(inst, now, actions):
+                    got = self.slots(inst)
+                    self._woken[inst.id] = now
+                elif retry_next and stopped:                     # refused: the next stopped server before any create
+                    continue
+                elif not self.cfg.spares_enabled:
                     got = self.slots(inst)
                 else:                                            # spares: the warm is gone -> the next offer, now
                     got = self._create(now, actions, exclude=used, gap=gap)
@@ -373,7 +469,7 @@ class FleetManager:
         res = self._reserves()
         if not res:
             return self._create(now, actions, exclude=used, reserve=True)
-        r = next((i for i in res if i.state == "stopped" and i.release_sha == self.cfg.release_sha), None)
+        r = next((i for i in res if i.state == "stopped" and self._release_ok(i)), None)
         if r is None:
             return 0
         self.store.event(now, r.id, "reserve_wake", wake_at=self.cfg.reserve_wake_at())
@@ -385,13 +481,17 @@ class FleetManager:
         """False only when Vast refused the resume call."""
         if self._dry_log(inst, "resume", now):
             return True
-        if not self.store.cas(inst.id, "stopped", inst.generation, "starting", resume_requested_at=now):
+        upd = {}
+        if self.cfg.release_pointer and inst.self_update and inst.release_sha != self.cfg.release_sha:
+            upd["release_sha"] = self.cfg.release_sha       # its worker switches to the pointer's release on this start
+        if not self.store.cas(inst.id, "stopped", inst.generation, "starting", resume_requested_at=now, **upd):
             return True
         try:
             self.vast.resume(inst.id)
         except VastError as exc:
             fails = inst.resume_failures + 1
-            self.store.cas(inst.id, "starting", inst.generation + 1, "stopped", resume_failures=fails)
+            later = {"retry_after": now + self.cfg.resume_retry_seconds} if self.cfg.resume_retry_seconds else {}
+            self.store.cas(inst.id, "starting", inst.generation + 1, "stopped", resume_failures=fails, **later)
             self.store.event(now, inst.id, "resume_failed", status=exc.status)
             if (self.cfg.spares_enabled or inst.role == "reserve") and fails >= self.cfg.max_resume_failures:
                 if inst.machine_id:
@@ -407,6 +507,14 @@ class FleetManager:
         self._call(lambda: self.vast.stop(inst.id), inst, now, "resume_cancel")   # per Vast docs: cancel scheduling by stopping
         fails = inst.resume_failures + 1
         self.store.event(now, inst.id, "resume_timeout", failures=fails)
+        self._woken.pop(inst.id, None)
+        if self.cfg.resume_retry_seconds and fails < self.cfg.max_resume_failures:
+            # 2026-11-18: GPU taken by another renter for now. Keep the disk (image + models), try the NEXT stopped server in
+            # this very tick (_demand runs after _advance) and this one again in resume_retry_seconds; no ban, no destroy.
+            self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails,
+                           retry_after=now + self.cfg.resume_retry_seconds)
+            self.store.event(now, inst.id, "resume_retry_later", failures=fails, after_s=self.cfg.resume_retry_seconds)
+            return
         if fails >= self.cfg.max_resume_failures:
             if inst.machine_id:            # never re-create on the machine that could not resume
                 self.store.ban_machine(inst.machine_id, now + 3600, "resume_failures")
@@ -418,7 +526,7 @@ class FleetManager:
             self.store.cas(inst.id, "starting", inst.generation, "stopped", resume_failures=fails, stopped_at=now)
 
     def _candidates(self, offers: List[dict], banned: set, known: set, exclude: set, *, want_warm: bool, prime: bool,
-                    gap: int, reserve: bool):
+                    gap: int, reserve: bool, proven: set = frozenset(), bad_hosts: set = frozenset()):
         """(offer, is_power) in the order they are tried; lazy, so the power search runs only when it is reached.
         The first one is exactly the old single choice (warm-eligible -> power on a big gap -> any default-class host)."""
         if reserve:
@@ -429,7 +537,8 @@ class FleetManager:
         if want_warm or prime:
             left = self._warm_storage_left()
             warm_hosts = {w.machine_id for w in self._warm() if w.machine_id}   # 2 warms on one host could not both wake
-            for o in launcher.rank_offers(offers, self.cfg, banned, known, warm=True, exclude=exclude):
+            for o in launcher.rank_offers(offers, self.cfg, banned, known, warm=True, exclude=exclude, proven=proven,
+                                          bad_hosts=bad_hosts):
                 if o.get("machine_id") not in warm_hosts and (left is None or launcher.pause_rub_month(o, self.cfg) <= left):
                     yield o, False                                                 # all warms together under the cap
         if prime:
@@ -438,7 +547,7 @@ class FleetManager:
             for o in launcher.rank_power_offers(self.vast.search_offers(launcher.power_search_query(self.cfg)), self.cfg,
                                                 banned, known, exclude=exclude, environ=self._env):
                 yield o, True
-        for o in launcher.rank_offers(offers, self.cfg, banned, known, exclude=exclude):
+        for o in launcher.rank_offers(offers, self.cfg, banned, known, exclude=exclude, proven=proven, bad_hosts=bad_hosts):
             yield o, False
 
     def _create(self, now: float, actions: List[str], *, exclude: Optional[set] = None, prime: bool = False,
@@ -458,7 +567,24 @@ class FleetManager:
             else:
                 self._create_backoff_until = now + 300
             return 0
+        kind = "reserve" if reserve else "prime" if prime else "demand"
+        why = self._create_blocked(now, kind)
+        if why:
+            self._log_blocked(now, why, kind)
+            if reserve:
+                self._reserve_backoff_until = now + 300
+            elif prime:
+                self._prime_backoff_until = now + 300
+            else:
+                self._create_backoff_until = now + 60
+            return 0
         exclude = set() if exclude is None else exclude
+        proven = self.store.proven_machines()
+        # never-proven host: a "probe" (6 of 26 creates on 2026-11-17 found no NVENC). Past the daily probe limit only proven
+        # hosts, unless a job waits and NO server at all is up (then there is no other way).
+        allow_probe = self.cfg.probes_per_day < 0 or \
+            self.store.creates_since(now - 86400, probes_only=True) < self.cfg.probes_per_day or \
+            (kind == "demand" and not self.store.all(("creating", "running", "starting", "stop_pending", "stopping")))
         want_warm = not reserve and self._warm_missing() > sum(
             1 for i in self.store.all(("creating", "running", "starting")) if (i.note or "") == "warm_eligible" and i.role != "warm")
         tries = self.cfg.spares_count if self.cfg.spares_enabled else 1
@@ -468,9 +594,11 @@ class FleetManager:
             offers = [] if reserve else self.vast.search_offers(launcher.search_query(self.cfg))
             banned, known = self.store.banned_machines(now), self.store.good_machines(now - 30 * 86400)
             for offer, power in self._candidates(offers, banned, known, exclude, want_warm=want_warm, prime=prime, gap=gap,
-                                                 reserve=reserve):
+                                                 reserve=reserve, proven=proven, bad_hosts=self.store.nvenc_bad_hosts()):
                 if offer.get("id") in exclude or offer.get("machine_id") in exclude:
                     continue                             # refused a moment ago (it may be in two lists)
+                if not allow_probe and offer.get("machine_id") not in proven:
+                    continue
                 slots = launcher.offer_slots(offer, self.cfg, power=power, environ=self._env)
                 if self.dry:
                     key = "prime" if prime else "create_reserve" if reserve else "create_power" if power else "create"
@@ -495,7 +623,8 @@ class FleetManager:
                                      status=exc.status, reason=str(exc)[:120], attempt=tried)
             if iid is None:
                 raise launcher.LaunchError("no suitable reserve-eligible power offer" if reserve else
-                                           "no suitable warm-eligible offer" if prime else "no suitable offer")
+                                           "no suitable warm-eligible offer" if prime else "no suitable offer"
+                                           + ("" if allow_probe else " on a proven host (probe limit reached)"))
         except (launcher.LaunchError, VastError) as exc:
             if reserve:
                 self._reserve_backoff_until = now + 600
@@ -508,23 +637,92 @@ class FleetManager:
             return 0
         eligible = not power and launcher.warm_eligible(offer, self.cfg)
         exclude.update({offer.get("id"), offer.get("machine_id")})
-        self.store.record_create(now)
+        self.store.record_create(now, kind, offer.get("machine_id"), offer.get("machine_id") in proven)
+        if kind == "demand":
+            self._woken[int(iid)] = now
         self.store.add(now, id=int(iid), label=label, state="creating", gpu_name=offer.get("gpu_name"), dph_base=offer.get("dph_base", offer.get("dph_total")),
                        storage_gb_month=offer.get("storage_cost"), disk_gb=self.cfg.disk_gb, release_sha=self.cfg.release_sha,
                        machine_id=offer.get("machine_id"), inet_up_tb=offer.get("internet_up_cost_per_tb"), inet_down_tb=offer.get("internet_down_cost_per_tb"),
                        role="reserve" if reserve else "warm" if prime else "burst", note="warm_eligible" if eligible else "",
                        # default class: NULL = cfg.jobs_per_instance at every tick, exactly the old count
                        # (a small-CPU host stores its 1)
-                       slots=slots if power or slots != self.cfg.jobs_per_instance else None, num_gpus=launcher.num_gpus(offer), gpu_class="power" if power else "standard")
+                       slots=slots if power or slots != self.cfg.jobs_per_instance else None, num_gpus=launcher.num_gpus(offer), gpu_class="power" if power else "standard",
+                       self_update=1 if self.cfg.release_pointer else 0, image=self.cfg.image, host_id=offer.get("host_id"))
         extra = {"reserve": True} if reserve else {}
         if tried > 1:
             extra["attempt"] = tried
         self.store.event(now, int(iid), "created", offer=offer.get("id"), gpu=offer.get("gpu_name"), dph_base=str(offer.get("dph_base")),
                          cpu=offer.get("cpu_name"), geo=offer.get("geolocation"), inet_down=offer.get("inet_down"),
                          machine=offer.get("machine_id"), cached=offer.get("machine_id") in known, prime=prime, warm_eligible=eligible,
-                         num_gpus=launcher.num_gpus(offer), slots=slots, gpu_class="power" if power else "standard", **extra)
+                         num_gpus=launcher.num_gpus(offer), slots=slots, gpu_class="power" if power else "standard",
+                         why=kind, proven=offer.get("machine_id") in proven, host=offer.get("host_id"),
+                         inet_down_tb=str(offer.get("internet_down_cost_per_tb")), **extra)
         actions.append(f"{'prime' if prime else 'create_reserve' if reserve else 'create_power' if power else 'create'} {iid}")
         return slots
+
+    # ------------------------------------------------------------- budget
+    def day_spend_usd(self, now: float) -> Decimal:
+        """Estimated fleet spend of the current MSK day: GPU + disk (accounting.usage, the report's calculation) + the image
+        pull traffic of every create (cfg.create_download_gb at the host's price per TB). Cached for 60 s."""
+        at, v = self._spend_cache
+        if now - at < 60:
+            return v
+        from accounting.usage import cost_between
+        lo = msk_midnight(now)
+        r = cost_between(self.store, lo, now, now)
+        traffic = Decimal(0)
+        for e in self.store.events_since(lo, ("created",)):
+            tb = e["detail"].get("inet_down_tb")
+            if tb in (None, "None", ""):
+                inst = self.store.get(e["instance_id"]) if e["instance_id"] else None
+                tb = getattr(inst, "inet_down_tb", None) if inst else None
+            try:
+                price = Decimal(str(tb)) if tb not in (None, "None", "") else Decimal("15")
+            except Exception:  # noqa: BLE001
+                price = Decimal("15")
+            traffic += Decimal(self.cfg.create_download_gb) * price / Decimal(1000)
+        v = r["gpu"] + r["disk"] + traffic
+        self._spend_cache = (now, v)
+        return v
+
+    def _create_blocked(self, now: float, kind: str) -> str:
+        """'' = a create is allowed; otherwise why not (owner 2026-11-18: create only when there is no other way)."""
+        c = self.cfg
+        if c.max_creates_per_day and self.store.creates_since(msk_midnight(now)) >= c.max_creates_per_day:
+            return "day_limit"
+        if c.day_budget_usd > 0 and self.day_spend_usd(now) >= c.day_budget_usd:
+            return "budget"
+        if kind == "prime" and c.prime_min_interval_hours:
+            last = self.store.last_create("prime")
+            if last is None:     # rows from before 2026-11-18 have no kind: the newest "created" event with prime=True
+                last = max((e["ts"] for e in self.store.events_since(now - c.prime_min_interval_hours * 3600, ("created",))
+                            if e["detail"].get("prime")), default=None)
+            if last is not None and now - last < c.prime_min_interval_hours * 3600:
+                return "prime_interval"
+        return ""
+
+    def _log_blocked(self, now: float, why: str, kind: str) -> None:
+        if now - self._blocked_logged.get(why + kind, float("-inf")) >= 600:
+            self._blocked_logged[why + kind] = now
+            self.store.event(now, None, "create_blocked", reason=why, kind=kind,
+                             creates_today=self.store.creates_since(msk_midnight(now)),
+                             spend_today=str(self.day_spend_usd(now).quantize(Decimal("0.01"))) if self.cfg.day_budget_usd > 0 else None)
+
+    def _futile_backoff(self, now: float) -> bool:
+        """Servers woken / created for a job that none of them took (2026-11-17: the warm was resumed 18 times in 3.5 h for
+        a job it could not take) -> pause waking and creating for futile_backoff_seconds after the limit is reached."""
+        c = self.cfg
+        if not c.futile_wakes_per_hour:
+            return False
+        ev = self.store.events_since(now - 3 * 3600, ("futile_wake",))
+        if len([e for e in ev if e["ts"] >= now - 3600]) < c.futile_wakes_per_hour and len(ev) <= c.futile_wakes_per_hour:
+            return False
+        # backoff doubles with every further futile wake in 3 h (20 -> 40 -> 80 min ..., at most 4 h)
+        wait = min(4 * 3600, c.futile_backoff_seconds * 2 ** max(0, len(ev) - c.futile_wakes_per_hour))
+        if not ev or now - ev[-1]["ts"] >= wait:
+            return False
+        self._log_blocked(now, "futile_wakes", "demand")
+        return True
 
     def _prime_warm(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         """No warm server at all and nothing happening -> create one; it boots (image, release, models) and is stopped
@@ -533,7 +731,24 @@ class FleetManager:
             return
         if not self._warm_missing() or self.store.all(("creating", "running", "starting", "stop_pending", "stopping", "destroying")):
             return                         # one prime at a time; the 2nd warm is primed once the 1st one is paused
+        if self._promote_spare(now):       # a paused spare on a warm-eligible host becomes the warm: no create at all
+            return
+        if len(self._warm()) >= self._warm_target(now):
+            return                         # night (SONYA_NIGHT_WARM_INSTANCES): the missing warm is primed in the morning
         self._create(now, actions, prime=True)
+
+    def _promote_spare(self, now: float) -> bool:
+        left = self._warm_storage_left()
+        warm_hosts = {w.machine_id for w in self._warm() if w.machine_id}
+        proven = self.store.proven_machines()
+        for sp in sorted(self._spares(), key=lambda i: (i.machine_id not in proven, -(i.stopped_at or 0))):
+            if sp.state == "stopped" and (sp.note or "") == "warm_eligible" and sp.gpu_class != "power" and self._release_ok(sp) \
+                    and sp.machine_id not in warm_hosts and (left is None or self._inst_pause_rub(sp) <= left) \
+                    and (sp.retry_after or 0) <= now:
+                self.store.touch(sp.id, role="warm")
+                self.store.event(now, sp.id, "warm_promoted", from_role="spare")
+                return True
+        return False
 
     def _prime_reserve(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
         """Power reserve on, none exists and nothing happening -> create one; it boots and is stopped by the idle rule
@@ -582,17 +797,22 @@ class FleetManager:
 
     # ------------------------------------------------------------ retention
     def _retention(self, snap: QueueSnapshot, now: float, actions: List[str]) -> None:
+        spares = sorted((i for i in self.store.all(("stopped",)) if i.role == "spare"), key=lambda i: -(i.stopped_at or 0))
+        keep_spares = {i.id for i in spares[:self.cfg.spare_instances]
+                       if now - (i.stopped_at or now) <= self.cfg.spare_retention_hours * 3600}
         for inst in self.store.all(("stopped",)):
-            stale = inst.release_sha != self.cfg.release_sha
+            stale = not self._release_ok(inst)
             # kept while it is one of the warm_instances most recently paused warms (an extra one is removed by retention)
             warm = inst.role == "warm" and sum(
                 1 for w in self._warm(exclude=inst.id) if w.state == "stopped" and w.stopped_at
                 and w.stopped_at > (inst.stopped_at or 0)) < self.cfg.warm_instances
             reserve = inst.role == "reserve" and self.cfg.power_reserve and not any(
                 r.stopped_at and (r.stopped_at > (inst.stopped_at or 0)) for r in self._reserves(exclude=inst.id) if r.state == "stopped")
-            expired = not (warm or reserve) and now - (inst.stopped_at or now) > self.cfg.stopped_retention_seconds
+            spare = inst.id in keep_spares
+            expired = not (warm or reserve or spare) and now - (inst.stopped_at or now) > self.cfg.stopped_retention_seconds
             if (expired or stale) and snap.pending == 0:
-                self._destroy(inst, now, actions, reason="stale_release" if stale else "retention")
+                self._destroy(inst, now, actions, reason="stale_release" if stale else
+                              "spare_retention" if inst.role == "spare" else "retention")
 
     def _destroy(self, inst: Optional[Inst], now: float, actions: List[str], reason: str) -> None:
         if inst is None or self._dry_log(inst, "destroy", now):

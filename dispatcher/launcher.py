@@ -111,22 +111,44 @@ def warm_eligible(o: Mapping[str, Any], cfg: FleetConfig) -> bool:
         and Decimal(str(o.get("storage_cost") or 0)) <= cfg.max_storage_gb_month
 
 
-def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[int] = ()) -> Tuple:
+RANK_JOBS_PER_CREATE = 4   # 2026-11-18: a create serves ~4 videos on average (prod 11-14..17: 3-5) - weighs pull vs hourly price
+
+
+def inet_down_usd_tb(o: Mapping[str, Any]) -> Decimal:
+    return Decimal(str(o.get("internet_down_cost_per_tb") or o.get("inet_down_tb") or 0))
+
+
+def create_traffic_usd(o: Mapping[str, Any], cfg: FleetConfig, cached: bool = False) -> Decimal:
+    """Download traffic of ONE create on this host: image + models (cfg.create_download_gb) at its price per TB.
+    2026-11-17: hosts charged $2.7..$40 per TB; traffic was 2/3 of the Vast bill (26 creates)."""
+    gb = Decimal(cfg.create_download_gb) * (Decimal("0.3") if cached else 1)
+    return gb * inet_down_usd_tb(o) / Decimal(1000)
+
+
+def offer_rank(o: Mapping[str, Any], cfg: FleetConfig, known_machines: Iterable[int] = (), proven: Iterable[int] = ()) -> Tuple:
     est = JOB_SECONDS.get(str(o.get("gpu_name")), JOB_SECONDS["RTX 3090"])
+    known = o.get("machine_id") in set(known_machines)
+    score = Decimal(str(est)) * hourly_cost(o, cfg)
+    if getattr(cfg, "rank_traffic", False):   # USD per create: N videos of GPU time + the image pull at this host's traffic price
+        score = score / Decimal(3600) * RANK_JOBS_PER_CREATE + create_traffic_usd(o, cfg, cached=known)
     # Europe FIRST (load test 2026-11-09): our S3 + API are in Russia; from Vietnam every upload/status call cost seconds
-    # (260 s per video, 2.5x Europe) and the image pull took 289 s vs 117 s in Germany. Then the class, then the cache.
+    # (260 s per video, 2.5x Europe) and the image pull took 289 s vs 117 s in Germany. Then (SONYA_PROVEN_FIRST) a host
+    # where our worker already did a job (NVENC works), then the class, then the cache.
     return (not in_europe(o),
+            bool(getattr(cfg, "proven_first", False)) and o.get("machine_id") not in set(proven),
             offer_class(o, cfg),
-            o.get("machine_id") not in set(known_machines),   # booted there before -> the image layers are likely cached
-            Decimal(str(est)) * hourly_cost(o, cfg),
+            not known,   # booted there before -> the image layers are likely cached
+            score,
             -float(o.get("inet_down") or 0))
 
 
 def rank_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
-                *, warm: bool = False, exclude: Iterable[int] = ()) -> List[dict]:
+                *, warm: bool = False, exclude: Iterable[int] = (), proven: Iterable[int] = (),
+                bad_hosts: Iterable[int] = ()) -> List[dict]:
     """Every acceptable offer, best first: Europe, default class, cached image, time x price, faster internet.
     warm=True: only hosts that may hold the paused warm server (default class, storage <= max_storage_gb_month)."""
     skip = set(exclude)
+    proven_set, bad_set = set(proven), set(bad_hosts) - {None}
     if cfg.pin_machine_id:      # load tests only: one named host (any GPU/CPU class), still under the price cap
         pinned = [o for o in offers if o.get("machine_id") == cfg.pin_machine_id and o.get("id") not in skip
                   and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph]
@@ -136,9 +158,11 @@ def rank_offers(offers: List[dict], cfg: FleetConfig, banned_machines: set, know
           and Decimal(str(o.get("dph_total", 99))) <= cfg.max_dph
           and float(o.get("inet_down") or 0) >= cfg.min_inet_down_mbps
           and float(o.get("reliability2", o.get("reliability", 1)) or 0) >= cfg.min_reliability
-          and (not warm or warm_eligible(o, cfg))]
+          and (not warm or warm_eligible(o, cfg))
+          and (not cfg.max_inet_down_usd_tb or inet_down_usd_tb(o) <= cfg.max_inet_down_usd_tb)
+          and (o.get("host_id") not in bad_set or o.get("machine_id") in proven_set)]
     known = set(known_machines)
-    return sorted(ok, key=lambda o: offer_rank(o, cfg, known))     # stable: ties keep Vast's order, like min() did
+    return sorted(ok, key=lambda o: offer_rank(o, cfg, known, proven_set))     # stable: ties keep Vast's order, like min() did
 
 
 def pick_offer(offers: List[dict], cfg: FleetConfig, banned_machines: set, known_machines: Iterable[int] = (),
@@ -258,6 +282,9 @@ def create_payload(cfg: FleetConfig, label: str, github_token: str, environ: Map
            # NVENC: the NVIDIA runtime mounts libnvidia-encode only with the "video" capability; without it the worker
            # fell back to libx264 on Vast (run 4: "render encoder: cpu @ 6M", 179 s vs 108 s on the Mac mini)
            "NVIDIA_DRIVER_CAPABILITIES": "compute,utility,video"}
+    if getattr(cfg, "release_pointer", False):   # 2026-11-18: the worker takes the current release itself on every start
+        env["SONYA_RELEASE_POINTER"] = "on"
+        env["SONYA_BASE_IMAGE_REF"] = cfg.image          # the pointer's release must need this very image
     missing = [k for k in ("BACKEND_API_URL", "WORKER_SECRET", "S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_REGION", "MODELS_S3_BUCKET")
                if not environ.get(k)]
     if missing or not (environ.get("S3_BUCKET_NAME") or environ.get("S3_BUCKET")):
