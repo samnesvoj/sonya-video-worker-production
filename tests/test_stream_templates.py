@@ -48,3 +48,10 @@ def test_nick_only_in_5_and_sanitized():
 def test_other_layouts_untouched():
     person = {"layout": "person", "crop_w": 10}
     assert apply_template(person, 4)["layout"] == "person" and apply_template(None, 4) is None
+
+
+@pytest.mark.parametrize("n", [2, 3, 4, 5])
+def test_templates_without_a_face_in_the_webcam(n):
+    """2026-11-18 prod: a webcam rect from the survey with no face → UnboundLocalError on every clip of 2–5."""
+    t = apply_template(dict(BASE, face=None), n, nick="x")
+    assert t["template"] == n and "overlay" in track_graph(t)

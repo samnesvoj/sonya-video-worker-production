@@ -73,7 +73,10 @@ def apply_template(track: Optional[Dict[str, Any]], template: Any, *, nick: Any 
             track = dict(track, template=1 if track.get("layout") == "game" else None)
         return track
     t = dict(track, template=n, template_name=TEMPLATES[n])
-    cam, face = [float(v) for v in t["cam_src"]], t.get("face") or [cam[0] + cam[2] / 2, cam[1] + cam[3] / 2, 0, 0]
+    cam = [float(v) for v in t["cam_src"]]
+    # no face found inside the webcam (by="survey" rect, a borderless camera): centre of the webcam box.
+    # 2026-11-18: this used `cam` in the same tuple assignment → UnboundLocalError on every clip of templates 2–5
+    face = t.get("face") or [cam[0] + cam[2] / 2, cam[1] + cam[3] / 2, 0, 0]
     game, masks = list(t["game"]), [list(m) for m in t.get("game_masks") or []]
     gh_full = _even(OUT_W * game[3] / float(game[2]))
     if n == 3:                                          # 60 % webcam / 40 % game: the same graph as 1, other split

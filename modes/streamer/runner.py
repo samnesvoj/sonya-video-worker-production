@@ -514,6 +514,13 @@ def _plan_ad(video: str, ad: Dict[str, Any], words_out: List[Dict[str, Any]], pi
 _AD_LUFS: Dict[str, Optional[float]] = {}
 
 
+def _hints_with(hints: Dict[str, Any], **crop: Any) -> Dict[str, Any]:
+    """crop_hints copy with crop fields overridden (render fallbacks)."""
+    h = dict(hints or {})
+    h["crop"] = dict(h.get("crop") or {}, **crop)
+    return h
+
+
 def run(
     input_video_path: str,
     output_dir: str,
@@ -533,12 +540,20 @@ def run(
     names = [str(out_dir / f"stream_clip_{i + 1:02d}.mp4") for i in range(len(top))]
 
     def one(i: int) -> Optional[str]:
-        try:
-            return compose_one(input_video_path, names[i], top[i], crop_hints=hints)
-        except Exception as exc:
-            logger.warning("[streamer] Clip %d failed: %s", i + 1, exc)
-            warnings.append(f"clip_{i + 1}_failed: {str(exc)[:300]}")
-            return None
+        # owner 2026-11-18 («всегда выдавать клипы»): a clip that fails in the chosen template is rendered again
+        # in template 1, then with the plain person / centre crop — never lost over the layout
+        tries = [hints, _hints_with(hints, layout_template=1), _hints_with(hints, layout="person", layout_template=1)]
+        for k, h in enumerate(tries):
+            seg = dict(top[i])
+            try:
+                out = compose_one(input_video_path, names[i], seg, crop_hints=h)
+                top[i].clear()
+                top[i].update(seg, **({"render_fallback": k} if k else {}))
+                return out
+            except Exception as exc:
+                logger.warning("[streamer] Clip %d failed (try %d): %s", i + 1, k + 1, exc)
+                warnings.append(f"clip_{i + 1}_failed{'' if k == 0 else f'_try{k + 1}'}: {str(exc)[:300]}")
+        return None
 
     from concurrent.futures import ThreadPoolExecutor
     from scripts.shared.clip_parallel import clip_workers      # 2 before 2026-11-16; more on an idle server
