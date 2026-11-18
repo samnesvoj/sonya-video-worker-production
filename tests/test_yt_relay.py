@@ -201,3 +201,10 @@ def test_youtube_watch_alerts(ledger):
     assert any(k.startswith("yt-relay-down:mac") for k in keys) and any(k.startswith("yt-canary:bot") for k in keys)
     assert yt_watch.check(ledger, {"bot": {**ok, "canary": {"ok": False}}, "mac": {**ok, "ts": now - 3600}}, now + 60) == []
     assert any(k.startswith("yt-cookies") for k in yt_watch.check(ledger, {"bot": {**ok, "cookies": "expired"}}, now))
+
+
+def test_restarted_relay_takes_its_own_abandoned_job_again():
+    req = {"created": 1000.0}
+    hbs = {"bot": hb(0)}
+    assert not yt_relay.should_take("bot", 0, req, {"bot": {"state": "downloading", "ts": 1100}}, hbs, 1200)
+    assert yt_relay.should_take("bot", 0, req, {"bot": {"state": "downloading", "ts": 1100}}, hbs, 1100 + yt_relay.STATUS_STALE + 1)

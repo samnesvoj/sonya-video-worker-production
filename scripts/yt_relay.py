@@ -138,8 +138,12 @@ def statuses(job_id: str) -> Dict[str, Dict[str, Any]]:
 # ── the decision rule (pure, unit-tested) ─────────────────────────────────────
 def should_take(me: str, my_priority: int, req: Dict[str, Any], sts: Dict[str, Dict[str, Any]],
                 hbs: Dict[str, Dict[str, Any]], now: float) -> bool:
-    if me in sts or any(s.get("state") == "done" for s in sts.values()):
+    if any(s.get("state") == "done" for s in sts.values()):
         return False
+    mine = sts.get(me)
+    if mine is not None:
+        # my own status that stopped moving = this relay restarted mid-download: take it again
+        return mine.get("state") not in TERMINAL and now - float(mine.get("ts") or 0) > STATUS_STALE
     age = now - float(req.get("created") or now)
     for name, hb in hbs.items():
         if name == me or int(hb.get("priority", 99)) >= my_priority or not hb.get("fresh"):
@@ -342,7 +346,19 @@ class Relay:
             self._st(job_id, state="claimed")
             ka.start()
             os.environ["SONYA_YTDLP_MAX_HEIGHT"] = str(req.get("max_height") or "1080")
-            got = fetch_source(req["sf"], req.get("mode") or "virality", req["s3_key"], wd, progress=prog)
+            for attempt in range(3):
+                try:
+                    got = fetch_source(req["sf"], req.get("mode") or "virality", req["s3_key"], wd, progress=prog)
+                    break
+                except SourceFetchError as exc:
+                    # a dropped connection mid-download ("x bytes read, y more expected") is worth another go here
+                    # before the job is handed to the slower relay
+                    if attempt == 2 or exc.code not in ("SOURCE_DOWNLOAD_FAILED", "SOURCE_FORBIDDEN"):
+                        raise
+                    logger.warning("[yt_relay] job=%s %s, retry %d", job_id, exc.code, attempt + 1)
+                    shutil.rmtree(wd, ignore_errors=True)
+                    wd.mkdir(parents=True, exist_ok=True)
+                    time.sleep(10)
             stop.set()
             ka.join(5)
             self._st(job_id, state="done", duration=got.get("duration"), bytes=got.get("bytes"),
@@ -419,6 +435,10 @@ class Relay:
 
     def serve(self) -> None:
         self.work_root.mkdir(parents=True, exist_ok=True)
+        # yt-dlp/url_ingest temp files go to the work dir: /tmp is a ~1 GB RAM tmpfs on the bot server (Ubuntu 26.04),
+        # a 1-hour video filled it (ENOSPC, 2026-11-17)
+        os.environ["TMPDIR"] = str(self.work_root)
+        tempfile.tempdir = str(self.work_root)
         last_hb = last_canary = last_jan = 0.0
         last_update = time.time()
         restart = False
