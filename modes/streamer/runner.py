@@ -177,14 +177,17 @@ def analyze(
                                        params=dict(params, crop=crop), progress_callback=progress_callback)
     warnings: List[str] = list(enrichment.get("warnings") or [])
     words = enrichment.get("word_timestamps") or []
-    if not words:
+    if not words and any("word_timestamps" in str(w) or "asr" in str(w).lower() for w in warnings):
         raise RuntimeError("ASR_FAILED: no word timestamps - streamer moments need speech recognition ("
-                           + "; ".join(warnings)[:300] + ")")
-    from scripts.shared.glossary import apply as apply_glossary
-    words = apply_glossary(words, params.get("glossary"))
+                           + "; ".join(warnings)[:300] + ")")        # an ASR outage → retry, not a silent cut
+    if words:
+        from scripts.shared.glossary import apply as apply_glossary
+        words = apply_glossary(words, params.get("glossary"))
+    else:   # owner 2026-11-18: no speech is not an error by itself — a loud game / music stream still gets clips
+        warnings.append("asr_no_words: clips from the audio energy only")
 
     info = _source_info(input_video_path)
-    n_sec = int(max(info["duration"], max(float(w.get("end", 0)) for w in words))) + 1
+    n_sec = int(max([float(info["duration"] or 0)] + [float(w.get("end", 0)) for w in words])) + 1
 
     from scripts.shared import stream_signals as ss
     from scripts.shared.crop.smart_crop_adapter import ffmpeg_bin
@@ -192,7 +195,7 @@ def analyze(
     sig: Dict[str, Any] = {}
     try:
         a = ss.audio_signals(input_video_path, ff, str(work / "signals" / "audio.json"))
-        sig.update(loud=a["loud"], pitch=a["pitch"])
+        sig.update(loud=a["loud"], pitch=a["pitch"], db=a.get("db") or [])
     except Exception as exc:
         warnings.append(f"audio_signals_failed: {exc}")
     if progress_callback:
@@ -233,12 +236,20 @@ def analyze(
     segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
     selection["chat"] = chat_meta
     if not segs:
-        raise RuntimeError(f"NO_CLIPS: no complete moment found in the stream ({len(words)} words)")
+        if not words:
+            raise RuntimeError("NO_CLIPS: no speech and no action in the video (ASR found no words, the sound is "
+                               "flat) (" + "; ".join(warnings)[:200] + ")")
+        raise RuntimeError(f"NO_CLIPS: no moment found even with the fallback rules ({len(words)} words)")
+    if selection.get("fallback"):
+        warnings.append("moments_fallback: " + ", ".join(selection["fallback"]))
 
     from scripts.shared.boundaries import BoundaryConfig, refine_segments
     bcfg = dict(params.get("boundaries") or {})
     bcfg.setdefault("max_duration", 62.0)
-    refined = refine_segments(segs, words, BoundaryConfig(**bcfg))
+    if words:
+        refined = refine_segments(segs, words, BoundaryConfig(**bcfg))
+    else:
+        refined = [dict(s, boundary_status="no_words") for s in segs]
     segments = []
     for s in refined:
         if s.get("boundary_status") == "dropped_overlap":
@@ -251,7 +262,7 @@ def analyze(
                          "source": s.get("source", "stream_moment"),
                          **{k: s[k] for k in ("candidate_id", "selection_reason", "hook", "keywords", "editor_score",
                                               "peak_t", "boundary_status", "tight_sec", "payoff_t", "punchline_t",
-                                              "category", "moment_type", "lead_in", "music") if k in s},
+                                              "category", "moment_type", "lead_in", "music", "tier") if k in s},
                          "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
                          "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
                                    for w in clip_words]})

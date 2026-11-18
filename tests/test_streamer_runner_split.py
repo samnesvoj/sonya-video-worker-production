@@ -100,6 +100,16 @@ def test_analyze_without_words_fails_clearly(monkeypatch, patched, tmp_path):
         runner.analyze("input.mp4", str(tmp_path), params=dict(PARAMS))
 
 
+def test_analyze_no_speech_but_loud_audio_still_gives_clips(monkeypatch, patched, tmp_path):
+    """ASR worked but heard no words (a game / music stream): clips from the audio energy, no NO_CLIPS."""
+    monkeypatch.setattr("scripts.shared.enhancers.sonya_enhancer.enrich_video_for_mode",
+                        lambda **kw: {"word_timestamps": [], "warnings": []})
+    res = runner.analyze("input.mp4", str(tmp_path), params=dict(PARAMS))
+    assert res["segments"] and any(s["start_sec"] <= 300 <= s["start_sec"] + s["duration_sec"]
+                                   for s in res["segments"])
+    assert any(w.startswith("asr_no_words") for w in res["warnings"])
+
+
 def test_compose_one_does_not_call_enrichment_and_renders_the_segment(patched, tmp_path):
     out = str(tmp_path / "clip.mp4")
     seg = {"start_sec": 4350.0, "duration_sec": 37.0}
