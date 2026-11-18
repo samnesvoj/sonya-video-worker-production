@@ -141,5 +141,41 @@ def test_run_reports_per_clip_failure(monkeypatch, patched, tmp_path):
     monkeypatch.setattr(runner, "compose_one", flaky)
     monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
     res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3))
-    assert len(res["clips"]) == 2
+    # 2026-11-18: a failed clip is rendered again (template 1, then the plain crop) instead of being lost
+    assert len(res["clips"]) == 3
     assert any(w.startswith("clip_1_failed") for w in res["warnings"])
+
+
+def test_run_falls_back_to_template_1_then_plain_crop(monkeypatch, patched, tmp_path):
+    real = runner.compose_one
+    seen = []
+
+    def picky(video, out, seg, crop_hints=None):
+        c = (crop_hints or {}).get("crop") or {}
+        seen.append((c.get("layout_template"), c.get("layout")))
+        if c.get("layout") != "person":
+            raise UnboundLocalError("cannot access local variable 'cam'")
+        return real(video, out, seg, crop_hints=crop_hints)
+
+    monkeypatch.setattr(runner, "compose_one", picky)
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=2,
+                                                            settings={"streamer_layout": 4}))
+    assert len(res["clips"]) == 2
+    assert seen[:3] == [(4, seen[0][1]), (1, seen[0][1]), (1, "person")]
+
+
+def test_run_loses_a_clip_only_when_every_fallback_fails(monkeypatch, patched, tmp_path):
+    real = runner.compose_one
+    n = {"i": 0}
+
+    def bad_first(video, out, seg, crop_hints=None):
+        if out.endswith("_01.mp4"):
+            raise RuntimeError("boom")
+        return real(video, out, seg, crop_hints=crop_hints)
+
+    monkeypatch.setattr(runner, "compose_one", bad_first)
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3))
+    assert len(res["clips"]) == 2
+    assert sum(w.startswith("clip_1_failed") for w in res["warnings"]) == 3
