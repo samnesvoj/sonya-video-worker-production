@@ -64,6 +64,11 @@ from dispatcher.vast_api import VastClient, VastError, VastInstance, is_host_err
 
 log = logging.getLogger("sonya.fleet")
 FOREVER = 4102444800.0          # 2100-01-01: "never again" for a ban
+
+
+def msk_midnight(now: float) -> float:
+    """00:00 Moscow time (UTC+3, no DST) of the day `now` falls in."""
+    return now - ((now + 3 * 3600) % 86400)
 RUNNING_LIKE = ("running",)
 VAST_STOPPED = ("exited", "stopped", "created", "inactive")
 
@@ -663,7 +668,7 @@ class FleetManager:
         if now - at < 60:
             return v
         from accounting.usage import cost_between
-        lo = now - ((now + 3 * 3600) % 86400)                       # 00:00 MSK today
+        lo = msk_midnight(now)
         r = cost_between(self.store, lo, now, now)
         traffic = Decimal(0)
         for e in self.store.events_since(lo, ("created",)):
@@ -683,7 +688,7 @@ class FleetManager:
     def _create_blocked(self, now: float, kind: str) -> str:
         """'' = a create is allowed; otherwise why not (owner 2026-11-18: create only when there is no other way)."""
         c = self.cfg
-        if c.max_creates_per_day and self.store.creates_since(now - 86400) >= c.max_creates_per_day:
+        if c.max_creates_per_day and self.store.creates_since(msk_midnight(now)) >= c.max_creates_per_day:
             return "day_limit"
         if c.day_budget_usd > 0 and self.day_spend_usd(now) >= c.day_budget_usd:
             return "budget"
@@ -700,7 +705,7 @@ class FleetManager:
         if now - self._blocked_logged.get(why + kind, float("-inf")) >= 600:
             self._blocked_logged[why + kind] = now
             self.store.event(now, None, "create_blocked", reason=why, kind=kind,
-                             creates_24h=self.store.creates_since(now - 86400),
+                             creates_today=self.store.creates_since(msk_midnight(now)),
                              spend_today=str(self.day_spend_usd(now).quantize(Decimal("0.01"))) if self.cfg.day_budget_usd > 0 else None)
 
     def _futile_backoff(self, now: float) -> bool:

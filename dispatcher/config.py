@@ -140,7 +140,7 @@ class FleetConfig:
     release_pointer: bool = False            # SONYA_RELEASE_POINTER: workers created now read worker-v2/release/current.json on every
                                              # start/resume and switch to that release themselves -> a new release destroys nothing
     release_compat: Tuple[str, ...] = ()     # SONYA_RELEASE_COMPAT_SHAS: older releases that are still fine to keep (comma list)
-    max_creates_per_day: int = 0             # SONYA_MAX_CREATES_PER_DAY (rolling 24 h; 0 = off)
+    max_creates_per_day: int = 0             # SONYA_MAX_CREATES_PER_DAY (per MSK calendar day, like the budget; 0 = off)
     day_budget_usd: Decimal = Decimal("0")   # SONYA_FLEET_DAY_BUDGET_USD: estimated spend of the MSK day (GPU + disk + image pull
                                              # traffic per create); reached -> no create (resume still allowed). 0 = off
     create_download_gb: int = 10             # SONYA_CREATE_DOWNLOAD_GB: image + models pulled by one create (traffic estimate/ranking)

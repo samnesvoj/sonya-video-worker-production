@@ -300,7 +300,7 @@ def test_fleet_lines_and_budget_alert():
     mgr.tick()
     text = "\n".join(fleet_stats.lines(store, clock(), cfg=mgr.cfg))
     assert "Серверов создано за сутки: 2 (из них под задания 2)" in text and "resume): 2" in text
-    assert "новых серверов 2 из 2" in text
+    assert "новых серверов сегодня (МСК) 2 из 2" in text
 
     class L:
         def __init__(self):

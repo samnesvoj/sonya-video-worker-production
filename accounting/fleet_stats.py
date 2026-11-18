@@ -60,7 +60,8 @@ def lines(store, now: float, hours: float = 24.0, cfg=None, spend_usd: Optional[
     if cfg is not None and (cfg.max_creates_per_day or cfg.day_budget_usd > 0):
         bits = []
         if cfg.max_creates_per_day:
-            bits.append(f"новых серверов {store.creates_since(now - 86400)} из {cfg.max_creates_per_day} за 24 ч")
+            from dispatcher.fleet import msk_midnight
+            bits.append(f"новых серверов сегодня (МСК) {store.creates_since(msk_midnight(now))} из {cfg.max_creates_per_day}")
         if cfg.day_budget_usd > 0 and spend_usd is not None:
             bits.append(f"траты сегодня ≈ ${spend_usd:.2f} из ${cfg.day_budget_usd}")
         out.append(tf.esc("Лимиты: " + "; ".join(bits)))
@@ -79,7 +80,7 @@ def check_budget_alerts(ledger, store, now: float, cfg=None) -> List[str]:
         d = e["detail"]
         text = [tf.title("⚠️ Vast: новые серверы не создаются"),
                 tf.esc(f"Причина: {BLOCK_WHY[why]}."),
-                tf.esc(f"Создано за 24 ч: {d.get('creates_24h')}" + (f"; траты сегодня ≈ ${d['spend_today']}" if d.get("spend_today") else "")
+                tf.esc(f"Создано сегодня (МСК): {d.get('creates_today')}" + (f"; траты сегодня ≈ ${d['spend_today']}" if d.get("spend_today") else "")
                        + "."),
                 tf.esc("Задания не теряются: ждут ближайшего свободного или остановленного сервера. "
                        "Если очередь растёт — подними лимит (SONYA_MAX_CREATES_PER_DAY / SONYA_FLEET_DAY_BUDGET_USD) или проверь /vast.")]
