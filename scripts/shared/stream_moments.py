@@ -51,6 +51,9 @@ class MomentConfig:
     jump_gap: float = 0.7             # pauses longer than this are cut out at render (scripts/shared/jumpcut)
     context: str = ""                 # stream title / game, for the editor only
     weights: Dict[str, float] = field(default_factory=lambda: dict(WEIGHTS))
+    # owner 2026-11-18 («режим обязан всегда выдавать клипы»): the floor of clips when the stream has speech.
+    # None = by stream length (min_clips_for); strict rules first, then relaxed tiers fill up to the floor.
+    min_clips: Optional[int] = None
 
     def __post_init__(self) -> None:
         from .stream_types import PHILOSOPHY_MAX_SEC, normalize_types
@@ -96,9 +99,16 @@ def _sentences(words) -> List[Tuple[int, int]]:
     return group_sentences(words, pause_sec=1.2)
 
 
-def build_candidates(words, cfg: MomentConfig, hits=None) -> List[Dict[str, Any]]:
+def build_candidates(words, cfg: MomentConfig, hits=None, relaxed: bool = False) -> List[Dict[str, Any]]:
+    """relaxed (fallback tier): sentences also end at a 0.7 s pause and a clip may end on any word followed by a
+    ≥ 0.6 s pause — still a finished phrase, never cut mid-word."""
     from .cut_selection import _STATEMENT_END, _TRAILING, _first_word, candidate_id
-    sents = _sentences(words)
+    if relaxed:
+        from .boundaries import group_sentences
+        sents = group_sentences(words, pause_sec=0.7)
+    else:
+        sents = _sentences(words)
+    end_pause = 0.6 if relaxed else 1.2
     out: List[Dict[str, Any]] = []
     # the stream's opening is skipped (intro screens) — except a «wow» entrance (owner: «начало стрима с вау-выходом»)
     reveals = [t for t, kind, _w in (hits or []) if kind in ("reveal", "laugh", "joke") and t < cfg.skip_intro_sec]
@@ -116,7 +126,10 @@ def build_candidates(words, cfg: MomentConfig, hits=None) -> List[Dict[str, Any]
             end_txt = words[e].text.strip()
             nxt_gap = (words[e + 1].start - words[e].end) if e + 1 < len(words) else 99.0
             # ends at a sentence end: terminal punctuation (not «…»), or a clear pause after it
-            if _TRAILING.search(end_txt) or not (_STATEMENT_END.search(end_txt) or nxt_gap >= 1.2):
+            if relaxed:
+                if not (_STATEMENT_END.search(end_txt) or nxt_gap >= end_pause):
+                    continue
+            elif _TRAILING.search(end_txt) or not (_STATEMENT_END.search(end_txt) or nxt_gap >= end_pause):
                 continue
             out.append({"id": candidate_id(words, s0, e), "start": words[s0].start, "end": words[e].end, "tight": dur,
                         "first": s0, "last": e, "opener": _first_word(words[s0].text),
@@ -480,56 +493,194 @@ def _apply_trim(c: Dict[str, Any], v: Dict[str, Any], words, cfg: MomentConfig) 
     return n
 
 
+def min_clips_for(n_sec: float, max_clips: int, cfg: Optional[MomentConfig] = None) -> int:
+    """Floor of clips (owner 2026-11-18: ≥ 5–8 from a 30+ min stream; NO_CLIPS only without speech / action).
+    cfg.min_clips or STREAMER_MIN_CLIPS (for 30+ min) override the default."""
+    import os
+    if cfg is not None and cfg.min_clips is not None:
+        return max(0, min(max_clips, int(cfg.min_clips)))
+    try:
+        long_floor = int(os.environ.get("STREAMER_MIN_CLIPS") or 8)
+    except ValueError:
+        long_floor = 8
+    if n_sec >= 1800:
+        f = long_floor
+    elif n_sec >= 900:
+        f = min(long_floor, 6)
+    elif n_sec >= 420:
+        f = min(long_floor, 4)
+    elif n_sec >= 150:
+        f = 2
+    else:
+        f = 1
+    return max(0, min(max_clips, f))
+
+
+def _phrase_start(words, lo: float, hi: float) -> Optional[int]:
+    """Word index starting in [lo, hi] right after the longest pause (a phrase start)."""
+    best, bg = None, -1.0
+    for i, w in enumerate(words):
+        if w.start < lo:
+            continue
+        if w.start > hi:
+            break
+        g = (w.start - words[i - 1].end) if i > 0 else 99.0
+        if g > bg + 1e-6:
+            best, bg = i, g
+    return best
+
+
+def _phrase_end(words, s0: int, lo: float, hi: float) -> Optional[int]:
+    """Word index ending in [lo, hi] (seconds after words[s0].start): terminal punctuation first, else the
+    longest pause after it (a finished phrase, never mid-word)."""
+    from .cut_selection import _STATEMENT_END
+    t0 = words[s0].start
+    best, bkey = None, None
+    for e in range(s0, len(words)):
+        d = words[e].end - t0
+        if d < lo:
+            continue
+        if d > hi:
+            break
+        g = (words[e + 1].start - words[e].end) if e + 1 < len(words) else 99.0
+        key = (bool(_STATEMENT_END.search(words[e].text.strip())) or g >= 1.0, round(g, 2))
+        if bkey is None or key > bkey:
+            best, bkey = e, key
+    return best
+
+
+def energy_windows(words, n_sec: int, e: np.ndarray, speech: np.ndarray, want: int,
+                   taken: List[Dict[str, Any]], cfg: MomentConfig) -> List[Dict[str, Any]]:
+    """Last tier: the loudest / most reactive stretches (audio, chat, reaction words — the excitement curve)
+    with speech, snapped to phrase boundaries: start after a pause before the peak, end on a finished phrase
+    20–45 s later. Without words: 30 s windows around the loudest peaks that are not silence."""
+    from .cut_selection import _first_word, candidate_id
+    out: List[Dict[str, Any]] = []
+    if n_sec < 8:
+        return out
+    curve = np.asarray(e, dtype=np.float64).copy()
+    if len(words):
+        curve = curve + 0.6 * np.convolve(speech, np.ones(9) / 9.0, mode="same")   # talk > dead air
+    order = np.argsort(-curve, kind="stable")
+    intro = min(cfg.skip_intro_sec, max(0.0, n_sec * 0.1))
+    lo_d, hi_d = max(12.0, cfg.min_duration - 5.0), cfg.max_duration
+    for t in order:
+        if len(out) >= want:
+            break
+        t = int(t)
+        if t < intro and n_sec > 300:
+            continue
+        probe = {"start": t - 15.0, "end": t + 15.0}
+        if _overlaps(probe, taken + out, 4.0):
+            continue
+        if len(words):
+            s0 = _phrase_start(words, t - 12.0, t - 1.0)
+            if s0 is None:
+                s0 = _phrase_start(words, t - 25.0, t + 3.0)
+            if s0 is None:
+                continue
+            e0 = _phrase_end(words, s0, lo_d, hi_d)
+            if e0 is None:
+                e0 = _phrase_end(words, s0, 8.0, hi_d + 10.0)
+            if e0 is None:
+                continue
+            c = {"id": candidate_id(words, s0, e0), "start": words[s0].start, "end": words[e0].end,
+                 "first": s0, "last": e0, "tight": _tight(words, s0, e0, cfg.jump_gap),
+                 "opener": _first_word(words[s0].text), "text": _text(words, {"first": s0, "last": e0})}
+        else:
+            a = float(max(0, min(n_sec - 30, t - 10)))
+            c = {"id": f"energy_{int(a)}", "start": a, "end": min(float(n_sec), a + 30.0), "first": None,
+                 "last": None, "tight": min(30.0, n_sec - a), "opener": "", "text": ""}
+        if _overlaps(c, taken + out, 4.0):
+            continue
+        c["peak_t"] = float(t)
+        out.append(c)
+    return out
+
+
 def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, Sequence[float]],
                    max_clips: int, cfg: Optional[MomentConfig] = None, hits=None,
                    chat: Optional[Callable[..., Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """-> (segments [{start, duration, score, source, candidate_id, selection_reason, hook?, keywords?}], meta)."""
+    """-> (segments [{start, duration, score, source, candidate_id, selection_reason, hook?, keywords?}], meta).
+
+    Tiers (owner 2026-11-18: the mode must always give clips when the stream has speech / action):
+      0 strict: whole sentences 20–45 s, the requested moment types, the editor's «strong» picks;
+      1 the floor (min_clips_for) is filled from the same candidates: other moment types, the editor's rejected
+        (not boring first), the local order;
+      2 relaxed candidates (0.7 s phrase pauses, 15–55 s, shorter intro skip, closer spacing);
+      3 energy windows (audio / chat / reaction peaks with speech, snapped to finished phrases).
+    Each clip's "tier" says which rule found it; meta["fallback"] lists what was used."""
+    from dataclasses import replace
     from .boundaries import normalize_words
     from .cut_selection import is_promo
     cfg = cfg or MomentConfig()
     words, _ = normalize_words(raw_words)
+    floor = min_clips_for(n_sec, max_clips, cfg)
     meta: Dict[str, Any] = {"version": VERSION, "params": {k: v for k, v in asdict(cfg).items()},
                             "signals": sorted(k for k, v in signals.items() if v is not None and len(v)),
-                            "llm": {"status": "off"}}
+                            "llm": {"status": "off"}, "min_clips": floor, "fallback": []}
+    e = excitement(signals, n_sec, cfg.weights)
     if not words:
         meta["selection_status"] = "no_words"
-        return [], meta
+        segs = _energy_segments(words, n_sec, e, np.zeros(n_sec), floor, [], cfg, signals, meta)
+        return segs, meta
     from . import stream_types as st
-    e = excitement(signals, n_sec, cfg.weights)
     speech = _speech_mask(words, n_sec)
     tctx = st.Context(words, n_sec, signals, hits)
     hits = tctx.hits                                         # + wisdom / zavoz_lead / chaos_word hits
     cands = build_candidates(words, cfg, hits)
     meta["candidates"] = len(cands)
-    scored = []
-    for c in cands:
-        c["text"] = _text(words, c)
-        low = c["text"].lower()
-        if is_promo(c["text"]) or sum(low.count(x) for x in _ALERT) >= 2:
-            continue
-        sc, why = score_candidate(c, e, speech, words, cfg, hits)
-        ts = st.classify(c, tctx)
-        c["type_scores"] = {k: v for k, v in ts.items() if v > 0}
-        best = st.best_type(ts, cfg.moment_types)
-        if best:
-            if not c.get("category") or best in cfg.moment_types:
-                c["category"] = best
-            if best in cfg.moment_types:
-                sc = max(sc, ts[best]) + 0.5                 # asked for this type: it outranks generic excitement
-                why.append(f"type {best} {ts[best]:.1f}")
-        if cfg.moment_types and "conflict" not in cfg.moment_types and c.get("category") not in cfg.moment_types:
-            continue                                         # not one of the requested types
-        scored.append((c, sc, why))
-    scored.sort(key=lambda t: (-t[1], t[0]["start"], t[0]["end"]))
-    # diverse pool: best per region, never overlapping, spaced
-    pool: List[Tuple[Dict[str, Any], float, List[str]]] = []
-    for c, sc, why in scored:
-        if not _overlaps(c, [p for p, _, _ in pool], cfg.min_gap_sec):
-            pool.append((c, sc, why))
-            if len(pool) >= max(cfg.pool, max_clips):
-                break
+    any_type = not cfg.moment_types or "conflict" in cfg.moment_types
+
+    def _score_all(cs, conf) -> List[Tuple[Dict[str, Any], float, List[str]]]:
+        res = []
+        for c in cs:
+            c["text"] = _text(words, c)
+            low = c["text"].lower()
+            if is_promo(c["text"]) or sum(low.count(x) for x in _ALERT) >= 2:
+                continue
+            sc, why = score_candidate(c, e, speech, words, conf, hits)
+            ts = st.classify(c, tctx)
+            c["type_scores"] = {k: v for k, v in ts.items() if v > 0}
+            best = st.best_type(ts, conf.moment_types)
+            if best:
+                if not c.get("category") or best in conf.moment_types:
+                    c["category"] = best
+                if best in conf.moment_types:
+                    sc = max(sc, ts[best]) + 0.5             # asked for this type: it outranks generic excitement
+                    why.append(f"type {best} {ts[best]:.1f}")
+            c["typed"] = any_type or c.get("category") in conf.moment_types
+            res.append((c, sc, why))
+        res.sort(key=lambda t: (-t[1], t[0]["start"], t[0]["end"]))
+        return res
+
+    def _diverse(items, taken, gap, limit):
+        got: List[Tuple[Dict[str, Any], float, List[str]]] = []
+        for c, sc, why in items:
+            if not _overlaps(c, [p for p, _, _ in taken] + [p for p, _, _ in got], gap):
+                got.append((c, sc, why))
+                if len(got) >= limit:
+                    break
+        return got
+
+    scored = _score_all(cands, cfg)
+    typed = [t for t in scored if t[0]["typed"]]
+    meta["typed_candidates"] = len(typed)
+    limit = max(cfg.pool, max_clips)
+    # diverse pool: best per region, never overlapping, spaced. The requested types first; when they cannot reach
+    # the floor, the other moments follow them (the editor still sees the request and ranks them)
+    pool = _diverse(typed, [], cfg.min_gap_sec, limit)
+    if len(pool) < floor and len(typed) < len(scored):
+        others = [t for t in scored if not t[0]["typed"]]
+        for c, sc, why in others:
+            why.append("fallback: other moment type (requested types too few)")
+        pool += _diverse(others, pool, cfg.min_gap_sec, limit - len(pool))
+        if cfg.moment_types:
+            meta["fallback"].append("other_types")
     meta["pool"] = len(pool)
-    chosen = pool[:max_clips]
+    # the requested types are too few: the other moments compete on their own merit (up to max_clips)
+    type_strict = "other_types" not in meta["fallback"]
+    chosen = [t for t in pool if t[0]["typed"]][:max_clips] if type_strict else pool[:max_clips]
     extras: Dict[str, Dict[str, Any]] = {}
     if cfg.editor and pool:
         all_sents = _sentences(words)
@@ -545,47 +696,128 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
         if verdicts:
             by_id = {c["id"]: (c, sc, why) for c, sc, why in pool}
             picked: List[Tuple[Dict[str, Any], float, List[str]]] = []
+            reserve: List[Tuple[Dict[str, Any], str]] = []
             rejected = 0
             # strict: the editor's order; boring / not clear in 3 s / weak → out («лучше меньше, но сильных»)
             ranked = sorted(verdicts, key=lambda v: (-(v["clear_3s"] and v["type"] != "скучно"), -v["score"]))
+
+            def _take(v, note=""):
+                c0, sc, why = by_id[v["id"]]
+                c = _apply_trim(c0, v, words, cfg)
+                if _overlaps(c, [p for p, _, _ in picked], cfg.min_gap_sec):
+                    return False
+                picked.append((c, v["score"] / 100.0 * 3 + sc * 0.2 - (1.0 if note else 0.0),
+                               why + [f"editor {v['score']:.0f} {v['type']}{'' if v['clear_3s'] else ' (not clear in 3 s)'}: "
+                                      f"{v['reason']}"] + ([c["trim_note"]] if c.get("trim_note") else [])
+                               + ([note] if note else [])))
+                extras[c["id"]] = v
+                return True
+
             for v in ranked:
                 if len(picked) >= max_clips:
                     break
-                c0, sc, why = by_id[v["id"]]
+                c0 = by_id[v["id"]][0]
                 vcat = _TYPE_TO_CAT.get(v["type"]) or c0.get("category")
-                if cfg.moment_types and vcat not in cfg.moment_types and v["type"] not in ("", "скучно") \
+                if type_strict and cfg.moment_types and vcat not in cfg.moment_types and v["type"] not in ("", "скучно") \
                         and not (c0.get("category") in cfg.moment_types):
                     rejected += 1                            # a good clip, but not of the requested type
+                    reserve.append((v, "fallback: editor type not requested"))
                     continue
                 strong = v["clear_3s"] and v["type"] != "скучно" and v["score"] >= cfg.min_editor_score
                 if not strong and len(picked) >= cfg.min_keep:
                     rejected += 1
+                    reserve.append((v, "fallback: below the editor's bar"))
                     continue
-                c = _apply_trim(c0, v, words, cfg)
-                if _overlaps(c, [p for p, _, _ in picked], cfg.min_gap_sec):
-                    continue
-                picked.append((c, v["score"] / 100.0 * 3 + sc * 0.2,
-                               why + [f"editor {v['score']:.0f} {v['type']}{'' if v['clear_3s'] else ' (not clear in 3 s)'}: "
-                                      f"{v['reason']}"] + ([c["trim_note"]] if c.get("trim_note") else [])))
-                extras[c["id"]] = v
+                _take(v)
             meta["editor_rejected"] = rejected
+            if len(picked) < floor and reserve:              # tier 1: the floor from the editor's rejects
+                reserve.sort(key=lambda r: (-(r[0]["type"] != "скучно"), -r[0]["clear_3s"], -r[0]["score"]))
+                n0 = len(picked)
+                for v, note in reserve:
+                    if len(picked) >= floor:
+                        break
+                    _take(v, note)
+                if len(picked) > n0:
+                    meta["fallback"].append(f"editor_rejects+{len(picked) - n0}")
+            if len(picked) < floor:                          # pool moments the editor did not return
+                seen = {v["id"] for v in verdicts}
+                n0 = len(picked)
+                for c, sc, why in pool:
+                    if len(picked) >= floor:
+                        break
+                    if c["id"] in seen or _overlaps(c, [p for p, _, _ in picked], cfg.min_gap_sec):
+                        continue
+                    picked.append((c, sc * 0.2 - 1.0, why + ["fallback: local order (no editor verdict)"]))
+                if len(picked) > n0:
+                    meta["fallback"].append(f"local_pool+{len(picked) - n0}")
             chosen = picked
             meta["selection_method"] = "editor"
+    for c, _, why in chosen:
+        c["tier"] = 1 if any(w.startswith("fallback") for w in why) else 0
+    # tier 2: relaxed candidates (shorter pauses end a phrase, 15–55 s, closer spacing)
+    if len(chosen) < floor:
+        rcfg = replace(cfg, min_duration=max(12.0, cfg.min_duration - 5.0), max_duration=cfg.max_duration + 10.0,
+                       skip_intro_sec=min(cfg.skip_intro_sec, 30.0), min_gap_sec=min(cfg.min_gap_sec, 8.0),
+                       moment_types=[])
+        rc = build_candidates(words, rcfg, hits, relaxed=True)
+        meta["relaxed_candidates"] = len(rc)
+        more = _diverse(_score_all(rc, rcfg), chosen, rcfg.min_gap_sec, floor - len(chosen))
+        for c, sc, why in more:
+            c["tier"] = 2
+            why.append("fallback: relaxed phrase rules")
+        if more:
+            meta["fallback"].append(f"relaxed+{len(more)}")
+            chosen = chosen + [(c, sc - 2.0, why) for c, sc, why in more]
+    # tier 3: energy windows snapped to finished phrases
+    if len(chosen) < floor:
+        ew = energy_windows(words, n_sec, e, speech, floor - len(chosen), [c for c, _, _ in chosen], cfg)
+        for c in ew:
+            c["tier"] = 3
+            c["text"] = c.get("text") or ""
+            chosen.append((c, -3.0 + float(e[min(len(e) - 1, int(c["peak_t"]))]) * 0.1,
+                           [f"fallback: energy peak at {c['peak_t']:.0f}s, phrase-snapped"]))
+        if ew:
+            meta["fallback"].append(f"energy+{len(ew)}")
     meta.update(selection_method=meta.get("selection_method", "local"), selection_status="ok" if chosen else "none",
                 curve_p95=round(float(np.percentile(e, 95)), 3) if len(e) else 0.0,
                 selected=[{"id": c["id"], "start": round(c["start"], 3), "end": round(c["end"], 3),
-                           "score": round(sc, 4), "reason": "; ".join(why), "text": c["text"][:300]}
+                           "score": round(sc, 4), "tier": c.get("tier", 0), "reason": "; ".join(why),
+                           "text": (c.get("text") or "")[:300]}
                           for c, sc, why in chosen])
     c0_by = {p["id"]: p for p, _, _ in pool}
     segs = [{"start": c["start"], "duration": c["end"] - c["start"], "score": sc,
-             "source": "stream_moment:" + ("editor" if c["id"] in extras else "local"),
+             "source": "stream_moment:" + ("editor" if c["id"] in extras else
+                                           "local" if c.get("tier", 0) <= 1 else "fallback"),
+             "tier": c.get("tier", 0),
              "candidate_id": c["id"], "selection_reason": "; ".join(why), "peak_t": c.get("peak_t"),
-             "tight_sec": c.get("tight"), **_lead_and_category(c, extras.get(c["id"]), words),
+             "tight_sec": c.get("tight"),
+             **(_lead_and_category(c, extras.get(c["id"]), words) if c.get("first") is not None else {}),
              **({"hook": extras[c["id"]]["hook"], "keywords": extras[c["id"]]["keywords"],
                  "editor_score": extras[c["id"]]["score"], **_marks(c0_by.get(c["id"]), extras[c["id"]], words)}
                 if c["id"] in extras else {})}
             for c, sc, why in chosen]
     return segs, meta
+
+
+def _energy_segments(words, n_sec, e, speech, want, taken, cfg, signals, meta) -> List[Dict[str, Any]]:
+    """No ASR words at all: clips only when the audio has action (loudness that is not flat silence)."""
+    loud = np.asarray(signals.get("loud") or [], dtype=np.float64)
+    db = np.asarray(signals.get("db") or [], dtype=np.float64)
+    if want <= 0 or not len(loud):
+        return []
+    if len(db):          # raw level: ≥ 10 % of the video is audible (game / music / shouting, not silence)
+        if float((db > -50.0).mean()) < 0.10:
+            return []
+    elif float(loud.max()) < 1.0:
+        return []
+    ew = energy_windows(words, n_sec, e, speech, want, taken, cfg)
+    if ew:
+        meta["fallback"].append(f"energy_no_speech+{len(ew)}")
+        meta["selection_status"] = "ok"
+    return [{"start": c["start"], "duration": c["end"] - c["start"], "score": -3.0, "tier": 3,
+             "source": "stream_moment:fallback", "candidate_id": c["id"], "peak_t": c["peak_t"],
+             "tight_sec": c["tight"], "selection_reason": f"fallback: energy peak at {c['peak_t']:.0f}s (no speech)"}
+            for c in ew]
 
 
 def _run_editor(pool: List[Dict[str, Any]], want: int, cfg: MomentConfig,

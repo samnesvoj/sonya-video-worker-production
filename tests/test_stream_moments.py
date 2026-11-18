@@ -139,11 +139,78 @@ def _strict_chat(boring_ids=(), trim_first=0):
 def test_editor_drops_boring_but_keeps_min_keep():
     n = 900
     words = _words(n)
-    cfg = sm.MomentConfig(editor=True, min_keep=2)
+    cfg = sm.MomentConfig(editor=True, min_keep=2, min_clips=0)
     # every candidate is «скучно» → only min_keep clips survive, the rest are rejected
     chat = _strict_chat(boring_ids=range(100))
     segs, meta = sm.select_moments(words, n, _signals(n), 5, cfg, chat=chat)
     assert len(segs) == 2 and meta["editor_rejected"] >= 1
+
+
+def test_editor_rejects_fill_the_floor():
+    n = 900
+    words = _words(n)
+    cfg = sm.MomentConfig(editor=True, min_keep=2, min_clips=4)
+    segs, meta = sm.select_moments(words, n, _signals(n), 5, cfg, chat=_strict_chat(boring_ids=range(100)))
+    assert len(segs) == 4
+    assert [s["tier"] for s in segs[:2]] == [0, 0] and all(s["tier"] == 1 for s in segs[2:])
+    assert any(f.startswith("editor_rejects") for f in meta["fallback"])
+
+
+def test_min_clips_by_stream_length():
+    assert sm.min_clips_for(3 * 3600, 12) == 8
+    assert sm.min_clips_for(40 * 60, 12) == 8
+    assert sm.min_clips_for(20 * 60, 12) == 6
+    assert sm.min_clips_for(60, 12) == 1
+    assert sm.min_clips_for(3 * 3600, 3) == 3
+    assert sm.min_clips_for(3600, 12, sm.MomentConfig(min_clips=0)) == 0
+
+
+def _runon_words(n_sec, start=0.0):
+    """GigaAM-style run-on speech: no punctuation, pauses only 0.3–0.9 s — strict sentences never close."""
+    out, t, k = [], start, 0
+    while t < n_sec - 2:
+        out.append({"word": "слово", "start": round(t, 2), "end": round(t + 0.3, 2)})
+        k += 1
+        t += 0.35 + (0.85 if k % 9 == 0 else 0.0)
+    return out
+
+
+def test_relaxed_tier_when_strict_sentences_never_close():
+    n = 2400
+    words = _runon_words(n)
+    segs, meta = sm.select_moments(words, n, _signals(n, 1200), 12, sm.MomentConfig())
+    assert meta["candidates"] == 0                   # strict rules: nothing
+    assert len(segs) >= 8 and all(s["tier"] >= 2 for s in segs)
+    iv = sorted((s["start"], s["start"] + s["duration"]) for s in segs)
+    assert all(a[1] <= b[0] for a, b in zip(iv, iv[1:]))
+    assert all(10.0 <= s["duration"] <= 60.0 for s in segs)
+
+
+def test_energy_tier_snaps_to_phrases():
+    n = 2400
+    # one long breathless run: no pause ≥ 0.6 s anywhere → only the energy tier can cut it
+    words = [{"word": "слово", "start": round(i * 0.4, 2), "end": round(i * 0.4 + 0.35, 2)} for i in range(int(n / 0.4) - 5)]
+    segs, meta = sm.select_moments(words, n, _signals(n, 1200), 12, sm.MomentConfig())
+    assert len(segs) >= 8 and any(f.startswith("energy") for f in meta["fallback"])
+    starts = {w["start"] for w in words}
+    ends = {w["end"] for w in words}
+    for s in segs:
+        assert round(s["start"], 2) in starts
+        assert any(abs(s["start"] + s["duration"] - e) < 1e-6 for e in ends)
+    assert any(s["start"] <= 1200 <= s["start"] + s["duration"] for s in segs)   # the loud peak is in a clip
+
+
+def test_no_words_needs_action_in_the_audio():
+    n = 1800
+    flat, _ = sm.select_moments([], n, {"loud": [0.0] * n}, 12, sm.MomentConfig())
+    assert flat == []
+    loud = [0.0] * n
+    for k in range(600, 640):
+        loud[k] = 3.0
+    for k in range(1300, 1310):
+        loud[k] = 2.0
+    segs, meta = sm.select_moments([], n, {"loud": loud}, 12, sm.MomentConfig())
+    assert segs and any(s["start"] <= 610 <= s["start"] + s["duration"] for s in segs)
 
 
 def test_editor_trim_moves_the_start_to_a_later_phrase_and_keeps_length():

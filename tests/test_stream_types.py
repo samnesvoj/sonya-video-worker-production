@@ -75,8 +75,12 @@ def test_select_only_requested_type():
     sig = {"loud": [0.1] * n}
     segs, meta = select_moments(words, n, sig, 5, MomentConfig(moment_types=["philosophy"], skip_intro_sec=0.0))
     assert segs and all(s.get("category") == "philosophy" and s.get("music") == "none" for s in segs)
-    none, _ = select_moments(words, n, sig, 5, MomentConfig(moment_types=["chaos"], skip_intro_sec=0.0))
+    # strict rules alone find no chaos here; without a floor the request stays exact
+    none, _ = select_moments(words, n, sig, 5, MomentConfig(moment_types=["chaos"], skip_intro_sec=0.0, min_clips=0))
     assert none == []
+    # owner 2026-11-18: never an empty result when the stream has speech — other moments fill the floor
+    filled, meta = select_moments(words, n, sig, 5, MomentConfig(moment_types=["chaos"], skip_intro_sec=0.0))
+    assert filled and all(s["tier"] >= 1 for s in filled) and "other_types" in meta["fallback"]
 
 
 def test_editor_prompt_lists_requested_types():
