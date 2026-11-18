@@ -678,9 +678,9 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
         if cfg.moment_types:
             meta["fallback"].append("other_types")
     meta["pool"] = len(pool)
-    chosen = [t for t in pool if t[0]["typed"]][:max_clips]
-    if len(chosen) < floor:
-        chosen = pool[:max(floor, len(chosen))][:max_clips]
+    # the requested types are too few: the other moments compete on their own merit (up to max_clips)
+    type_strict = "other_types" not in meta["fallback"]
+    chosen = [t for t in pool if t[0]["typed"]][:max_clips] if type_strict else pool[:max_clips]
     extras: Dict[str, Dict[str, Any]] = {}
     if cfg.editor and pool:
         all_sents = _sentences(words)
@@ -718,7 +718,7 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
                     break
                 c0 = by_id[v["id"]][0]
                 vcat = _TYPE_TO_CAT.get(v["type"]) or c0.get("category")
-                if cfg.moment_types and vcat not in cfg.moment_types and v["type"] not in ("", "скучно") \
+                if type_strict and cfg.moment_types and vcat not in cfg.moment_types and v["type"] not in ("", "скучно") \
                         and not (c0.get("category") in cfg.moment_types):
                     rejected += 1                            # a good clip, but not of the requested type
                     reserve.append((v, "fallback: editor type not requested"))
