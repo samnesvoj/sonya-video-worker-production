@@ -75,8 +75,8 @@ def check_budget_alerts(ledger, store, now: float, cfg=None) -> List[str]:
     keys = []
     for e in store.events_since(now - 900, ("create_blocked",)):
         why = e["detail"].get("reason")
-        if why not in BLOCK_WHY:
-            continue
+        if why not in BLOCK_WHY or e["detail"].get("kind") not in (None, "demand"):
+            continue            # only when a waiting job did not get a server (a background prime / reserve is no news)
         d = e["detail"]
         text = [tf.title("⚠️ Vast: новые серверы не создаются"),
                 tf.esc(f"Причина: {BLOCK_WHY[why]}."),

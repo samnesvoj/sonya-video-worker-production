@@ -311,6 +311,8 @@ def test_fleet_lines_and_budget_alert():
     led = L()
     assert len(fleet_stats.check_budget_alerts(led, store, clock())) == 1
     assert fleet_stats.check_budget_alerts(led, store, clock()) == []       # once per day
+    store.event(clock(), None, "create_blocked", reason="budget", kind="reserve")
+    assert fleet_stats.check_budget_alerts(led, store, clock()) == []       # background reserve: no alert
 
 
 # ------------------------------------------------------------------ release pointer (worker side)
