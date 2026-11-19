@@ -69,6 +69,45 @@ class Preset:
     back: str = "&H00000000"
     border_style: int = 1  # 1 outline, 3 opaque box
     glass: bool = False    # liquid-glass pill: the video behind the text is blurred + frosted (renderer)
+    gradient: Tuple[str, ...] = ()  # "#RRGGBB" stops: the spoken / key word is coloured letter by letter along them
+
+
+# owner 2026-11-18 (Streamer): «как наши жёлтые, но цвет фиолетово-розово-оранжевый» — Instagram-like stops,
+# the purple lifted from #8A3AB9 so it still reads against the black outline on dark footage
+IG_GRADIENT = ("#A445E0", "#F0357A", "#FF8A3D")
+
+
+def _hex_rgb(c: str) -> Tuple[int, int, int]:
+    c = c.lstrip("#")
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def gradient_colors(n: int, stops: Tuple[str, ...]) -> List[str]:
+    """n ASS colours (&H00BBGGRR) evenly spread over the stops (n == 1 → the middle)."""
+    rgb = [_hex_rgb(c) for c in stops]
+    out = []
+    for i in range(n):
+        t = 0.5 if n == 1 else i / (n - 1)
+        x = t * (len(rgb) - 1)
+        k = min(int(x), len(rgb) - 2)
+        f = x - k
+        r, g, b = (round(a + (bb - a) * f) for a, bb in zip(rgb[k], rgb[k + 1]))
+        out.append(f"&H00{b:02X}{g:02X}{r:02X}")
+    return out
+
+
+def gradient_word(text: str, stops: Tuple[str, ...]) -> str:
+    """One colour tag per letter (libass has no per-glyph gradient fill); spaces / punctuation keep the
+    neighbouring colour, so the ramp runs over the letters only."""
+    letters = [i for i, ch in enumerate(text) if ch.isalnum()]
+    cols = gradient_colors(max(1, len(letters)), stops)
+    out, li = [], 0
+    for i, ch in enumerate(text):
+        if ch.isalnum():
+            out.append(f"{{\\c{cols[li]}&}}")
+            li += 1
+        out.append(ass_escape(ch))
+    return "".join(out)
 
 
 PRESETS: Dict[str, Preset] = {p.id: p for p in [
@@ -99,6 +138,10 @@ PRESETS: Dict[str, Preset] = {p.id: p for p in [
            "&H00321B9E", "&H00FFFFFF", 5, 2, "word", active="&H003D26D7", grow=110),
     Preset("glass", "Liquid glass", "Montserrat ExtraBold", 66, False, 5, 20, 2,
            "&H00FAF8F7", "&H00000000", 0, 1.5, "word", active="&H007AC2E2", grow=100, glass=True),
+    # owner 2026-11-18: the «highlight» look (font, size, black outline, grow) with an Instagram gradient on the
+    # spoken / key word instead of yellow. Streamer default; a choice («Градиент») in the other modes.
+    Preset("gradient", "Градиент (фиолетовый → розовый → оранжевый)", "Montserrat Black", 82, True, 4, 16, 2,
+           "&H00FFFFFF", "&H00000000", 6, 0, "word", active="&H007A35F0", grow=112, gradient=IG_GRADIENT),
 ]}
 DEFAULT = "highlight"
 
@@ -208,7 +251,11 @@ def to_ass(words: List[Word], preset_id: str, clip_duration: float, play_res: Tu
                 seg = []
                 for i in r:
                     t = ass_escape(texts[i])
-                    if active == i and p.active:
+                    if p.gradient and p.mode != "box" and (active == i or _norm(texts[i]) in kw):
+                        grow = f"{{\\fscx{p.grow}\\fscy{p.grow}}}" if active == i else ""
+                        reset = f"{{\\c{p.primary}&" + ("\\fscx100\\fscy100" if active == i else "") + "}"
+                        seg.append(grow + gradient_word(texts[i], p.gradient) + reset)
+                    elif active == i and p.active:
                         tag = (f"{{\\c{p.active}&\\fscx{p.grow}\\fscy{p.grow}}}" if p.mode != "box" else
                                f"{{\\3c{p.active}&\\c&H00FFFFFF&}}")
                         reset = (f"{{\\c{p.primary}&\\fscx100\\fscy100}}" if p.mode != "box" else

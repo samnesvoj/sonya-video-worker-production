@@ -42,6 +42,7 @@ SITE_STYLES = {
     "viral": ("highlight", "dela"),      # Desktop default: per-word highlight, owner's font pick
     "minimal": ("champagne", None),      # noble pearl / champagne, readable on any footage
     "basic": ("minimal", None),          # plain white, bottom
+    "gradient": ("gradient", "dela"),    # owner 2026-11-18: «viral» look, purple → pink → orange word (Streamer default)
 }
 DEFAULT_STYLE = "viral"                  # job without settings (API / tests) → the reference look
 # owner 2026-11-12: «хочу, чтоб SONYA выкатывала автоматом 8 клипов по видео» -> CEO 2026-11-16: «количество клипов не 8,

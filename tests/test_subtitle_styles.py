@@ -140,3 +140,31 @@ def test_owner_font_dela_is_bundled_with_cyrillic_and_used_for_hook():
     assert _text_width("ЁЖЩЪЮЯ", "Dela Gothic One", 40) != _text_width("ЁЖЩЪЮЯ", "Montserrat ExtraBold", 40)
     ass = to_ass(WORDS, "highlight", 6.0, font="dela", hook="Где он берёт энергию")
     assert "Style: Sonya,Dela Gothic One," in ass and "Style: Hook,Dela Gothic One," in ass
+
+
+def test_gradient_preset_colours_the_spoken_word_letter_by_letter():
+    from scripts.shared.subtitle_styles import IG_GRADIENT, gradient_colors
+    cols = gradient_colors(5, IG_GRADIENT)
+    assert cols[0] == "&H00E045A4" and cols[-1] == "&H003D8AFF"       # #A445E0 … #FF8A3D (ASS is BGR)
+    assert gradient_colors(1, IG_GRADIENT) == ["&H007A35F0"]          # one letter → the pink middle
+    ev = events(to_ass(WORDS, "gradient", 6.0, keywords=["энергии"]))
+    assert len(ev) == len(WORDS)
+    spoken = ev[1]                                                    # «ГДЕ» is spoken
+    assert "{\\fscx112\\fscy112}{\\c&H00E045A4&}Г{\\c&H007A35F0&}Д{\\c&H003D8AFF&}Е{\\c&H00FFFFFF&\\fscx100\\fscy100}" in spoken
+    unspoken = [e for e in ev if "СТОЛЬКО {\\c&H00E045A4&}Э{" in e]    # «энергии» on screen, not spoken yet
+    assert len(unspoken) == 2                                         # the key word keeps its gradient
+    assert "&H0000E5FF" not in "".join(ev)                             # no yellow
+    yellow = events(to_ass(WORDS, "highlight", 6.0))
+    assert "{\\c&H0000E5FF&" in yellow[1]                              # the default look is unchanged
+
+
+def test_gradient_is_a_site_choice_and_the_streamer_default(monkeypatch, tmp_path):
+    from scripts.shared.cut_profile import SITE_STYLES, DEFAULT_STYLE
+    from modes.streamer.runner import streamer_crop
+    assert SITE_STYLES["gradient"] == ("gradient", "dela") and SITE_STYLES[DEFAULT_STYLE][0] == "highlight"
+    style = lambda s: streamer_crop({"source_sha256": "0", "settings": s}, str(tmp_path / "x.mp4"),
+                                    str(tmp_path))["subtitles"]["style"]
+    assert style({"subtitleStyle": "viral"}) == "gradient" and style({}) == "gradient"
+    assert style({"subtitleStyle": "minimal"}) == "champagne"
+    monkeypatch.setenv("STREAMER_SUB_STYLE", "viral")
+    assert style({"subtitleStyle": "viral"}) == "highlight"
