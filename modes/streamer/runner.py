@@ -161,6 +161,16 @@ def _chat_path(params: Dict[str, Any], input_video_path: str) -> Optional[str]:
     return str(sib) if sib.is_file() else None
 
 
+def select_engine(params: Dict[str, Any]) -> str:
+    """Moment engine: "viral" (stream-moments-v3, the Viral peak engine + stream rules) or "classic" (v2).
+    params["moments_engine"] (A/B, re-runs) > env STREAMER_SELECT > default."""
+    v = str(params.get("moments_engine") or os.environ.get("STREAMER_SELECT") or DEFAULT_ENGINE).strip().lower()
+    return v if v in ("viral", "classic") else DEFAULT_ENGINE
+
+
+DEFAULT_ENGINE = "viral"
+
+
 def analyze(
     input_video_path: str,
     output_dir: str,
@@ -237,7 +247,24 @@ def analyze(
     from scripts.shared.cut_profile import default_max_clips
     want = default_max_clips(params)               # 10 by default (CEO 2026-11-16)
     pool_n = int(params.get("pool_clips", max(want, 12)))
-    segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"])
+    # owner 2026-11-19 (0c9c1be0 clip 3 ended on a sponsor read): ad / sponsor inserts are found first and never
+    # become (part of) a clip — scripts/shared/stream_ads; Gemini only checks the local candidates
+    ads: List[Tuple[float, float]] = []
+    ads_meta: Dict[str, Any] = {"status": "off"}
+    if words and _flag("STREAMER_ADS", "true"):
+        try:
+            from scripts.shared import stream_ads
+            ads, ads_meta = stream_ads.detect(words, editor=bool(mc["editor"]))
+        except Exception as exc:
+            warnings.append(f"ads_detect_failed: {str(exc)[:160]}")
+    engine = select_engine(params)
+    if engine == "viral":       # owner 2026-11-19: the Viral peak engine + stream rules (scripts/shared/stream_viral)
+        from scripts.shared.stream_viral import select_moments as select_viral
+        segs, selection = select_viral(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"], ads=ads)
+    else:
+        segs, selection = select_moments(words, n_sec, sig, pool_n, MomentConfig(**mc), hits=sp["hits"], ads=ads)
+    selection["engine"] = engine
+    selection["ads"] = {k: v for k, v in ads_meta.items() if k != "local_regions"}
     selection["chat"] = chat_meta
     if not segs:
         if not words:
@@ -254,6 +281,15 @@ def analyze(
         refined = refine_segments(segs, words, BoundaryConfig(**bcfg))
     else:
         refined = [dict(s, boundary_status="no_words") for s in segs]
+    if ads and words:                                 # boundaries may snap a few words: ads stay out after them too
+        from scripts.shared import stream_ads
+        kept = [s for s in refined if s.get("boundary_status") != "dropped_overlap"]
+        cut, notes = stream_ads.cut_out(kept, ads, words, min_sec=15.0)
+        if notes:
+            selection["ads"]["clip_notes"] = notes
+            if not cut and kept:                      # never lose every clip over an ad: keep the cleanest one
+                cut = kept[:1]
+        refined = cut
     segments = []
     for s in refined:
         if s.get("boundary_status") == "dropped_overlap":

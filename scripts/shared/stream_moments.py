@@ -600,7 +600,8 @@ def energy_windows(words, n_sec: int, e: np.ndarray, speech: np.ndarray, want: i
 
 def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, Sequence[float]],
                    max_clips: int, cfg: Optional[MomentConfig] = None, hits=None,
-                   chat: Optional[Callable[..., Any]] = None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+                   chat: Optional[Callable[..., Any]] = None,
+                   ads: Sequence[Tuple[float, float]] = ()) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """-> (segments [{start, duration, score, source, candidate_id, selection_reason, hook?, keywords?}], meta).
 
     Tiers (owner 2026-11-18: the mode must always give clips when the stream has speech / action):
@@ -639,6 +640,8 @@ def select_moments(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dic
             low = c["text"].lower()
             if is_promo(c["text"]) or sum(low.count(x) for x in _ALERT) >= 2:
                 continue
+            if ads and any(c["start"] < b + 0.5 and c["end"] > a - 0.5 for a, b in ads):
+                continue                                   # stream_ads: a sponsor insert is never a clip
             sc, why = score_candidate(c, e, speech, words, conf, hits)
             ts = st.classify(c, tctx)
             c["type_scores"] = {k: v for k, v in ts.items() if v > 0}

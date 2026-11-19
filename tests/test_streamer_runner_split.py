@@ -215,7 +215,7 @@ def test_run_clip_without_its_own_webcam_takes_the_jobs_webcam(monkeypatch, patc
     monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
     starts = []
     _cam_on(monkeypatch, lambda st: starts.append(st) or len(starts) != 2)     # the 2nd clip: no border
-    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=4, settings={"streamer_layout": 4}))
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=4, moments_engine="classic", settings={"streamer_layout": 4}))
     assert len(res["clips"]) == 4
     assert set(_looks(tmp_path)) == {("game", 4)}
     assert any(w.startswith("layout_unified") for w in res["warnings"])
@@ -244,7 +244,7 @@ def test_run_lonely_webcam_detection_is_not_forced_on_the_other_clips(monkeypatc
     monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
     starts = []
     _cam_on(monkeypatch, lambda st: starts.append(st) or len(starts) == 1)     # only the 1st of 6 clips «sees» a cam
-    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=6, settings={"streamer_layout": 2}))
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=6, moments_engine="classic", settings={"streamer_layout": 2}))
     assert res["clips"] and set(_looks(tmp_path)) == {("person", None)}
 
 
