@@ -190,3 +190,74 @@ def test_run_exclude_ranges_skips_moments_already_delivered(patched, tmp_path):
     assert first["clips"] and len(patched["render"]) <= 1
     for r in patched["render"]:
         assert r["start"] >= got["start"] + got["dur"] or r["start"] + r["dur"] <= got["start"]
+
+
+# ── one layout per job (owner 2026-11-19 «некоторые клипы в другом режиме») ──────────────────────────────────
+
+CAM = [0, 0, 490, 274]
+
+
+def _cam_on(monkeypatch, has_cam):
+    """analyze_layout: the webcam border is seen only in the clips for which has_cam(start) is true."""
+    monkeypatch.setattr("scripts.shared.crop.stream_layout.analyze_layout",
+                        lambda video, start, *a, **k: {"webcam": {"rect": list(CAM), "by": "lines"} if has_cam(start)
+                                                       else None, "chat": []})
+
+
+def _looks(tmp_path):
+    import json
+    d = json.loads((tmp_path / "selected_segments.json").read_text())
+    segs = d.get("segments", d) if isinstance(d, dict) else d
+    return [(s.get("crop_layout"), s.get("layout_template")) for s in segs]
+
+
+def test_run_clip_without_its_own_webcam_takes_the_jobs_webcam(monkeypatch, patched, tmp_path):
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    starts = []
+    _cam_on(monkeypatch, lambda st: starts.append(st) or len(starts) != 2)     # the 2nd clip: no border
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=4, settings={"streamer_layout": 4}))
+    assert len(res["clips"]) == 4
+    assert set(_looks(tmp_path)) == {("game", 4)}
+    assert any(w.startswith("layout_unified") for w in res["warnings"])
+
+
+def test_run_template_that_fails_for_one_clip_moves_all_clips_to_one_layout(monkeypatch, patched, tmp_path):
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    _cam_on(monkeypatch, lambda st: True)
+    real = runner.compose_one
+    first = {}
+
+    def picky(video, out, seg, crop_hints=None):
+        c = (crop_hints or {}).get("crop") or {}
+        first.setdefault("start", seg["start_sec"])
+        if seg["start_sec"] == first["start"] and c.get("layout_template") == 4:
+            raise RuntimeError("template 4 cannot render this clip")
+        return real(video, out, seg, crop_hints=crop_hints)
+
+    monkeypatch.setattr(runner, "compose_one", picky)
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3, settings={"streamer_layout": 4}))
+    assert len(res["clips"]) == 3
+    assert set(_looks(tmp_path)) == {("game", 1)}                    # all three, not 2 × template 4 + 1 × template 1
+
+
+def test_run_lonely_webcam_detection_is_not_forced_on_the_other_clips(monkeypatch, patched, tmp_path):
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    starts = []
+    _cam_on(monkeypatch, lambda st: starts.append(st) or len(starts) == 1)     # only the 1st of 6 clips «sees» a cam
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=6, settings={"streamer_layout": 2}))
+    assert res["clips"] and set(_looks(tmp_path)) == {("person", None)}
+
+
+def test_run_uniform_job_is_not_rendered_twice(monkeypatch, patched, tmp_path):
+    monkeypatch.setenv("SONYA_CLIP_WORKERS", "1")
+    _cam_on(monkeypatch, lambda st: True)
+    res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3, settings={"streamer_layout": 4}))
+    assert len(patched["render"]) == len(res["clips"]) == 3
+    assert not any(w.startswith("layout_unified") for w in res["warnings"])
+
+
+def test_consensus_cam_needs_two_clips_or_the_survey():
+    g = lambda r: {"crop_layout": "game", "webcam_rect": r}
+    assert runner.consensus_cam([g(CAM), g([2, 0, 488, 274]), {"crop_layout": "person"}], 3) is not None
+    assert runner.consensus_cam([g(CAM)] + [{"crop_layout": "person"}] * 7, 8) is None
+    assert runner.consensus_cam([g(CAM)] + [{"crop_layout": "person"}] * 7, 8, [{"rect": CAM, "seen": 3}]) == CAM

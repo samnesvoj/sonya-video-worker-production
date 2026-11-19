@@ -383,6 +383,11 @@ def compose_one(
         except Exception as exc:                      # never lose the clip over the layout look
             logger.warning("[streamer] layout analysis failed: %s", exc)
             lay = {"webcam": None, "chat": [], "error": str(exc)[:200]}
+        job_cam = crop.get("job_cam")
+        if lay.get("webcam") is None and job_cam:
+            # 2026-11-19 («клипы в разных раскладках»): this clip shows no webcam border / face of its own, but the
+            # other clips of the job agree where the webcam is — use that, so every clip gets the same layout
+            lay["webcam"] = {"rect": [int(v) for v in job_cam], "by": "job", "ok": True, "cover": None}
         segment["layout_webcam"] = lay.get("webcam")
         segment["layout_chat"] = lay.get("chat")
         track = sl.stream_game_track(clip_an, lay, dur, width=W, height=H,
@@ -401,6 +406,7 @@ def compose_one(
     segment.update({"crop_version": track["crop_version"], "crop_layout": track.get("layout"),
                     "crop_status": track["crop_status"], "crop_fallback_reason": track.get("fallback_reason"),
                     "webcam_source": track.get("webcam_source"), "crop_cam": track.get("cam"),
+                    "cam_src": track.get("cam_src"),
                     "crop_game": track.get("game"), "webcam_rect": track.get("webcam_rect"),
                     "cam_upscale": track.get("cam_upscale"), "game_masks": track.get("game_masks"),
                     "game_chat_overlap": track.get("game_overlap"),
@@ -525,6 +531,107 @@ def _hints_with(hints: Dict[str, Any], **crop: Any) -> Dict[str, Any]:
     return h
 
 
+def _layout_sig(seg: Dict[str, Any]) -> Tuple[Any, Any]:
+    """What the clip looks like: (crop layout, template) — e.g. ("game", 4), ("game", 1), ("person", None)."""
+    return seg.get("crop_layout"), seg.get("layout_template")
+
+
+def _iou(a: List[float], b: List[float]) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[0] + a[2], b[0] + b[2]), min(a[1] + a[3], b[1] + b[3])
+    inter = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def consensus_cam(segs: List[Dict[str, Any]], n_clips: int, survey_rects=()) -> Optional[List[int]]:
+    """Webcam rect [x, y, w, h] (source px) the game-layout clips of a job agree on, or None. A rect counts when
+    ≥ 2 clips (or ≥ 30 % of the job's clips) found it, or the whole-stream survey saw it ≥ 2 times — one clip's
+    lonely detection on a stream without a webcam is not forced onto the others."""
+    rects = [[float(v) for v in (s.get("webcam_rect") or s.get("cam_src"))] for s in segs
+             if s.get("crop_layout") == "game" and (s.get("webcam_rect") or s.get("cam_src"))]
+    best, votes = None, 0
+    for r in rects:
+        n = sum(_iou(r, o) > 0.7 for o in rects)
+        if n > votes:
+            best, votes = r, n
+    if best is None:
+        return None
+    surveyed = any(_iou(best, [float(v) for v in x["rect"]]) > 0.7 for x in survey_rects or ()
+                   if x.get("seen", 0) >= 2)
+    if votes >= 2 or votes >= 0.3 * n_clips or surveyed:
+        return [int(round(v)) for v in best]
+    return None
+
+
+_SIDE_EXT = (".ass", ".glass.json", ".glassmask.ass")
+
+
+def _unify_layouts(video: str, names: List[str], top: List[Dict[str, Any]], done: List[Optional[str]],
+                   hints: Dict[str, Any], warnings: List[str], workers: int) -> None:
+    """Owner 2026-11-19 «некоторые клипы в другом режиме»: every clip of a job comes out in ONE layout.
+    Clips that came out differently (no webcam found in that clip → plain crop; a template render that failed →
+    template 1) are rendered again with the webcam position the other clips agree on; when that still does not
+    give one look, ALL clips are rendered again in the next common layout: chosen template → template 1 (game +
+    webcam) → plain crop. A clip that cannot be rendered in the final common layout is dropped. In place."""
+    ok = [i for i, p in enumerate(done) if p]
+    if len({_layout_sig(top[i]) for i in ok}) <= 1:
+        return
+    from collections import Counter
+    from concurrent.futures import ThreadPoolExecutor
+    from scripts.shared.crop.stream_templates import normalize_template
+    before = Counter(_layout_sig(top[i]) for i in ok)
+    chosen = normalize_template((hints.get("crop") or {}).get("layout_template"))
+    survey = (hints.get("survey") or {}).get("rects") or []
+    cam = consensus_cam([top[i] for i in ok], len(ok), survey)
+    levels = []
+    if cam is not None:
+        tpls = Counter(top[i].get("layout_template") for i in ok if top[i].get("crop_layout") == "game")
+        t = chosen if chosen in tpls or not tpls else tpls.most_common(1)[0][0]
+        levels.append((("game", t), _hints_with(hints, layout="game", layout_template=t, job_cam=cam)))
+        if t != 1:
+            levels.append((("game", 1), _hints_with(hints, layout="game", layout_template=1, job_cam=cam)))
+    levels.append((("person", None), _hints_with(hints, layout="person", layout_template=1)))
+
+    def again(i: int, want, h) -> bool:
+        tmp = str(Path(names[i]).with_suffix(".u.mp4"))
+        seg = dict(top[i])
+        try:
+            compose_one(video, tmp, seg, crop_hints=h)
+        except Exception as exc:
+            logger.warning("[streamer] Clip %d: no %s layout: %s", i + 1, want, exc)
+            seg = None
+        if seg is None or _layout_sig(seg) != want:
+            for ext in (".mp4",) + _SIDE_EXT:
+                q = Path(tmp).with_suffix(ext) if ext != ".mp4" else Path(tmp)
+                if q.exists():
+                    q.unlink()
+            return False
+        os.replace(tmp, names[i])
+        for ext in _SIDE_EXT:
+            q = Path(tmp).with_suffix(ext)
+            if q.exists():
+                os.replace(q, Path(names[i]).with_suffix(ext))
+        seg.pop("render_fallback", None)
+        top[i].clear()
+        top[i].update(seg, layout_unified=True)
+        return True
+
+    for want, h in levels:
+        redo = [i for i in ok if _layout_sig(top[i]) != want]
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            res = list(pool.map(lambda i: again(i, want, h), redo))
+        if all(res):
+            warnings.append(f"layout_unified: {dict((f'{a}/{b}', n) for (a, b), n in before.items())} → "
+                            f"{want[0]}/{want[1]} ({len(redo)} re-rendered, webcam {cam})")
+            return
+    for i in ok:                                       # the plain crop failed too: never deliver a mixed set
+        if _layout_sig(top[i]) != ("person", None):
+            warnings.append(f"clip_{i + 1}_dropped: not renderable in the job's common layout")
+            Path(names[i]).unlink(missing_ok=True)
+            done[i] = None
+
+
 def _exclude_ranges(params: Dict[str, Any]) -> List[Tuple[float, float]]:
     """params["exclude_ranges"] = [[start, end], ...] seconds of the source (a free catch-up job for a user whose
     earlier job delivered only some clips, 2026-11-19): moments overlapping them are skipped."""
@@ -582,6 +689,7 @@ def run(
     workers = clip_workers(len(top))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         done = list(pool.map(one, range(len(top))))
+    _unify_layouts(input_video_path, names, top, done, hints, warnings, workers)
     from scripts.shared.ad_banner import kind_of as _ad_banner
     keep_ass = _ad_banner(params) is not None         # the worker's ad banner step reads it, then deletes it
     for n in names:                                   # subtitles are burned in: no side files in the upload
