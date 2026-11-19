@@ -73,6 +73,10 @@ def streamer_crop(params: Dict[str, Any], input_video_path: str, work_dir: str) 
         crop["streamer_name"] = str(nick)[:60]
     from scripts.shared.cut_profile import site_subtitle_style
     style = site_subtitle_style(settings)
+    # owner 2026-11-18: «пусть субтитры будут как наши жёлтые, но цвет фиолетово-розово-оранжевый» — the wizard's
+    # default «viral» means the gradient here; minimal / basic stay as chosen. STREAMER_SUB_STYLE=viral = old yellow.
+    if style == DEFAULT_STYLE:
+        style = os.environ.get("STREAMER_SUB_STYLE", "gradient").strip().lower() or DEFAULT_STYLE
     if style not in ("none", "off"):
         preset, font = SITE_STYLES.get(style, SITE_STYLES[DEFAULT_STYLE])
         crop["subtitles"] = {"mode": "burn", "burn_supported": ffmpeg_has_ass(), "style": preset, "hook": False,
