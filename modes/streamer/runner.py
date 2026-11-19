@@ -30,7 +30,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -521,6 +521,20 @@ def _hints_with(hints: Dict[str, Any], **crop: Any) -> Dict[str, Any]:
     return h
 
 
+def _exclude_ranges(params: Dict[str, Any]) -> List[Tuple[float, float]]:
+    """params["exclude_ranges"] = [[start, end], ...] seconds of the source (a free catch-up job for a user whose
+    earlier job delivered only some clips, 2026-11-19): moments overlapping them are skipped."""
+    out = []
+    for r in params.get("exclude_ranges") or []:
+        try:
+            a, b = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if b > a:
+            out.append((a, b))
+    return out
+
+
 def run(
     input_video_path: str,
     output_dir: str,
@@ -535,6 +549,10 @@ def run(
     warnings = list(result["warnings"])
     from scripts.shared.cut_profile import default_max_clips
     max_clips = default_max_clips(params)
+    skip = _exclude_ranges(params)                    # catch-up job: moments the user already got are not repeated
+    if skip:
+        segments = [s for s in segments if not any(float(s["start_sec"]) < b and float(s["start_sec"]) + float(s["duration_sec"]) > a
+                                                   for a, b in skip)]
     top = segments[:max_clips]                        # already in the editor's / local rank order
     out_dir = Path(output_dir)
     names = [str(out_dir / f"stream_clip_{i + 1:02d}.mp4") for i in range(len(top))]

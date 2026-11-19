@@ -179,3 +179,14 @@ def test_run_loses_a_clip_only_when_every_fallback_fails(monkeypatch, patched, t
     res = runner.run("input.mp4", str(tmp_path), params=dict(PARAMS, max_clips=3))
     assert len(res["clips"]) == 2
     assert sum(w.startswith("clip_1_failed") for w in res["warnings"]) == 3
+
+
+def test_run_exclude_ranges_skips_moments_already_delivered(patched, tmp_path):
+    first = runner.run("input.mp4", str(tmp_path / "a"), params=dict(PARAMS, max_clips=1))
+    got = patched["render"][0]
+    patched["render"].clear()
+    res = runner.run("input.mp4", str(tmp_path / "b"),
+                     params=dict(PARAMS, max_clips=1, exclude_ranges=[[got["start"], got["start"] + got["dur"]], ["x"]]))
+    assert first["clips"] and len(patched["render"]) <= 1
+    for r in patched["render"]:
+        assert r["start"] >= got["start"] + got["dur"] or r["start"] + r["dur"] <= got["start"]
