@@ -8,7 +8,9 @@ text stays inside the frame (subtitles are placed by ``seam_y``: the text sits j
   1 top_bottom  webcam on top, the whole game below (the v2 default, unchanged)
   2 bubble      game full-screen 9:16 (centre of the action), a round webcam bubble in the top-right corner
   3 cam_big     webcam large on top (60 %), game below (40 %, sides trimmed)
-  4 cinema      blurred background, the whole game in the middle, a small webcam window above it
+  4 cinema      the game full-screen 9:16 (centre of the action), the webcam in a framed window in the top-left
+                corner (owner 2026-11-19: the old «game strip in the middle of a dark blurred frame» left half the
+                frame black — «игра должна занимать кадр»)
   5 framed      blurred background, the game on top, the webcam in a thin frame below with the nickname
 
 Quiet look (Emil Kowalski): flat shapes, hairline light frames, no glass, no gold, no shadows.
@@ -23,10 +25,11 @@ from .stream_layout import MAX_UPSCALE, OUT_H, OUT_W, cam_fit, _even
 
 TEMPLATES = {1: "top_bottom", 2: "bubble", 3: "cam_big", 4: "cinema", 5: "framed"}
 TITLES_RU = {1: "Вебка сверху, игра снизу", 2: "Игра на весь экран + вебка-кружок",
-             3: "Крупная вебка сверху 60 %, игра 40 %", 4: "Кинотеатр: игра по центру, вебка мини-окном",
+             3: "Крупная вебка сверху 60 %, игра 40 %", 4: "Игра на весь экран + вебка окном в углу",
              5: "Игра сверху, вебка в рамке с ником"}
 DEFAULT_TEMPLATE = 1
 RING = "0xE6E6E6"                      # hairline frame colour
+CORNER_MAX_W, CORNER_MAX_H, CORNER_X, CORNER_Y = 420, 320, 40, 230   # template 4 webcam window
 
 
 def normalize_template(value: Any) -> int:
@@ -99,12 +102,9 @@ def apply_template(track: Optional[Dict[str, Any]], template: Any, *, nick: Any 
                     "pos": [OUT_W - d - 48, 250]}
         t.update(cam_upscale=round(d / float(side), 3), seam_y=1500)
     elif n == 4:
-        gh = min(760, gh_full)
-        crop, size = cam_fit(cam, face[0], 380, out_w=600)
-        gy = 700
-        t["tpl"] = {"kind": "cinema", "game_y": gy, "game_h": gh, "cam": crop, "cam_size": size,
-                    "cam_pos": [(OUT_W - size[0] - 6) // 2 // 2 * 2, 190]}
-        t.update(cam_upscale=round(size[0] / float(crop[2]), 3), seam_y=gy + gh + 190)   # subtitles under the game
+        crop, size = cam_fit(cam, face[0], CORNER_MAX_H, out_w=CORNER_MAX_W)
+        t["tpl"] = {"kind": "corner", "cam": crop, "cam_size": size, "cam_pos": [CORNER_X, CORNER_Y]}
+        t.update(cam_upscale=round(size[0] / float(crop[2]), 3), seam_y=1500)
     else:
         gh = min(640, gh_full)
         crop, size = cam_fit(cam, face[0], 440, out_w=760)
@@ -144,6 +144,12 @@ def _game_native(track: Dict[str, Any], src: str, out: str) -> List[str]:
     return parts[:-1] + [parts[-1].replace("[gdone]", f"[{out}]")]
 
 
+def _full_game(src: str, out: str) -> str:
+    """The game scaled to cover 1080x1920, centre crop (templates 2 and 4)."""
+    return (f"[{src}]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase:flags=lanczos,"
+            f"crop={OUT_W}:{OUT_H},setsar=1[{out}]")
+
+
 def _blur_bg(src: str, out: str) -> str:
     return (f"[{src}]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,gblur=sigma=6,"
             f"scale={OUT_W}:{OUT_H}:flags=bicubic,eq=brightness=-0.2:saturation=0.75,setsar=1[{out}]")
@@ -171,12 +177,16 @@ def template_graph(track: Dict[str, Any]) -> str:
         r = f"hypot(X-W/2+0.5,Y-H/2+0.5)"
         ring = f"gt({r},W/2-3)"
         parts = ["split=2[fa][fc]"] + _game_native(track, "fc", "gn")
-        parts.append(f"[gn]scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=increase:flags=lanczos,"
-                     f"crop={OUT_W}:{OUT_H},setsar=1[gbg]")
+        parts.append(_full_game("gn", "gbg"))
         parts.append(f"[fa]crop={side}:{side}:{sx}:{sy},{_polish(tp['crop'], [d, d])},setsar=1,format=yuva444p,"
                      f"geq=lum='if({ring},230,lum(X,Y))':cb='if({ring},128,cb(X,Y))':cr='if({ring},128,cr(X,Y))':"
                      f"a='clip(255*(W/2-{r}),0,255)'[bub]")
         parts.append(f"[gbg][bub]overlay={tp['pos'][0]}:{tp['pos'][1]}:format=auto")
+        return ";".join(parts)
+    if kind == "corner":
+        parts = ["split=2[fa][fc]"] + _game_native(track, "fc", "gn") + [_full_game("gn", "gbg")]
+        parts.append(f"[fa]{_framed_cam(tp['cam'], tp['cam_size'], 3)}[cm]")
+        parts.append(f"[gbg][cm]overlay={tp['cam_pos'][0]}:{tp['cam_pos'][1]}")
         return ";".join(parts)
     parts = ["split=3[fa][fb][fc]", _blur_bg("fb", "bg")] + _game_native(track, "fc", "gn")
     parts.append(f"[gn]scale={OUT_W}:{tp['game_h']}:flags=lanczos,setsar=1[gm]")

@@ -55,3 +55,14 @@ def test_templates_without_a_face_in_the_webcam(n):
     """2026-11-18 prod: a webcam rect from the survey with no face → UnboundLocalError on every clip of 2–5."""
     t = apply_template(dict(BASE, face=None), n, nick="x")
     assert t["template"] == n and "overlay" in track_graph(t)
+
+
+def test_template_4_is_full_game_with_a_corner_webcam():
+    """Owner 2026-11-19: template 4 left half the frame black (game strip on a dark blur) → game fills the frame."""
+    from scripts.shared.crop.stream_templates import template_graph
+    t = apply_template(dict(BASE), 4)
+    assert t["tpl"]["kind"] == "corner"
+    g = template_graph(t)
+    assert "gblur=sigma=6" not in g and "force_original_aspect_ratio=increase" in g and "crop=1080:1920" in g
+    w, h = t["tpl"]["cam_size"]
+    assert w <= 420 and h <= 320 and t["tpl"]["cam_pos"] == [40, 230]
