@@ -51,7 +51,7 @@ VIEWER = "зритель"
 SPICE_MIN = 78.0             # the editor's «острота» of the comment itself (0–100)
 SPICE_MIN_ASR = 84.0         # a read found by an ASR cue only (no chat text) must be sharper still
 REACT_MIN = 50.0             # blended reaction strength (editor + local signals) — a shrug is not a clip
-FINAL_MIN = 76.0             # 0.6·spice + 0.4·reaction
+FINAL_MIN = 76.0             # 0.6·spice + 0.4·reaction (reaction = 0.3·editor + 0.7·local signals)
 MAX_SHARP = 3                # never more comment clips per job, even when the format is chosen alone
 SHARP_CATS = {"provocation", "absurd", "roast", "scandal", "shock", "lewd", "dark_humor", "troll"}
 POOL = 16
@@ -398,7 +398,9 @@ SYSTEM = ("Ты — жёсткий редактор вирусных верти�
           "благодарности за донаты/подписки, просьбы и подсказки чата («давай на пляж», «сделай музыку тише», «перезапусти "
           "миссию»), названия мест/игровых вещей капсом («БАСИК В СТРИПУХЕ»), «АОАОА»/капс/смайлы без смысла, реклама, "
           "нейтральная болтовня. Острота — в СМЫСЛЕ коммента (наезд, шок-вопрос, абсурдное заявление, пошлость, "
-          "оскорбление), а не в капсе и не в том, что стример потом орёт на игру. Если стример НЕ читает коммент (реплика из игры / катсцены / его собственная речь) → is_comment=false. "
+          "оскорбление), а не в капсе и не в том, что стример потом орёт на игру. Исключение: если на безобидную "
+          "просьбу/вопрос стример ВЗРЫВАЕТСЯ именно из-за неё (орёт на автора, «ты чё, ёбнулся?», долго спорит) — это "
+          "тоже завоз (category troll), spice 78+ только при такой реакции. Если стример НЕ читает коммент (реплика из игры / катсцены / его собственная речь) → is_comment=false. "
           "spice — острота САМОГО коммента: 90+ — бомба, все пересылают; 78–89 — реально жёстко; 60–77 — норм, но не "
           "жесть; <60 — обычный. Большинство комментов — 20–60, ставь 78+ только настоящей жести. reaction — сила "
           "реакции стримера по его словам и сигналам (hints: loud — громкость z, laugh — смехов, reply_s — сколько "
@@ -427,7 +429,8 @@ def editor_messages(items: List[Dict[str, Any]], context: str = "") -> List[Dict
             "\"payoff\": int|null, \"payoff_conf\": 0-100, "
             "\"title\": \"4–8 слов КАПСОМ про СУТЬ, конкретно и дерзко, как в TikTok: «ЗЛОЙ УСТАНОВИЛ МИРОВОЙ РЕКОРД В "
             "GTA6», «ЧАТ СПРОСИЛ ПРО БЫВШУЮ — БУСТЕР В ШОКЕ»; только правда из клипа; мат в заголовке — звёздочками\", "
-            "\"accent\": [1–3 слова из title], \"why\": \"до 8 слов\"}]} — для КАЖДОГО кандидата, по убыванию spice.")
+            "\"accent\": [1–3 слова из title], \"why\": \"до 8 слов\"}]} — РОВНО по одному объекту для КАЖДОГО из "
+            f"{len(items)} кандидатов (никого не пропускай), по убыванию spice.")
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
@@ -485,7 +488,7 @@ def judge(r: Dict[str, Any], v: Optional[Dict[str, Any]]) -> Tuple[bool, float, 
     """The hard bar. -> (taken, final 0–100, reason)."""
     if not v:
         return False, 0.0, "no editor verdict"
-    react = 0.5 * v["reaction"] + 0.5 * r["react_local"]
+    react = 0.3 * v["reaction"] + 0.7 * r["react_local"]      # the editor rates every reaction 80–90: signals decide
     final = round(0.6 * v["spice"] + 0.4 * react, 1)
     if not v["is_comment"]:
         return False, final, "not a read-out comment"
@@ -607,6 +610,20 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
             em.update(m)
             verdicts = parse_editor(txt, {r["id"]: r for r in cs})
             em["verdicts"] = len(verdicts)
+            # flash-lite sometimes skips a few candidates: one more call for the missing ones if the budget allows
+            miss = [r for r in cs if r["id"] not in verdicts]
+            spent = float(m.get("cost_rub") or m.get("cost_rub_estimate") or fc)
+            if miss and txt:
+                msgs2 = editor_messages(items(miss), context)
+                fc2 = round(fc_of(msgs2, len(miss)), 3)
+                if spent + fc2 <= budget_rub:
+                    txt2, m2 = _call(chat, msgs2, PROMPT_VERSION, fake, timeout=120.0)
+                    verdicts.update(parse_editor(txt2, {r["id"]: r for r in miss}))
+                    em["retry"] = {"missing": len(miss), "forecast_rub": fc2,
+                                   **{k: m2.get(k) for k in ("cost_rub", "cost_rub_estimate", "error") if m2.get(k)}}
+                    em["verdicts"] = len(verdicts)
+                else:
+                    em["retry"] = {"missing": len(miss), "skipped_budget": fc2}
         else:
             em["status"] = "skipped_budget"
         meta["llm"] = em

@@ -150,13 +150,18 @@ def test_select_with_editor_payoff_and_title():
                                          "category": "provocation", "unsafe": False, "quote": "x", "end": 1,
                                          "payoff": 0, "payoff_conf": 90, "title": "Злой установил мировой рекорд в GTA6",
                                          "accent": ["злой", "GTA6", "нет такого"], "why": "смешно"}]})
-    segs, meta = scm.select(said, 500, {"loud": [0.0] * 500}, messages=msgs, chat=chat)
+    segs, meta = scm.select(said, 500, HOT(500), messages=msgs, chat=chat)
     assert len(calls) == 1 and meta["llm"]["forecast_rub"] <= scm.BUDGET_RUB
     s = segs[0]
     assert s["moment_type"] == "comment" and s["comment"]["text"].startswith("Вась")     # chat text kept verbatim
     assert s["comment"]["author"] == "tumca52" and s["payoff"]["start"] < 400.0 < s["payoff"]["end"]
     assert s["title"] == {"text": "ЗЛОЙ УСТАНОВИЛ МИРОВОЙ РЕКОРД В GTA6", "accent": ["ЗЛОЙ", "GTA6"]}
     assert s["start"] <= 110.4 and s["start"] + s["duration"] >= 120.0
+
+
+def HOT(n):
+    """a loud reaction with a chat burst (the local reaction signals)"""
+    return {"loud": [3.5] * n, "chat": [4.0] * n, "pitch": [3.5] * n}
 
 
 MSG = [{"t": 104.0, "author": "t", "text": "Вась а ты шо реально первый кто в мире в стрипуху приехал?"}]
@@ -169,7 +174,7 @@ def _v(**kw):
 
 def test_select_editor_rejects_and_no_editor_gives_nothing():
     chat, _ = _fake_chat(_v(spice=30, category="question"))
-    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    segs, meta = scm.select(SAID, 200, HOT(200), messages=MSG, chat=chat)
     assert segs == [] and meta["status"] == "none_sharp" and meta["board"][0]["decision"].startswith("category")
     segs, meta = scm.select(SAID, 200, {}, messages=MSG, editor=False)       # no verdict → no weak guesses
     assert segs == [] and meta["status"] == "no_editor"
@@ -180,10 +185,10 @@ def test_select_editor_rejects_and_no_editor_gives_nothing():
                                      ({"category": "donation"}, "category"), ({"is_comment": False}, "not a read")])
 def test_sharp_bar(kw, why):
     chat, _ = _fake_chat(_v(**kw))
-    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    segs, meta = scm.select(SAID, 200, HOT(200), messages=MSG, chat=chat)
     assert segs == [] and meta["board"][0]["decision"].startswith(why)
     chat, _ = _fake_chat(_v())
-    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    segs, meta = scm.select(SAID, 200, HOT(200), messages=MSG, chat=chat)
     assert len(segs) == 1 and segs[0]["editor_score"] >= scm.FINAL_MIN and meta["board"][0]["decision"] == "taken"
 
 
@@ -227,7 +232,7 @@ def test_cap_sharp_clips():
         msgs.append({"t": t - 5, "author": f"u{k}", "text": f"Вась а ты шо реально первый кто в мире в стрипуху приехал номер {k}"})
         clips.append({"id": f"c{k}", "is_comment": True, "spice": 95, "reaction": 95, "category": "roast"})
     chat, _ = _fake_chat({"clips": clips})
-    segs, meta = scm.select(said, 800, {}, messages=msgs, chat=chat, max_clips=8)
+    segs, meta = scm.select(said, 800, HOT(800), messages=msgs, chat=chat, max_clips=8)
     assert len(segs) == scm.MAX_SHARP and sum(b["decision"].startswith("sharp, over") for b in meta["board"]) == 3
 
 
@@ -377,7 +382,7 @@ def test_routine_and_unsure_payoff():
     said = SAID + _words(("смотри я заезжаю в стрипуху первый в мире вот это рекорд.", 400.0))
     chat, _ = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "spice": 95, "reaction": 95,
                                      "category": "absurd", "end": 0, "payoff": 0, "payoff_conf": 40, "title": "T"}]})
-    segs, _ = scm.select(said, 500, {}, messages=msgs, chat=chat)
+    segs, _ = scm.select(said, 500, HOT(500), messages=msgs, chat=chat)
     assert "payoff" not in segs[0]                                          # not sure → no continuation
     assert segs[0]["start"] + segs[0]["duration"] - 110.0 >= scm.MIN_REACTION_SEC   # reaction never cut to nothing
     assert scm._ROUTINE.search("какой у тебя фпс в 4K") and not scm._ROUTINE.search("ты реально первый в стрипухе")

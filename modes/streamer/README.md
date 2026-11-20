@@ -34,7 +34,7 @@ over GQL / YouTube live_chat with yt-dlp next to the source while ASR runs). Cho
 every candidate's *spice* (provocation / absurd / roast / scandal / shock / lewd / dark humour / troll) and the
 streamer's *reaction* to the comment itself; the local reaction (loudness, laughs, reply length, pitch, chat burst,
 webcam motion inside the OBS webcam rect vs. the 8 s before the read) is blended in. Taken only when spice ≥ 78
-(ASR-only reads ≥ 84), reaction ≥ 50, final = 0.6·spice + 0.4·reaction ≥ 76, ≤ 3 per job. Greetings / thanks /
+(ASR-only reads ≥ 84), reaction ≥ 50, final = 0.6·spice + 0.4·reaction (0.3·editor + 0.7·signals) ≥ 76, ≤ 3 per job. Greetings / thanks /
 donations, routine questions and requests never qualify; platform-unsafe ones (calls to violence, extremism,
 hate by nation / race / religion, suicide) are dropped by a local filter and by the editor — мат / пошлость /
 троллинг / чёрный юмор are fine (titles get мат masked). No editor verdict or nothing sharp → no comment clips
