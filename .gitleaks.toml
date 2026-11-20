@@ -20,3 +20,9 @@ description = "Dummy key constant in the Educational overlay test (checks the va
 paths = ['''^tests/test_edu_overlays\.py$''']
 condition = "AND"
 regexes = ['''^[a-z]{2}-SECRET-KEY-0123456789$''']
+
+[[allowlists]]
+description = "Twitch web player's PUBLIC client id (sent by every browser opening twitch.tv; no secret, no account) for VOD chat replay"
+condition = "AND"
+paths = ['''^scripts/shared/stream_chat\.py$''']
+regexes = ['''kimne78kx3ncx6brgo4mv6wki5h1ko''']
