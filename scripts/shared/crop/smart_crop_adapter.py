@@ -803,8 +803,27 @@ def _with_caption_blur(track: Dict[str, Any], vf: str, more: bool) -> str:
     return caption_blur_graph(cap) + "," + vf
 
 
+BASE_SIZE = (1080, 1920)
+
+
+def _game_graph_upscaled(track: Dict[str, Any]) -> str:
+    """Streamer layouts are drawn in 1080-pixel coordinates (stream_layout / stream_templates): at another output
+    size (quality «2K», scripts/shared/quality.py) the 1080x1920 picture is scaled up with lanczos."""
+    global OUTPUT_WIDTH, OUTPUT_HEIGHT
+    size = (OUTPUT_WIDTH, OUTPUT_HEIGHT)
+    OUTPUT_WIDTH, OUTPUT_HEIGHT = BASE_SIZE
+    try:
+        vf = track_graph(track)
+    finally:
+        OUTPUT_WIDTH, OUTPUT_HEIGHT = size
+    return f"{vf},scale={size[0]}:{size[1]}:flags=lanczos,setsar=1"
+
+
 def track_graph(track: Dict[str, Any]) -> str:
-    """The crop part of the -vf (layout → 1080x1920), without subtitles."""
+    """The crop part of the -vf (layout → OUTPUT_WIDTH x OUTPUT_HEIGHT, 1080x1920 unless the job is «2K»),
+    without subtitles."""
+    if track.get("layout") == "game" and (OUTPUT_WIDTH, OUTPUT_HEIGHT) != BASE_SIZE:
+        return _game_graph_upscaled(track)
     if track.get("layout") == "game" and track.get("tpl"):
         from .stream_templates import template_graph          # streamer layout templates 2 / 4 / 5
         vf = template_graph(track)
@@ -833,7 +852,8 @@ def track_graph(track: Dict[str, Any]) -> str:
     if cu:
         ex = lambda k: x_expression(k).replace(",", r"\,")          # noqa: E731
         enable = "+".join(f"between(t\\,{a:.3f}\\,{b - 0.001:.3f})" for a, b in cu["intervals"])
-        top = CLOSEUP_TOP
+        top = CLOSEUP_TOP if (OUTPUT_WIDTH, OUTPUT_HEIGHT) == BASE_SIZE else \
+            (OUTPUT_HEIGHT - OUTPUT_WIDTH) // 2 - round(80 * OUTPUT_WIDTH / BASE_SIZE[0])
         vf = (f"split=3[c0][c1][c2];[c0]{vf}[cbase];"
               f"[c1]crop=w={cu['size']}:h={cu['size']}:x='{ex(cu['x'])}':y={cu['y']},"
               f"scale={OUTPUT_WIDTH}:{OUTPUT_WIDTH}:flags=lanczos,setsar=1[csq];"

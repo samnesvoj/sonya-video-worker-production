@@ -18,6 +18,8 @@ from typing import Any, Callable, Dict, Optional
 from scripts import url_ingest
 
 logger = logging.getLogger(__name__)
+HIGH_SOURCE_HEIGHT = 2160          # quality «Высокое — 2K» (scripts/shared/quality.py)
+_BASE_HEIGHT: Dict[str, str] = {}  # SONYA_YTDLP_MAX_HEIGHT of this process before a 2K job raised it
 
 
 class SourceFetchError(Exception):
@@ -130,6 +132,9 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
     if not url or platform == "unsupported":
         raise SourceFetchError(*_REASONS[-1][1])
     os.environ.setdefault("SONYA_YTDLP_MAX_HEIGHT", "1440")   # GPU worker: better source for the 9:16 crop
+    high = str(sf.get("quality") or "").lower() == "high"      # «Высокое — 2K»: up to 2160p, any length
+    _base_h = _BASE_HEIGHT.setdefault("h", os.environ["SONYA_YTDLP_MAX_HEIGHT"])
+    os.environ["SONYA_YTDLP_MAX_HEIGHT"] = str(HIGH_SOURCE_HEIGHT) if high else _base_h
     plan_cap = sf.get("max_source_sec")
     cap = int(plan_cap) if plan_cap else url_ingest._max_duration_sec(mode)
     # The user chose a segment (start..end, or the first N minutes) instead of a refusal: its length <= cap.
@@ -144,6 +149,8 @@ def fetch_source(sf: Dict[str, Any], mode: str, s3_key: str, work_dir: Path,
         if trim and total and start >= total:
             raise SourceFetchError("SOURCE_TRIM_RANGE", "Начало отрезка позже конца видео. Выберите отрезок заново.")
         lim = url_ingest.long_source_overrides(trim or total or cap, mode)
+        if high:
+            lim = dict(lim, max_height=HIGH_SOURCE_HEIGHT, max_bytes=3 * int(lim.get("max_bytes") or 0) or None)
         _check_free_space(work_dir, trim or total)
         via_full = int(os.environ.get("SONYA_YT_TRIM_VIA_FULL_MAX_SEC", "0") or 0)
         if trim and platform == "youtube" and total and total <= via_full:

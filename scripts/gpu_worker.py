@@ -884,6 +884,14 @@ def process_job(job: dict, worker_id: str) -> None:
         _fail(job_id, DISABLED_CODE, str(exc), retry=False)
         return
 
+    # «Качество нарезки» (2026-11-20): output size + encoder cap of this process for this job (standard = as before)
+    _quality = "standard"
+    try:
+        from scripts.shared import quality as _q
+        _quality = _q.apply(mode, params)
+    except Exception:  # noqa: BLE001 - a broken quality switch must never cost the job: standard
+        logger.warning("[worker] quality setup failed job_id=%s: standard", job_id, exc_info=True)
+
     t_start = time.monotonic()
     from scripts.shared import profiling as _prof      # per-stage wall clock of this job ([timing] line at job_done)
     _prof.begin()
@@ -926,7 +934,7 @@ def process_job(job: dict, worker_id: str) -> None:
                     elif _yt_direct_blocked(sf):
                         raise SourceFetchError("SOURCE_BOT_CHECK", "direct path skipped: this host was refused recently")
                     else:
-                        got = fetch_source(sf, mode, s3_input, tmp_dir,
+                        got = fetch_source(dict(sf, quality=_quality), mode, s3_input, tmp_dir,
                                            background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
                 except SourceFetchError as exc0:
                     if sf.get("prefetched") or os.environ.get("SONYA_YT_RELAY", "on") == "off" or not (
