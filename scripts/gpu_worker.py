@@ -921,6 +921,12 @@ def process_job(job: dict, worker_id: str) -> None:
                     got = _fetch_via_relay(job_id, sf, mode, s3_input, tmp_dir)
                 _SRC_COPY["got"] = got
                 input_path = got["path"]
+                if mode == "streamer":                 # «Завозный коммент»: the VOD's chat replay, next to the source
+                    try:
+                        from scripts.shared.stream_chat import start_background
+                        start_background(str(sf.get("url") or ""), str(sf.get("platform") or ""), str(input_path), sf)
+                    except Exception:                  # noqa: BLE001 - a chat is a bonus
+                        logger.warning("[worker] chat fetch did not start job_id=%s", job_id, exc_info=True)
                 _prof.add("download", time.monotonic() - _t_fetch, start=_t_fetch)
             except SourceFetchError as exc:
                 if exc.code == "SOURCE_BOT_CHECK":

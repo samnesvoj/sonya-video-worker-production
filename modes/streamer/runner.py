@@ -157,6 +157,8 @@ def _chat_path(params: Dict[str, Any], input_video_path: str) -> Optional[str]:
     p = params.get("chat_path")
     if p and os.path.isfile(p):
         return p
+    from scripts.shared.stream_chat import wait_pending   # the worker may still be fetching it (stream_chat.start_background)
+    wait_pending(input_video_path, float(os.environ.get("STREAMER_CHAT_WAIT_SEC", "180")))
     sib = Path(input_video_path).with_suffix(".live_chat.json")
     return str(sib) if sib.is_file() else None
 
@@ -244,6 +246,9 @@ def analyze(
     mc.setdefault("jump_gap", crop["jump_gap"])
     _set = params.get("settings") if isinstance(params.get("settings"), dict) else {}
     mc.setdefault("moment_types", params.get("moment_types") or _set.get("moment_types") or _set.get("momentTypes") or [])
+    from scripts.shared.stream_types import normalize_types
+    types = normalize_types(mc["moment_types"])
+    mc["moment_types"] = [t for t in types if t != "comment"]      # «Завозный коммент» has its own selector below
     from scripts.shared.cut_profile import default_max_clips
     want = default_max_clips(params)               # 10 by default (CEO 2026-11-16)
     pool_n = int(params.get("pool_clips", max(want, 12)))
@@ -306,11 +311,64 @@ def analyze(
                          "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
                          "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
                                    for w in clip_words]})
+    if words and (not types or "comment" in types) and _flag("STREAMER_COMMENT", "true") \
+            and params.get("comment_moments", True):
+        try:
+            segments = _with_comments(segments, words, n_sec, sig, sp["hits"], ads, cp, types, want, mc, selection)
+        except Exception as exc:                      # the regular clips are never lost over the comment pass
+            warnings.append(f"comment_moments_failed: {type(exc).__name__}: {str(exc)[:200]}")
+            logger.exception("[streamer] comment moments failed")
     crop_hints = {"version": STREAMER_VERSION, "crop": crop, "width": info["width"], "height": info["height"],
                   "fps": info.get("fps", 30.0), "has_audio": info.get("has_audio", True),
                   "survey": _layout_survey(input_video_path, info["duration"], work, warnings)}
     return {"segments": segments, "crop_hints": crop_hints, "warnings": warnings, "selection": selection,
             "webcam_boxes_found": 0, "active_speaker_segs": 0}
+
+
+COMMENT_JUMP_GAP = 1.6       # «Завозный коммент»: only pauses longer than this are cut (the reaction stays whole)
+AUTO_COMMENT_SCORE = 70.0     # «Авто»: a comment clip joins the others only when the editor rates it this high
+
+
+def _with_comments(segments: List[Dict[str, Any]], words, n_sec: int, sig: Dict[str, Any], hits, ads, chat_path,
+                   types: List[str], want: int, mc: Dict[str, Any], selection: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """«Завозный коммент» (owner 2026-11-19): moments where the streamer reads a viewer's comment aloud
+    (scripts/shared/stream_comment) join the regular ones — all of them when the type is chosen, ≤ 2 strong ones
+    in «Авто». The chat replay (if the VOD has one) gives the real nick / text of the card."""
+    from scripts.shared import stream_chat, stream_comment
+    msgs = stream_chat.load(chat_path) if chat_path else []
+    platform = "twitch"
+    if chat_path:
+        try:
+            with open(chat_path, encoding="utf-8") as fh:
+                platform = "twitch" if fh.read(1) == "{" else "youtube"
+        except OSError:
+            pass
+    explicit = "comment" in types
+    cs, meta = stream_comment.select(words, n_sec, sig, messages=msgs, hits=hits, ads=ads,
+                                     max_clips=want if explicit else 2, editor=bool(mc.get("editor")),
+                                     context=str(mc.get("context") or ""))
+    if not explicit:
+        cs = [c for c in cs if float(c.get("editor_score") or 0.0) >= AUTO_COMMENT_SCORE]
+    selection["comment"] = {k: v for k, v in meta.items() if k != "params"}
+    out = []
+    for c in cs:
+        st, du = float(c["start"]), float(c["duration"])
+        p = c.get("payoff")
+        cw = [w for w in words if (float(w.get("end", 0)) > st - 0.5 and float(w.get("start", 0)) < st + du + 0.5)
+              or (p and float(w.get("end", 0)) > p["start"] - 0.3 and float(w.get("start", 0)) < p["end"] + 0.3)]
+        com = dict(c["comment"], platform=platform if c["comment"].get("source") == "chat" else None)
+        out.append({"start_sec": st, "duration_sec": du, "score": float(c["score"]), "source": c["source"],
+                    **{k: c[k] for k in ("candidate_id", "selection_reason", "hook", "editor_score", "peak_t",
+                                         "category", "moment_type", "payoff", "title") if k in c},
+                    "comment": com, "boundary_status": "comment_read",
+                    "loud": [round(float(x), 2) for x in (sig.get("loud") or [])[int(st):int(st + du) + 2]],
+                    "words": [{"word": w.get("word", w.get("text", "")), "start": w["start"], "end": w["end"]}
+                              for w in cw]})
+    if not out:
+        if explicit:
+            selection["comment"]["note"] = "no comment read found: regular moments instead"
+        return segments
+    return stream_comment.merge(segments, out, types, max(len(segments) + len(out), want), auto_max=2)
 
 
 def _layout_survey(video: str, duration: float, work: Path, warnings: List[str]) -> Dict[str, Any]:
@@ -452,9 +510,11 @@ def compose_one(
     fps = float(hints.get("fps") or 30.0)
     words = segment.get("words") or []
     loud = [0.0] * int(start) + list(segment.get("loud") or [])
+    gap = float(crop.get("jump_gap", 0.7))
+    if isinstance(segment.get("comment"), dict):      # a reaction is often wordless (laughing, staring): gentler cuts
+        gap = max(gap, COMMENT_JUMP_GAP)
     if crop.get("jump_cuts", True) and words:
-        pieces = jc.pieces(words, start, start + dur, max_gap=float(crop.get("jump_gap", 0.7)), loud=loud or None,
-                           fps=fps)
+        pieces = jc.pieces(words, start, start + dur, max_gap=gap, loud=loud or None, fps=fps)
     else:
         pieces = [(start, dur)]
     li = segment.get("lead_in")
@@ -465,11 +525,21 @@ def compose_one(
                 if crop.get("jump_cuts", True) and words else [(round(a0, 4), round(b0 - a0, 4))])
         pieces = lead + pieces
         segment["lead_in_sec"] = round(jc.total(lead), 3)
-    words_out = jc.remap_words(words, pieces)
+    com = segment.get("comment") if isinstance(segment.get("comment"), dict) else None
+    glitch_at = None
+    if com and segment.get("payoff"):
+        # «Завозный коммент»: the read + reaction, a glitch cut, then the moment the comment is about (no jump cuts
+        # inside it: a game moment has long wordless stretches that ARE the content)
+        p0, p1 = float(segment["payoff"]["start"]), float(segment["payoff"]["end"])
+        if p1 - p0 >= 2.0 and (p1 <= start or p0 >= start + dur):
+            glitch_at = jc.total(pieces)
+            pieces = pieces + [(round(p0, 4), round(p1 - p0, 4))]
+            segment["payoff_sec"] = round(p1 - p0, 3)
+    words_out = sorted(jc.remap_words(words, pieces), key=lambda w: w["start"])
     body = jc.total(pieces)
     segment.update(jump_cuts=len(pieces) - 1, body_sec=round(body, 3), cut_sec=round(dur - body, 3))
     insert = None
-    ad = crop.get("sonya_ad")
+    ad = crop.get("sonya_ad") if not com else None     # no SONYA ad inside a comment clip (card / glitch timing)
     if ad:
         insert = _plan_ad(input_video_path, ad, words_out, pieces, segment)
     if insert:                                         # words after the ad move by its length
@@ -489,7 +559,7 @@ def compose_one(
         if not game and not filler:
             t2 = track if not crop.get("jump_cuts", True) else None
             centered = (((t2 or {}).get("split") or {}).get("intervals") or (t2 or {}).get("seam")) if t2 else None
-        hook = (segment.get("hook") or None) if crop.get("hook_title", True) else None
+        hook = (segment.get("hook") or None) if crop.get("hook_title", True) and not com else None
         sm = subtitles_for_clip(words_out, 0.0, out_dur, ass, centered=centered, avoid=zones,
                                 preset=subs.get("style"), keywords=segment.get("keywords"), hook=hook,
                                 font=subs.get("font"), hook_top=70 if game else None)
@@ -498,11 +568,14 @@ def compose_one(
         segment["subtitle_burn"] = "burned" if burn else "none"
         segment["subtitle_hook"] = sm.get("subtitle_hook")
         sub_path = str(ass) if burn else None
+    overlays, vfx = (_comment_overlays(segment, com, pieces, out_dur, glitch_at, track, output_path)
+                     if com else ([], None))
     from scripts.shared.crop.smart_crop_adapter import render_pieces, ffmpeg_bin
     if filler:
         tmp = str(Path(output_path).with_suffix(".top.mp4"))
         render_pieces(input_video_path, tmp, pieces, track, start, fps=fps,
-                      has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=None, report=segment)
+                      has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=None, report=segment,
+                      overlays=overlays, vfx=vfx)
         ok = split_filler.apply(tmp, output_path, filler, seed=f"{input_video_path}:{start}", ass=sub_path, report=segment,
                                 ffmpeg=ffmpeg_bin())
         if ok:
@@ -511,8 +584,51 @@ def compose_one(
             os.replace(tmp, output_path)
         return output_path
     render_pieces(input_video_path, output_path, pieces, track, start, fps=fps,
-                  has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=sub_path, report=segment)
+                  has_audio=bool(hints.get("has_audio", True)), insert=insert, subtitle_path=sub_path, report=segment,
+                  overlays=overlays, vfx=vfx)
+    for ov in overlays:
+        Path(ov["path"]).unlink(missing_ok=True)
     return output_path
+
+
+def _comment_overlays(segment: Dict[str, Any], com: Dict[str, Any], pieces, out_dur: float,
+                      glitch_at: Optional[float], track: Dict[str, Any], output_path: str
+                      ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """«Завозный коммент»: the chat card while the comment is read (+1.2 s, ≥ 4 s on screen), the big two-line title
+    for the first ~3.5 s (owner: «даётся жирным текстом и пропадает»), the glitch at the cut to the payoff."""
+    from scripts.shared import comment_card as cc
+    from scripts.shared import jumpcut as jc
+    base = str(Path(output_path).with_suffix(""))
+    card = cc.card_png(base + ".card.png", com.get("author") or cc_viewer(), com.get("text") or "", com.get("color"),
+                       platform="youtube" if com.get("platform") == "youtube" else "twitch")
+    title = None
+    tt = segment.get("title") if isinstance(segment.get("title"), dict) else None
+    if tt and tt.get("text"):
+        title = cc.title_png(base + ".title.png", tt["text"], tt.get("accent") or [])
+    ty, cy = cc.layout(track.get("seam_y"), title["h"] if title else 0, card["h"])
+    t0 = jc.to_output(float(com.get("t0", 0.0)), pieces)
+    t1 = jc.to_output(float(com.get("t1", 0.0)), pieces)
+    t0 = 0.0 if t0 is None or t0 < 0.6 else t0 - 0.2
+    end = (t1 if t1 is not None else t0 + 3.0) + 1.2
+    end = max(end, t0 + 4.0)
+    if glitch_at is not None:
+        end = min(end, glitch_at - 0.15)
+    end = min(end, out_dur)
+    ovs = [{"path": card["path"], "x": (cc.W - card["w"]) // 2, "y": cy, "t0": round(t0, 3), "t1": round(end, 3),
+            "fade_in": 0.12, "fade_out": 0.2}]
+    if title:
+        te = min(3.6, out_dur - 0.2, (glitch_at - 0.2) if glitch_at else 99.0)
+        ovs.append({"path": title["path"], "x": (cc.W - title["w"]) // 2, "y": ty, "t0": 0.0, "t1": round(te, 3),
+                    "fade_in": 0.0, "fade_out": 0.35})
+    segment.update(comment_card={"t0": round(t0, 3), "t1": round(end, 3), "y": cy, "w": card["w"], "h": card["h"]},
+                   comment_title={"y": ty, "t1": ovs[-1]["t1"]} if title else None,
+                   comment_glitch_at=round(glitch_at, 3) if glitch_at is not None else None)
+    return ovs, (cc.glitch_vf(glitch_at) if glitch_at is not None else None)
+
+
+def cc_viewer() -> str:
+    from scripts.shared.stream_comment import VIEWER
+    return VIEWER
 
 
 def _plan_ad(video: str, ad: Dict[str, Any], words_out: List[Dict[str, Any]], pieces, segment: Dict[str, Any]

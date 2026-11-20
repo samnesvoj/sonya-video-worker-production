@@ -9,6 +9,8 @@ The «spectrum» of stream moment types (parameter ``moment_types``, any combina
   zavoz       an effective entrance of a guest / the streamer to music: lead-in → music → entrance → reaction.
   chaos       mayhem: things get broken, shouting, sharp loudness spikes and fast motion.
   guest / entrance / joke / conflict   the earlier categories (stream_moments); ``conflict`` is the editor's call.
+  comment     «Завозный коммент»: the streamer reads a viewer's comment aloud and reacts (+ the moment it is about) —
+              its own selector, scripts/shared/stream_comment.py (the runner strips it before this module).
 
 Local signals only (no model): regex hits on the ASR text + the per-second loudness / visual curves. The Gemini
 editor (analysis only, ≤ 5 RUB per stream) has the last word. ``classify`` → {type: score}, 0 = not this type.
@@ -20,12 +22,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-ALL_TYPES = ("philosophy", "zavoz", "chaos", "guest", "entrance", "joke", "conflict")
+ALL_TYPES = ("philosophy", "zavoz", "chaos", "guest", "entrance", "joke", "conflict", "comment")
 NEW_TYPES = ("philosophy", "zavoz", "chaos")
 RU = {"philosophy": "философия", "zavoz": "завоз", "chaos": "хаос", "guest": "гость с подводкой",
-      "entrance": "выход в образе", "joke": "пошлая шутка", "conflict": "конфликт"}
+      "entrance": "выход в образе", "joke": "пошлая шутка", "conflict": "конфликт", "comment": "завозный коммент"}
 TYPE_FROM_RU = {"философия": "philosophy", "завоз": "zavoz", "хаос": "chaos", "гость": "guest", "выход": "entrance",
-                "шутка": "joke", "конфликт": "conflict"}
+                "шутка": "joke", "конфликт": "conflict", "коммент": "comment",
+                "завозный коммент": "comment", "комментарий": "comment"}
 PHILOSOPHY_MAX_SEC = 60.0
 MUSIC_NOTE = "none"          # no royalty-free music library in the project → philosophy clips go without music
 
