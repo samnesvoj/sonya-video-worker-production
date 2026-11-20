@@ -18,6 +18,9 @@ Pipeline (analysis only, no render here):
   4. editor  ONE Gemini call (analysis only, ≤ 1.5 ₽, forecast before the call): is it really a read-out comment,
              how «завозный» (0–100), the clean quote, where the reaction ends, which option (if any) shows the very
              thing the comment is about, a two-line title with accent words. Any failure → local order.
+  v2 «жесть» (owner 2026-11-20): the editor rates the comment's spice + the reaction to it, the local reaction
+             (loudness / laughs / reply length / pitch / chat burst / webcam motion) is blended in, and only the
+             really sharp, platform-safe ones are taken (see judge()); nothing sharp or no editor → no comment clips.
 
 Output: stream segments (the runner's shape) with moment_type «comment» and
   "comment": {"author", "text", "color", "source": "chat"|"asr", "t0", "t1"}   (card window, source seconds)
@@ -35,13 +38,44 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-VERSION = "stream-comment-v1"
-PROMPT_VERSION = "stream-comment-editor-v1"
+VERSION = "stream-comment-v2-sharp"
+PROMPT_VERSION = "stream-comment-editor-v2-sharp"
 BUDGET_RUB = 1.5
 PAYOFF_CONF = 70.0           # the editor's confidence that the option shows the very thing the comment is about
 MIN_REACTION_SEC = 4.0       # the clip goes on at least this long after the comment is read
 ASR_MIN_SCORE = 75.0         # a read found by an ASR cue only (no chat) must be clearly strong
 VIEWER = "зритель"
+
+# v2 «жесть» (owner 2026-11-20: «надо искать какую-то жесть, долбанину, прям чтоб настолько острая тема»):
+# only the really sharp comments with a strong reaction; 0–2 such clips beat weak ones; none → no format.
+SPICE_MIN = 78.0             # the editor's «острота» of the comment itself (0–100)
+SPICE_MIN_ASR = 84.0         # a read found by an ASR cue only (no chat text) must be sharper still
+REACT_MIN = 50.0             # blended reaction strength (editor + local signals) — a shrug is not a clip
+FINAL_MIN = 76.0             # 0.6·spice + 0.4·reaction
+MAX_SHARP = 3                # never more comment clips per job, even when the format is chosen alone
+SHARP_CATS = {"provocation", "absurd", "roast", "scandal", "shock", "lewd", "dark_humor", "troll"}
+POOL = 16
+
+# platform safety (TikTok / YouTube ban these): calls to violence, extremism / terror, hate by nation / race /
+# religion, suicide. Мат, пошлость, троллинг, чёрный юмор stay allowed. The editor flags the subtle ones too.
+_UNSAFE = re.compile(
+    r"(?i)(\b(хач|хачи|хачей|хачам|хачик\w*|чурк\w*|чурбан\w*|жид|жиды|жидов\w*|жидяр\w*|жидовск\w*|ниг+ер\w*|нигг?а\b|негрил\w*|хохл\w*|хохол\w*|"
+    r"кацап\w*|москал\w*|узкоглаз\w*|чучмек\w*|черножоп\w*|пиндос\w*|зиг\s*хайл\w*|sieg\s*heil|1488|14/88|"
+    r"свастик\w*|нацик\w*|фашист\w*\s+прав\w*|гитлер\w*\s+(прав|красав|молод)\w*|теракт\w*|террорист\w*|"
+    r"джихад\w*|игил\w*|шахид\w*|взорв\w*\s+(школ|метро|дом|всех)\w*|скулшут\w*|колумбайн\w*|"
+    r"роскомнадзор\w*|выпил(юсь|ись|иться)|вскрой\s*ся|убей\s*себя|повесь\s*ся|суицид\w*)\b|"
+    r"\b(убить|убивать|убей|убьём|убьем|убивай|резать|перережь|расстрел\w*|сжечь|сжигать|вешать)\s+(всех|их|этих|ихних|"
+    r"\w*(евре|мусульм|христи|черн|азиат|кавказ|таджик|узбек|цыган|геев|пидор)\w*))")
+# a message that is only a greeting / thanks / donation / sub notice — never sent to the editor
+_BORING = re.compile(r"(?i)^\W*(всем\s+)?(привет\w*|здравствуй\w*|ку\b|хай\b|салам\w*|добр\w+\s+(вечер|утр|ден)\w*|"
+                     r"спасибо\w*|благодар\w*|сяб\b|спс\b|донат\w*|задонат\w*|подписал\w*|подписк\w*|"
+                     r"с\s+днем\s+рожд\w*|удачи\w*|gl\b|gg\b)")
+# a cheap prior for the pool: provocation / roast / lewd / мат / shock words
+_SPICE_HINT = re.compile(r"(?i)(\b(бля\w*|хуй\w*|хуе\w*|хер\w*|пизд\w*|еба\w*|ебл\w*|ёб\w*|сук\w*|нах|нахуй|нахер|"
+                         r"говн\w*|жоп\w*|срал\w*|член\w*|секс\w*|стрип\w*|шлюх\w*|проститут\w*|голы\w*|"
+                         r"бывш\w*|жен\w*|мам\w*|батя\w*|лох\w*|нуб\w*|рак\b|слаб\w*|позор\w*|кринж\w*|"
+                         r"тупо\w*|туп\w*|дебил\w*|дурак\w*|клоун\w*|лыс\w*|толст\w*|жирн\w*|урод\w*|"
+                         r"скам\w*|развод\w*|врёшь|вреш\w*|спорим|слабо|правда\s+что|реально\s+что)\b|[!?]{2,})")
 
 _STOP = set("""а и в во на но не ни да нет что чтобы как так ты вы я он она оно они мы мне тебе тебя меня его ее её
 их нам вам это этот эта эти тот та те то там тут здесь уже еще ещё же ли бы вот ну по за из от до для при про со
@@ -246,6 +280,75 @@ def local_score(r: Dict[str, Any], words, hits, loud: Optional[Sequence[float]])
     return round(sc, 3), why
 
 
+def reaction_strength(r: Dict[str, Any], words, hits, sig: Optional[Dict[str, Sequence[float]]],
+                      cam: Optional[float] = None) -> Tuple[float, Dict[str, Any]]:
+    """How hard the streamer reacts after the read (0–100) from local signals: loudness peak, laughs, reaction
+    words, how long he goes on answering, voice pitch, a chat burst, webcam motion vs. before the read.
+    -> (score, hints for the editor)."""
+    sig = sig or {}
+    a, b = r["t1"], words[r["react_last"]].end
+    lw = [w for w in words[r["last"] + 1:r["react_last"] + 1] if _LAUGH.match(_norm(w.text))]
+    kinds = [h[1] for h in (hits or []) if a - 0.5 <= h[0] <= b]
+    n_laugh = len(lw) + kinds.count("laugh")
+    n_react = sum(kinds.count(k) for k in ("react", "shout", "mat", "phrase"))
+    reply = sum(max(0.0, w.end - w.start) for w in words[r["last"] + 1:r["react_last"] + 1])
+
+    def peak(key: str, x: float, y: float) -> float:
+        v = sig.get(key)
+        if v is None or len(v) <= int(x):
+            return 0.0
+        seg = np.asarray(v[int(x):int(y) + 1], dtype=np.float64)
+        return float(seg.max()) if len(seg) else 0.0
+
+    loud, pitch, chat = peak("loud", a, b), peak("pitch", a, b), peak("chat", a, a + 25.0)
+    clip = lambda v: max(0.0, min(1.0, v))                                       # noqa: E731
+    sc = (30.0 * clip((loud - 1.0) / 2.5) + 25.0 * clip(n_laugh / 4.0) + 10.0 * clip(n_react / 4.0)
+          + 15.0 * clip((reply - 3.0) / 12.0) + 10.0 * clip((pitch - 1.0) / 2.5) + 10.0 * clip((chat - 1.0) / 3.0)
+          + (15.0 * clip((cam - 1.2) / 1.5) if cam is not None else 0.0))
+    hints: Dict[str, Any] = {"loud": round(loud, 1), "laugh": n_laugh, "react_words": n_react, "reply_s": round(reply, 1)}
+    if pitch:
+        hints["pitch"] = round(pitch, 1)
+    if sig.get("chat") is not None:
+        hints["chat_burst"] = round(chat, 1)
+    if cam is not None:
+        hints["cam_motion"] = round(cam, 2)
+    return round(min(100.0, sc), 1), hints
+
+
+def cam_motion(video: str, rect: Sequence[float], t0: float, t1: float, t_end: float, ffmpeg: str = "ffmpeg",
+               timeout: float = 25.0) -> Optional[float]:
+    """Webcam «emotion» proxy: motion inside the webcam rect [x, y, w, h] during the reaction (p75 of frame
+    differences at 4 fps) over the calm level in the 8 s before the read. None when it cannot be measured."""
+    import subprocess
+    x, y, w, h = [int(round(float(v))) for v in rect[:4]]
+    if w < 32 or h < 32:
+        return None
+    a = max(0.0, t0 - 8.0)
+    cmd = [ffmpeg, "-v", "error", "-nostdin", "-ss", f"{a:.2f}", "-t", f"{t_end - a + 0.5:.2f}",
+           "-skip_frame:v", "noref", "-i", video, "-an",
+           "-vf", f"fps=4,crop={w}:{h}:{x}:{y},scale=48:36:flags=area,format=gray", "-f", "rawvideo", "-"]
+    try:
+        raw = subprocess.run(cmd, capture_output=True, timeout=timeout).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    n = len(raw) // (48 * 36)
+    if n < 12:
+        return None
+    f = np.frombuffer(raw[: n * 48 * 36], dtype=np.uint8).reshape(n, 36, 48).astype(np.float32)
+    d = np.abs(f[1:] - f[:-1]).mean(axis=(1, 2))
+    ts = a + np.arange(1, n) / 4.0
+    base, react = d[ts < t0], d[ts >= t1]
+    if len(base) < 8 or len(react) < 8:
+        return None
+    return round(float(np.percentile(react, 75)) / max(0.8, float(np.median(base))), 3)
+
+
+def _mask_mat(title: str) -> str:
+    """Titles go into the platform's text layer: explicit мат is masked (Х***), the card keeps the viewer's text."""
+    return re.sub(r"(?i)\b(ху[йеёияю]|пизд|еба|ёба|ебл|бля|муда|залуп|сук[аи])(\w*)",
+                  lambda m: m.group(0)[0] + "*" * (len(m.group(0)) - 1), title)
+
+
 # ── 3. payoff options («продолжение») ───────────────────────────────────────
 
 def payoff_options(words, sents, r: Dict[str, Any], excite: Optional[np.ndarray], n: int = 3,
@@ -285,37 +388,54 @@ def payoff_options(words, sents, r: Dict[str, Any], excite: Optional[np.ndarray]
 
 # ── 4. editor ───────────────────────────────────────────────────────────────
 
-SYSTEM = ("Ты — строгий редактор вирусных вертикальных клипов со стримов (TikTok/Shorts). Формат «Завозный коммент»: "
-          "стример ЧИТАЕТ ВСЛУХ комментарий зрителя из чата и ярко реагирует (ржёт, огрызается, в шоке, отвечает "
-          "шуткой). Завозный коммент — смешной, дерзкий, провокационный, абсурдный, подкол стримеру, неожиданный "
-          "вопрос («ты реально первый в мире в стрипуху приехал?»). НЕ завозный (score ≤ 35): технические вопросы "
-          "(фпс, графика, настройки, железо, пинг, звук), расписание, цены, просьбы чата, приветы, благодарности за "
-          "донаты и подписки, реклама; а ещё — если стример НЕ читает коммент (это реплика из игры / катсцены / его "
-          "собственная речь) → is_comment=false. Реакция обязана быть: без смеха/ответа/эмоции — score ≤ 50. "
-          "Шкала абсолютная: 85+ — разлетится, 70–84 — крепко, 50–69 — так себе. Большинство кандидатов — 30–60. "
-          "«Продолжение» — фрагмент, где в игре/на стриме ПРОИСХОДИТ именно то, о чём коммент (то же действие, "
-          "место, событие); общее слово (фпс, жопа, машина) — НЕ продолжение. Если не уверен — payoff=null. "
-          "Отвечай только JSON.")
+SYSTEM = ("Ты — жёсткий редактор вирусных вертикальных клипов со стримов (TikTok/Shorts). Формат «Завозный коммент»: "
+          "стример ЧИТАЕТ ВСЛУХ коммент зрителя и взрывается — орёт, угорает, огрызается, спорит, в шоке. Нужна "
+          "ЖЕСТЬ, «долбанина», острая тема: провокация, абсурд, жёсткий подкол / оскорбление стримера, скандальная или "
+          "шокирующая тема, пошлость, мат, троллинг, чёрный юмор, «завоз», после которого стример не может остаться "
+          "спокойным. Примеры острых: «ты реально первый в мире в стрипуху приехал?», «твоя жена скоро откинется, "
+          "делай ремонт», «ты лысый потому что тупой?». НЕ острое (spice ≤ 30, category routine/question/greeting/"
+          "donation/neutral): обычные вопросы (фпс, графика, железо, сколько лет, во что играем, когда стрим), приветы, "
+          "благодарности за донаты/подписки, просьбы и подсказки чата («давай на пляж», «сделай музыку тише», «перезапусти "
+          "миссию»), названия мест/игровых вещей капсом («БАСИК В СТРИПУХЕ»), «АОАОА»/капс/смайлы без смысла, реклама, "
+          "нейтральная болтовня. Острота — в СМЫСЛЕ коммента (наезд, шок-вопрос, абсурдное заявление, пошлость, "
+          "оскорбление), а не в капсе и не в том, что стример потом орёт на игру. Если стример НЕ читает коммент (реплика из игры / катсцены / его собственная речь) → is_comment=false. "
+          "spice — острота САМОГО коммента: 90+ — бомба, все пересылают; 78–89 — реально жёстко; 60–77 — норм, но не "
+          "жесть; <60 — обычный. Большинство комментов — 20–60, ставь 78+ только настоящей жести. reaction — сила "
+          "реакции стримера по его словам и сигналам (hints: loud — громкость z, laugh — смехов, reply_s — сколько "
+          "секунд отвечает, chat_burst — всплеск чата z, cam_motion — движение на вебке ×): 80+ — орёт/ржёт/взрывается/"
+          "долго спорит, 50 — ответил с эмоцией, <35 — прочитал и дальше. Считается ТОЛЬКО реакция на сам коммент (ответ "
+          "ему, смех над ним, спор с автором); крик на игру / NPC / тиммейтов после чтения — не реакция на коммент "
+          "(reaction ≤ 30). "
+          "БЕЗОПАСНОСТЬ ПЛАТФОРМ: мат, пошлость, троллинг, чёрный юмор — МОЖНО. unsafe=true (такое не берём): призыв "
+          "к насилию или убийству, экстремизм / терроризм / нацизм, травля по национальности, расе, религии, "
+          "ориентации, призыв к самоубийству, сексуализация несовершеннолетних, слив личных данных, травля реального "
+          "человека не со стрима. «Продолжение» — фрагмент, где в игре/на стриме ПРОИСХОДИТ именно то, о чём коммент; "
+          "общее слово — НЕ продолжение; не уверен — payoff=null. Отвечай только JSON.")
 
 
 def editor_messages(items: List[Dict[str, Any]], context: str = "") -> List[Dict[str, str]]:
     user = ((f"Стрим: {context[:160]}\n" if context else "") +
-            "Кандидаты: comment — текст комментария (source=chat: точный текст из чата; source=asr: распознанная речь "
+            "Кандидаты: comment — текст коммента (source=chat: точный текст из чата; source=asr: распознанная речь "
             "стримера, в ней может быть и сам коммент, и его слова); said — что стример говорит, по фразам с номерами "
-            "(время от начала чтения); options — фрагменты из других мест стрима (rel — минут от чтения), один из них "
-            "может быть «продолжением».\n" + json.dumps(items, ensure_ascii=False) +
-            "\n\nВерни JSON: {\"clips\": [{\"id\": str, \"is_comment\": bool (стример правда читает коммент зрителя), "
-            "\"score\": 0-100 (насколько завозный коммент + реакция: 85+ разлетится, 70+ крепко, <40 скучно), "
-            "\"quote\": \"текст коммента для карточки чата, как его написал зритель, до 140 знаков, без ника\", "
-            "\"end\": int (номер фразы, где заканчивается реакция — дай реакции прозвучать, 5–20 с после коммента), "
-            "\"payoff\": int|null (индекс option, который показывает ИМЕННО то, о чём коммент; null если нет), "
-            "\"payoff_conf\": 0-100 (уверенность, что option — то самое), "
-            "\"title\": \"заголовок 4–8 слов КАПСОМ про СУТЬ коммента, конкретно (кто/что), как в TikTok: «ЗЛОЙ "
-            "УСТАНОВИЛ МИРОВОЙ РЕКОРД В GTA6», «ЧАТ СПРОСИЛ ПРО БЫВШУЮ — БУСТЕР В ШОКЕ»; НЕ общие слова вроде «стример "
-            "реагирует на комментарий»; только правда из клипа\", \"accent\": [1–3 слова из title для цветного "
-            "выделения: имя/главное слово], "
-            "\"why\": \"до 10 слов\"}]} — для КАЖДОГО кандидата, по убыванию score.")
+            "(время от начала чтения); hints — сигналы реакции; options — фрагменты из других мест стрима (rel — "
+            "минут от чтения), один может быть «продолжением».\n" + json.dumps(items, ensure_ascii=False) +
+            "\n\nВерни JSON: {\"clips\": [{\"id\": str, \"is_comment\": bool, "
+            "\"category\": \"provocation|absurd|roast|scandal|shock|lewd|dark_humor|troll|question|greeting|donation|"
+            "routine|neutral\", \"spice\": 0-100, \"reaction\": 0-100, \"unsafe\": bool, \"unsafe_why\": str|null, "
+            "\"quote\": \"текст коммента для карточки чата, как написал зритель, до 140 знаков, без ника\", "
+            "\"end\": int (номер фразы, где кончается реакция, 5–20 с после коммента), "
+            "\"payoff\": int|null, \"payoff_conf\": 0-100, "
+            "\"title\": \"4–8 слов КАПСОМ про СУТЬ, конкретно и дерзко, как в TikTok: «ЗЛОЙ УСТАНОВИЛ МИРОВОЙ РЕКОРД В "
+            "GTA6», «ЧАТ СПРОСИЛ ПРО БЫВШУЮ — БУСТЕР В ШОКЕ»; только правда из клипа; мат в заголовке — звёздочками\", "
+            "\"accent\": [1–3 слова из title], \"why\": \"до 8 слов\"}]} — для КАЖДОГО кандидата, по убыванию spice.")
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
+
+
+def _num(x: Any, lo: float = 0.0, hi: float = 100.0) -> Optional[float]:
+    try:
+        return max(lo, min(hi, float(x)))
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_editor(text: Optional[str], cands: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
@@ -328,10 +448,10 @@ def parse_editor(text: Optional[str], cands: Dict[str, Dict[str, Any]]) -> Dict[
         if not isinstance(x, dict) or x.get("id") not in cands:
             continue
         c = cands[x["id"]]
-        try:
-            score = max(0.0, min(100.0, float(x.get("score", 0))))
-        except (TypeError, ValueError):
+        spice = _num(x.get("spice", x.get("score")))
+        if spice is None:
             continue
+        react = _num(x.get("reaction"))
         n_s = len(c["said_idx"])
         try:
             end = int(x.get("end"))
@@ -340,17 +460,17 @@ def parse_editor(text: Optional[str], cands: Dict[str, Dict[str, Any]]) -> Dict[
             end = None
         pay = x.get("payoff")
         pay = pay if isinstance(pay, int) and not isinstance(pay, bool) and 0 <= pay < len(c["options"]) else None
-        try:
-            conf = float(x.get("payoff_conf", 0) or 0)
-        except (TypeError, ValueError):
-            conf = 0.0
-        if conf < PAYOFF_CONF:                         # «если не уверен — без продолжения»
+        if (_num(x.get("payoff_conf")) or 0.0) < PAYOFF_CONF:      # «если не уверен — без продолжения»
             pay = None
-        title = re.sub(r"\s+", " ", str(x.get("title") or "")).strip().upper()[:70]
+        title = _mask_mat(re.sub(r"\s+", " ", str(x.get("title") or "")).strip().upper()[:70])
         acc = [str(a).upper() for a in (x.get("accent") or [])[:3] if isinstance(a, str) and str(a).upper() in title]
         quote = re.sub(r"\s+", " ", str(x.get("quote") or "")).strip()[:160]
-        out[x["id"]] = {"is_comment": x.get("is_comment") is True, "score": score, "end": end, "payoff": pay,
-                        "title": title, "accent": acc, "quote": quote, "why": str(x.get("why") or "")[:120]}
+        out[x["id"]] = {"is_comment": x.get("is_comment") is True, "spice": spice,
+                        "reaction": react if react is not None else 0.0,
+                        "category": str(x.get("category") or "").strip().lower()[:20],
+                        "unsafe": x.get("unsafe") is True, "unsafe_why": str(x.get("unsafe_why") or "")[:80],
+                        "end": end, "payoff": pay, "title": title, "accent": acc, "quote": quote,
+                        "why": str(x.get("why") or "")[:120]}
     return out
 
 
@@ -361,14 +481,40 @@ def _quote_ok(quote: str, said: str) -> bool:
     return bool(q) and sum(_stem(t) in s for t in q) >= 0.6 * len(q)
 
 
+def judge(r: Dict[str, Any], v: Optional[Dict[str, Any]]) -> Tuple[bool, float, str]:
+    """The hard bar. -> (taken, final 0–100, reason)."""
+    if not v:
+        return False, 0.0, "no editor verdict"
+    react = 0.5 * v["reaction"] + 0.5 * r["react_local"]
+    final = round(0.6 * v["spice"] + 0.4 * react, 1)
+    if not v["is_comment"]:
+        return False, final, "not a read-out comment"
+    if v["unsafe"] or _UNSAFE.search(" ".join((r["text"], v.get("quote") or "", v.get("title") or ""))):
+        return False, final, "unsafe: " + (v.get("unsafe_why") or "local filter")
+    if v["category"] and v["category"] not in SHARP_CATS:
+        return False, final, f"category {v['category']}"
+    bar = SPICE_MIN_ASR if r["source"] == "asr" else SPICE_MIN
+    if _ROUTINE.search(r["text"]):
+        bar = max(bar, 88.0)
+    if v["spice"] < bar:
+        return False, final, f"spice {v['spice']:.0f} < {bar:.0f}"
+    if react < REACT_MIN:
+        return False, final, f"weak reaction {react:.0f}"
+    if final < FINAL_MIN:
+        return False, final, f"final {final:.0f} < {FINAL_MIN:.0f}"
+    return True, final, "sharp"
+
+
 # ── selection ───────────────────────────────────────────────────────────────
 
 def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, Sequence[float]], *,
            messages: Optional[Sequence[Dict[str, Any]]] = None, hits=None, ads: Sequence[Tuple[float, float]] = (),
            max_clips: int = 3, editor: bool = True, context: str = "", chat: Optional[Callable[..., Any]] = None,
-           budget_rub: float = BUDGET_RUB, rub_per_usd: float = 100.0, min_score: float = 60.0,
-           pool: int = 10) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """-> (segments in the runner's shape, meta)."""
+           budget_rub: float = BUDGET_RUB, rub_per_usd: float = 100.0, pool: int = POOL,
+           video: Optional[str] = None, cam_rect: Optional[Sequence[float]] = None, ffmpeg: str = "ffmpeg",
+           cam_n: int = 8, **_legacy: Any) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """-> (segments in the runner's shape, meta). Only really sharp comments with a strong reaction; no editor
+    verdict (off / failed / over budget) → none (the regular Streamer moments go instead)."""
     from .boundaries import normalize_words
     from . import stream_moments as sm
     words, _ = normalize_words(raw_words)
@@ -391,16 +537,43 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
         return [], meta
     e = sm.excitement(signals, n_sec) if signals else None
     loud = signals.get("loud") if signals else None
+    board: List[Dict[str, Any]] = []
+    kept = []
     for r in reads:
         r["react_last"] = _reaction(words, sents, r)
         r["local"], r["why"] = local_score(r, words, hits, loud)
-    reads.sort(key=lambda r: -r["local"])
+        r["react_local"], r["hints"] = reaction_strength(r, words, hits, signals)
+        r["prior"] = r["local"] + (1.0 if _SPICE_HINT.search(r["text"]) else 0.0) + r["react_local"] / 40.0
+        if _UNSAFE.search(r["text"]):
+            r["decision"] = "unsafe: local filter"
+        elif _BORING.search(r["text"]) and len(r["text"].split()) <= 8:
+            r["decision"] = "boring: greeting / thanks / donation"
+        else:
+            kept.append(r)
+            continue
+        board.append(r)
+    kept.sort(key=lambda r: -r["prior"])
     cand: List[Dict[str, Any]] = []
-    for r in reads:                                    # one comment clip per ~40 s
+    for r in kept:                                     # one comment clip per ~40 s
         if all(abs(r["t0"] - c["t0"]) > 40.0 for c in cand):
             cand.append(r)
         if len(cand) >= pool:
             break
+    if video and cam_rect and cand:                    # webcam motion for the best few (cheap crop decodes)
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        t_start = time.monotonic()
+
+        def _cam(r):
+            if time.monotonic() - t_start > 60.0:
+                return None
+            return cam_motion(video, cam_rect, r["t0"], r["t1"], words[r["react_last"]].end, ffmpeg)
+        with ThreadPoolExecutor(4) as ex:
+            cams = list(ex.map(_cam, cand[:cam_n]))
+        for r, c in zip(cand, cams):
+            if c is not None:
+                r["react_local"], r["hints"] = reaction_strength(r, words, hits, signals, c)
+        meta["cam_measured"] = sum(c is not None for c in cams)
     for k, r in enumerate(cand):
         r["id"] = f"c{k}"
         r["options"] = payoff_options(words, sents, r, e)
@@ -416,15 +589,17 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
     verdicts: Dict[str, Dict[str, Any]] = {}
     if editor and cand:
         items = lambda cs: [{"id": r["id"], "source": r["source"], "comment": r["text"][:200], "said": r["said"],  # noqa: E731
-                             "options": [{"i": i, "rel": o["rel"], "text": o["text"]} for i, o in enumerate(r["options"])]}
+                             "hints": r["hints"],
+                             "options": [{"i": i, "rel": o["rel"], "text": o["text"][:200]} for i, o in enumerate(r["options"])]}
                             for r in cs]
         cs = list(cand)
         msgs = editor_messages(items(cs), context)
         fake = sm.MomentConfig(rub_per_usd=rub_per_usd)
-        while len(cs) > 1 and sm.forecast_rub(msgs, len(cs), fake) > budget_rub:
+        fc_of = lambda m, n: sm.forecast_rub(m, n, fake) + 0.013 * n * rub_per_usd / 100.0   # noqa: E731  longer verdicts (measured)
+        while len(cs) > 1 and fc_of(msgs, len(cs)) > budget_rub:
             cs = cs[:-1]
             msgs = editor_messages(items(cs), context)
-        fc = sm.forecast_rub(msgs, len(cs), fake)
+        fc = round(fc_of(msgs, len(cs)), 3)
         em: Dict[str, Any] = {"pool": len(cs), "forecast_rub": fc, "budget_rub": budget_rub}
         if fc <= budget_rub:
             from .stream_viral import _call
@@ -436,23 +611,20 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
             em["status"] = "skipped_budget"
         meta["llm"] = em
     picked: List[Tuple[Dict[str, Any], float, Dict[str, Any]]] = []
-    if verdicts:
-        for r in cand:
-            v = verdicts.get(r["id"])
-            bar = min_score if r["source"] == "chat" else max(min_score, ASR_MIN_SCORE)
-            if _ROUTINE.search(r["text"]):
-                bar = max(bar, 85.0)
-            if v and v["is_comment"] and v["score"] >= bar:
-                picked.append((r, v["score"] / 100.0 + 0.1 * r["local"], v))
-        meta["selection_method"] = "editor"
-    else:                                              # no editor: only real chat matches with a reaction
-        for r in cand:
-            if r["source"] == "chat" and r["local"] >= 2.4:
-                picked.append((r, r["local"] / 4.0, {}))
-        meta["selection_method"] = "local"
+    for r in cand:
+        v = verdicts.get(r["id"])
+        ok, final, why = judge(r, v)
+        r["final"], r["decision"], r["verdict"] = final, ("taken" if ok else why), v
+        if ok:
+            picked.append((r, final, v))
+        board.append(r)
+    meta["selection_method"] = "editor" if verdicts else "none_no_editor"
     picked.sort(key=lambda t: -t[1])
+    lim = max(0, min(max_clips, MAX_SHARP))
+    for r, _f, _v in picked[lim:]:
+        r["decision"] = f"sharp, over the cap {lim}"
     segs = []
-    for r, sc, v in picked[:max_clips]:
+    for r, final, v in picked[:lim]:
         last = r["react_last"]
         if v.get("end") is not None:
             last = max(r["last"], r["said_idx"][v["end"]])
@@ -461,17 +633,18 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
         start = max(0.0, words[r["first"]].start - 0.25)
         end = words[last].end + 0.35
         quote = r["text"]
-        if v.get("quote") and (r["source"] == "chat" or _quote_ok(v["quote"], r["text"])):
-            quote = v["quote"] if r["source"] == "asr" else quote   # chat text stays exactly what the viewer wrote
-        seg = {"start": round(start, 3), "duration": round(end - start, 3), "score": round(3.0 + sc, 4),
-               "source": "stream_comment:" + ("editor" if v else "local"), "moment_type": "comment",
+        if v.get("quote") and r["source"] == "asr" and _quote_ok(v["quote"], r["text"]):
+            quote = v["quote"]                         # chat text stays exactly what the viewer wrote
+        seg = {"start": round(start, 3), "duration": round(end - start, 3), "score": round(3.0 + final / 100.0 + 0.05 * r["local"], 4),
+               "source": "stream_comment:editor", "moment_type": "comment",
                "category": "comment", "candidate_id": r["id"],
                "selection_reason": "; ".join([f"{r['source']} read match {r['match']:.2f}"] + r["why"]
-                                             + ([f"editor {v['score']:.0f}: {v['why']}"] if v else [])),
+                                             + [f"spice {v['spice']:.0f} react {v['reaction']:.0f}/{r['react_local']:.0f} "
+                                                f"{v['category']}: {v['why']}"]),
                "comment": {"author": r["author"] if r["source"] == "chat" else VIEWER, "text": quote,
                            "color": r.get("color"), "source": r["source"], "t0": round(r["t0"], 3),
                            "t1": round(r["t1"], 3), "msg_t": r.get("msg_t")},
-               "peak_t": round(r["t1"], 3)}
+               "peak_t": round(r["t1"], 3), "editor_score": final, "spice": v["spice"]}
         if v.get("title"):
             seg["hook"] = v["title"]
             seg["title"] = {"text": v["title"], "accent": v.get("accent") or []}
@@ -479,12 +652,17 @@ def select(raw_words: Sequence[Dict[str, Any]], n_sec: int, signals: Dict[str, S
             o = r["options"][v["payoff"]]
             seg["payoff"] = {"start": round(max(0.0, o["start"] - 0.2), 3), "end": round(o["end"] + 0.3, 3),
                              "text": o["text"][:200]}
-        if v:
-            seg["editor_score"] = v["score"]
         segs.append(seg)
+    board.sort(key=lambda r: (-(r.get("final") or 0.0), -r["prior"]))
+    meta["board"] = [{"t0": round(r["t0"], 1), "source": r["source"], "author": r.get("author"),
+                      "text": r["text"][:140], "react_local": r["react_local"], "hints": r["hints"],
+                      **({"spice": r["verdict"]["spice"], "reaction": r["verdict"]["reaction"],
+                          "category": r["verdict"]["category"], "unsafe": r["verdict"]["unsafe"],
+                          "title": r["verdict"]["title"], "why": r["verdict"]["why"]} if r.get("verdict") else {}),
+                      "final": r.get("final"), "decision": r["decision"]} for r in board[:24]]
     meta["selected"] = [{"t0": s["comment"]["t0"], "text": s["comment"]["text"][:120], "score": s["score"],
-                         "payoff": bool(s.get("payoff")), "title": s.get("hook")} for s in segs]
-    meta["status"] = "ok" if segs else "none_strong"
+                         "final": s["editor_score"], "payoff": bool(s.get("payoff")), "title": s.get("hook")} for s in segs]
+    meta["status"] = "ok" if segs else ("none_sharp" if verdicts else "no_editor")
     return segs, meta
 
 

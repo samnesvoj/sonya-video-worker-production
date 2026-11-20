@@ -146,7 +146,8 @@ def test_select_with_editor_payoff_and_title():
     said = SAID + _words(("смотри я заезжаю в стрипуху первый в мире вот это рекорд.", 400.0))
     msgs = [{"t": 104.0, "author": "tumca52", "text": "Вась а ты шо реально первый кто в мире в стрипуху приехал?",
              "color": "#8A2BE2"}]
-    chat, calls = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "score": 88, "quote": "x", "end": 1,
+    chat, calls = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "spice": 92, "reaction": 95,
+                                         "category": "provocation", "unsafe": False, "quote": "x", "end": 1,
                                          "payoff": 0, "payoff_conf": 90, "title": "Злой установил мировой рекорд в GTA6",
                                          "accent": ["злой", "GTA6", "нет такого"], "why": "смешно"}]})
     segs, meta = scm.select(said, 500, {"loud": [0.0] * 500}, messages=msgs, chat=chat)
@@ -158,13 +159,76 @@ def test_select_with_editor_payoff_and_title():
     assert s["start"] <= 110.4 and s["start"] + s["duration"] >= 120.0
 
 
-def test_select_editor_rejects_and_no_editor_fallback():
-    msgs = [{"t": 104.0, "author": "t", "text": "Вась а ты шо реально первый кто в мире в стрипуху приехал?"}]
-    chat, _ = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "score": 30}]})
-    segs, meta = scm.select(SAID, 200, {}, messages=msgs, chat=chat)
-    assert segs == [] and meta["status"] == "none_strong"
-    segs, meta = scm.select(SAID, 200, {}, messages=msgs, editor=False)
-    assert meta["selection_method"] == "local" and len(segs) == 1 and "payoff" not in segs[0]
+MSG = [{"t": 104.0, "author": "t", "text": "Вась а ты шо реально первый кто в мире в стрипуху приехал?"}]
+
+
+def _v(**kw):
+    return {"clips": [dict({"id": "c0", "is_comment": True, "spice": 95, "reaction": 95, "category": "provocation",
+                            "unsafe": False}, **kw)]}
+
+
+def test_select_editor_rejects_and_no_editor_gives_nothing():
+    chat, _ = _fake_chat(_v(spice=30, category="question"))
+    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    assert segs == [] and meta["status"] == "none_sharp" and meta["board"][0]["decision"].startswith("category")
+    segs, meta = scm.select(SAID, 200, {}, messages=MSG, editor=False)       # no verdict → no weak guesses
+    assert segs == [] and meta["status"] == "no_editor"
+
+
+@pytest.mark.parametrize("kw, why", [({"spice": 70}, "spice"), ({"reaction": 5}, "weak reaction"),
+                                     ({"unsafe": True, "unsafe_why": "призыв к насилию"}, "unsafe"),
+                                     ({"category": "donation"}, "category"), ({"is_comment": False}, "not a read")])
+def test_sharp_bar(kw, why):
+    chat, _ = _fake_chat(_v(**kw))
+    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    assert segs == [] and meta["board"][0]["decision"].startswith(why)
+    chat, _ = _fake_chat(_v())
+    segs, meta = scm.select(SAID, 200, {}, messages=MSG, chat=chat)
+    assert len(segs) == 1 and segs[0]["editor_score"] >= scm.FINAL_MIN and meta["board"][0]["decision"] == "taken"
+
+
+def test_unsafe_and_boring_never_reach_the_editor():
+    said = _words(("так пишут убить всех евреев ахаха ну вы даёте.", 100.0), ("ну и ну.", 130.0),
+                  ("всем привет злой как дела ахаха привет привет.", 200.0), ("ладно.", 230.0))
+    msgs = [{"t": 95.0, "author": "a", "text": "убить всех евреев ахаха ну"},
+            {"t": 195.0, "author": "b", "text": "всем привет злой как дела"}]
+    chat, calls = _fake_chat({"clips": []})
+    segs, meta = scm.select(said, 300, {}, messages=msgs, chat=chat)
+    assert segs == [] and not calls
+    dec = sorted(b["decision"] for b in meta["board"])
+    assert any(d.startswith("unsafe") for d in dec) and any(d.startswith("boring") for d in dec)
+
+
+def test_safety_regex_and_title_mask():
+    for bad in ("всех хачей на выход", "убей себя", "давай убьём всех евреев", "зиг хайль"):
+        assert scm._UNSAFE.search(bad), bad
+    for ok in ("жидкий стул", "хачапури вкусный", "ты лох и нуб, блядь", "твоя жена скоро откинется"):
+        assert not scm._UNSAFE.search(ok), ok
+    assert scm._mask_mat("ЗЛОЙ ПОСЛАЛ ЧАТ НАХУЙ") == "ЗЛОЙ ПОСЛАЛ ЧАТ НАХУЙ" or "Х" in scm._mask_mat("ХУЙНЯ")
+    assert scm._mask_mat("ЧАТ СКАЗАЛ ХУЙНЯ") == "ЧАТ СКАЗАЛ Х****"
+
+
+def test_reaction_strength_uses_loudness_laughs_and_cam():
+    words, _ = normalize_words(SAID)
+    r = scm.reads_from_chat(words, MSG)[0]
+    r["react_last"] = scm._reaction(words, sm._sentences(words), r)
+    calm, _ = scm.reaction_strength(r, words, [], {"loud": [0.0] * 200})
+    loud, h = scm.reaction_strength(r, words, [], {"loud": [0.0] * 115 + [3.5] * 85, "chat": [3.0] * 200}, cam=2.5)
+    assert loud > calm + 40 and h["cam_motion"] == 2.5 and h["chat_burst"] == 3.0
+    assert scm.cam_motion("/nonexistent.mp4", [0, 0, 400, 300], 10, 12, 20) is None
+    assert scm.cam_motion("/nonexistent.mp4", [0, 0, 10, 10], 10, 12, 20) is None
+
+
+def test_cap_sharp_clips():
+    said, msgs, clips = [], [], []
+    for k in range(6):
+        t = 100.0 + 60 * k
+        said += _words((f"о вась а ты шо реально первый кто в мире в стрипуху приехал номер {k} ахаха.", t))
+        msgs.append({"t": t - 5, "author": f"u{k}", "text": f"Вась а ты шо реально первый кто в мире в стрипуху приехал номер {k}"})
+        clips.append({"id": f"c{k}", "is_comment": True, "spice": 95, "reaction": 95, "category": "roast"})
+    chat, _ = _fake_chat({"clips": clips})
+    segs, meta = scm.select(said, 800, {}, messages=msgs, chat=chat, max_clips=8)
+    assert len(segs) == scm.MAX_SHARP and sum(b["decision"].startswith("sharp, over") for b in meta["board"]) == 3
 
 
 def test_select_budget_trims_pool():
@@ -311,8 +375,8 @@ def test_background_fetch_marker(tmp_path, monkeypatch):
 def test_routine_and_unsure_payoff():
     msgs = [{"t": 104.0, "author": "t", "text": "Вась а ты шо реально первый кто в мире в стрипуху приехал?"}]
     said = SAID + _words(("смотри я заезжаю в стрипуху первый в мире вот это рекорд.", 400.0))
-    chat, _ = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "score": 80, "end": 0, "payoff": 0,
-                                     "payoff_conf": 40, "title": "T"}]})
+    chat, _ = _fake_chat({"clips": [{"id": "c0", "is_comment": True, "spice": 95, "reaction": 95,
+                                     "category": "absurd", "end": 0, "payoff": 0, "payoff_conf": 40, "title": "T"}]})
     segs, _ = scm.select(said, 500, {}, messages=msgs, chat=chat)
     assert "payoff" not in segs[0]                                          # not sure → no continuation
     assert segs[0]["start"] + segs[0]["duration"] - 110.0 >= scm.MIN_REACTION_SEC   # reaction never cut to nothing

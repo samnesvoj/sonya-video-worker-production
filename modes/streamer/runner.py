@@ -314,7 +314,9 @@ def analyze(
     if words and (not types or "comment" in types) and _flag("STREAMER_COMMENT", "true") \
             and params.get("comment_moments", True):
         try:
-            segments = _with_comments(segments, words, n_sec, sig, sp["hits"], ads, cp, types, want, mc, selection)
+            segments = _with_comments(segments, words, n_sec, sig, sp["hits"], ads, cp, types, want, mc, selection,
+                                      video=input_video_path, work=work, ffmpeg=ff, duration=info["duration"],
+                                      warnings=warnings)
         except Exception as exc:                      # the regular clips are never lost over the comment pass
             warnings.append(f"comment_moments_failed: {type(exc).__name__}: {str(exc)[:200]}")
             logger.exception("[streamer] comment moments failed")
@@ -326,14 +328,17 @@ def analyze(
 
 
 COMMENT_JUMP_GAP = 1.6       # «Завозный коммент»: only pauses longer than this are cut (the reaction stays whole)
-AUTO_COMMENT_SCORE = 70.0     # «Авто»: a comment clip joins the others only when the editor rates it this high
+AUTO_COMMENT_SCORE = 78.0     # «Авто»: a comment clip joins the others only when it is this sharp (final 0–100)
 
 
 def _with_comments(segments: List[Dict[str, Any]], words, n_sec: int, sig: Dict[str, Any], hits, ads, chat_path,
-                   types: List[str], want: int, mc: Dict[str, Any], selection: Dict[str, Any]) -> List[Dict[str, Any]]:
+                   types: List[str], want: int, mc: Dict[str, Any], selection: Dict[str, Any], *,
+                   video: Optional[str] = None, work: Optional[Path] = None, ffmpeg: str = "ffmpeg",
+                   duration: float = 0.0, warnings: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     """«Завозный коммент» (owner 2026-11-19): moments where the streamer reads a viewer's comment aloud
     (scripts/shared/stream_comment) join the regular ones — all of them when the type is chosen, ≤ 2 strong ones
-    in «Авто». The chat replay (if the VOD has one) gives the real nick / text of the card."""
+    in «Авто». The chat replay (if the VOD has one) gives the real nick / text of the card. v2 (owner 2026-11-20,
+    «надо искать жесть»): only really sharp comments with a strong reaction — none → no comment clips at all."""
     from scripts.shared import stream_chat, stream_comment
     msgs = stream_chat.load(chat_path) if chat_path else []
     platform = "twitch"
@@ -344,9 +349,14 @@ def _with_comments(segments: List[Dict[str, Any]], words, n_sec: int, sig: Dict[
         except OSError:
             pass
     explicit = "comment" in types
+    cam_rect = None
+    if video and work is not None and _flag("STREAMER_COMMENT_CAM", "true"):
+        rects = (_layout_survey(video, duration, work, warnings if warnings is not None else []) or {}).get("rects") or []
+        cam_rect = rects[0]["rect"] if rects else None   # the webcam OBS shows most of the stream
     cs, meta = stream_comment.select(words, n_sec, sig, messages=msgs, hits=hits, ads=ads,
                                      max_clips=want if explicit else 2, editor=bool(mc.get("editor")),
-                                     context=str(mc.get("context") or ""))
+                                     context=str(mc.get("context") or ""), video=video, cam_rect=cam_rect,
+                                     ffmpeg=ffmpeg)
     if not explicit:
         cs = [c for c in cs if float(c.get("editor_score") or 0.0) >= AUTO_COMMENT_SCORE]
     selection["comment"] = {k: v for k, v in meta.items() if k != "params"}
