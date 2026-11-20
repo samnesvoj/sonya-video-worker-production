@@ -170,6 +170,8 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
         try:
             for a in fleet.tick():
                 log.info("fleet_action %s", a)
+            for a in watch_yt_wait(ledger) + watch_capacity(fleet, ledger):
+                log.info("fleet_action %s", a)
             if svc:
                 try:
                     import_confirmed(fleet, ledger)   # a charges-API hiccup must not stop the reports
@@ -281,7 +283,66 @@ def watch_youtube(ledger, env=os.environ, every: float = 300.0) -> list:  # prag
     except Exception as exc:  # noqa: BLE001
         log.warning("yt_watch_error %s", type(exc).__name__)
         return []
-    return yt_watch.check(ledger, hbs, now)
+    return yt_watch.check(ledger, hbs, now) + yt_watch.check_pool(ledger, _yt_pool(now), now)
+
+
+_POOL = {"t": 0.0, "v": None}
+
+
+def _yt_pool(now: float, every: float = 300.0):  # pragma: no cover - S3
+    """Cookies pool summary of the Mac mini (tools/yt_cookies.py -> yt-relay/pool.json, no secrets); None if unknown."""
+    if now - _POOL["t"] >= every:
+        _POOL["t"] = now
+        try:
+            from scripts import yt_relay
+            _POOL["v"] = yt_relay.get_json(yt_relay.prefix() + "pool.json")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("yt_pool_error %s", type(exc).__name__)
+    return _POOL["v"]
+
+
+_YTW = {"t": 0.0}
+
+
+def watch_yt_wait(ledger, env=os.environ, every: float = 30.0) -> list:  # pragma: no cover - Postgres + S3 on the VPS
+    """Jobs parked in 'source_wait' (YouTube gave the video to no path): retried through the relays for up to 2 h,
+    then failed politely with the attempt given back (scripts/yt_wait.py). Runs without the accountant too."""
+    now = time.time()
+    if now - _YTW["t"] < every or env.get("SONYA_YT_WAIT", "on") == "off":
+        return []
+    _YTW["t"] = now
+    if not env.get("S3_ACCESS_KEY_ID") or not env.get("DATABASE_URL"):
+        return []
+    os.environ.setdefault("S3_BUCKET_NAME", env.get("MODELS_S3_BUCKET", ""))
+    from scripts import yt_relay, yt_wait
+    try:
+        return yt_wait.tick(yt_wait.Db(env["DATABASE_URL"]), yt_relay, now, ledger=ledger, env=env, pool=_yt_pool(now))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("yt_wait_error %s: %s", type(exc).__name__, str(exc)[:200])
+        return []
+
+
+_CAP = {"t": 0.0}
+
+
+def watch_capacity(fleet: FleetManager, ledger, env=os.environ, every: float = 60.0) -> list:  # pragma: no cover - VPS
+    """«Ждёт денег Vast»: capacity.json for the site API (notice to users) + admin alert (dispatcher/capacity.py)."""
+    now = time.time()
+    if now - _CAP["t"] < every or env.get("SONYA_CAPACITY_WATCH", "on") == "off":
+        return []
+    _CAP["t"] = now
+    from decimal import Decimal
+    from dispatcher import capacity
+    try:
+        snap = fleet.queue.snapshot(fleet.cfg.pool_modes, fleet.cfg.label_prefix)
+        up = len(fleet.store.all(capacity.UP_STATES))
+        ev = fleet.store.events_since(now - 1200, ("create_failed", "create_failed_next", "resume_failed"))
+        cur = capacity.tick(STATE_DIR / "capacity.json", snap.pending, up, _balance(fleet, now), ev, now, ledger=ledger,
+                            threshold=Decimal(env.get("SONYA_VAST_NOFUNDS_USD", "0.30")))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("capacity_error %s", type(exc).__name__)
+        return []
+    return [f"capacity {cur['state']}"] * (cur["state"] != "ok") + list(cur.get("alerts") or [])
 
 
 def import_confirmed(fleet: FleetManager, ledger) -> None:  # pragma: no cover

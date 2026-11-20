@@ -6,11 +6,12 @@ Alerts (each at most once per period):
   one relay down        its heartbeat older than 15 min                   -> every 12 h
   canary failed         its last hourly test download failed              -> every 6 h
   cookies expired       the separate YouTube account's cookies are signed out -> once a day
+  cookies pool          (tools/yt_cookies.py summary pool.json) 1 live file left -> once a day; 0 live -> every 6 h
 The automatic switch needs nothing from here: workers ask every relay, the first working one answers.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from accounting import tgformat as tf
 from accounting.balance import ops_alert
@@ -28,7 +29,8 @@ def check(ledger, hbs: Dict[str, dict], now: float) -> List[str]:
     if hbs and not healthy:
         k = ops_alert(ledger, f"yt-all-down:{int(now // 7200)}", [
             tf.title("🚨 YouTube: не работает ни один путь скачивания"),
-            tf.esc("Задания по ссылкам YouTube сейчас не скачаются (повторятся автоматически, потом — ошибка пользователю). "
+            tf.esc("Задания по ссылкам YouTube сейчас не скачаются: они ждут (до 2 ч, пользователь видит «Скачиваем видео…»), "
+                   "потом вежливая просьба загрузить файл и возврат попытки. "
                    "Проверь, включён ли Mac mini и жив ли бот-сервер; если cookies протухли — положи новые."),
             tf.esc("Пути: " + "; ".join(f"{_n(n)} — " + _state(h, now) for n, h in sorted(hbs.items())))], now)
         if k:
@@ -68,3 +70,25 @@ def _state(h: dict, now: float) -> str:
     if not c:
         return "проверки ещё не было"
     return "ок" if c.get("ok") else ("«не бот»" if c.get("bot_check") else "ошибка")
+
+
+def check_pool(ledger, pool: Optional[dict], now: float) -> List[str]:
+    """pool = {total, live, active, ts} published by the Mac mini (no secrets)."""
+    if not pool or not pool.get("total"):
+        return []
+    live, total = int(pool.get("live") or 0), int(pool.get("total") or 0)
+    howto = ("Зайди в отдельный (НЕ личный) аккаунт YouTube в браузере, выгрузи cookies.txt расширением «Get cookies.txt "
+             "LOCALLY» и положи файл в папку _incoming/yt-cookies на Mac mini. Можно сразу 2–3 файла от разных аккаунтов — "
+             "система проверяет их каждые 45 мин и переключается сама.")
+    if live == 0:
+        k = ops_alert(ledger, f"yt-pool-0:{int(now // 21600)}", [
+            tf.title("🚨 YouTube: живых cookies не осталось — нужен новый файл cookies"),
+            tf.esc(f"Файлов в пуле: {total}, рабочих: 0. Пока YouTube отдаёт видео и так, всё работает; если начнёт просить "
+                   "«не бот» — задания будут ждать (до 2 ч), а не падать."), tf.esc(howto)], now)
+        return [k] if k else []
+    if live == 1:
+        k = ops_alert(ledger, f"yt-pool-1:{int(now // 86400)}", [
+            tf.title("⚠️ YouTube: остался 1 рабочий файл cookies"),
+            tf.esc(f"Рабочих {live} из {total}. Положи запасной, чтобы было на что переключиться."), tf.esc(howto)], now)
+        return [k] if k else []
+    return []

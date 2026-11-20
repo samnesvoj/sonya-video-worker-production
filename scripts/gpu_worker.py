@@ -209,6 +209,14 @@ def _yt_direct_blocked(sf: Dict[str, Any]) -> bool:
     return time.time() - _YT_DIRECT["blocked_at"] < 3600
 
 
+# a YouTube link that failed directly with one of these goes to the relays too (not only on "not a bot")
+_YT_RELAY_ALSO = ("SOURCE_DOWNLOAD_FAILED", "SOURCE_FORBIDDEN")
+
+
+def _is_youtube(sf: Dict[str, Any]) -> bool:
+    return str(sf.get("platform") or "") == "youtube" or "youtu" in str(sf.get("url") or "")
+
+
 def _fetch_via_relay(job_id: str, sf: Dict[str, Any], mode: str, s3_input: str, tmp_dir: Path) -> Dict[str, Any]:
     """-> the same dict as fetch_source(); SourceFetchError for user-facing reasons, SOURCE_BOT_CHECK if no relay could."""
     from scripts import yt_relay
@@ -907,12 +915,22 @@ def process_job(job: dict, worker_id: str) -> None:
             from scripts.source_fetch import SourceFetchError, fetch_source
             try:
                 try:
-                    if _yt_direct_blocked(sf):
+                    if sf.get("prefetched"):
+                        # 2026-11-19 YouTube patience (scripts/yt_wait.py): a relay already put the file into s3_input
+                        # while the job waited in 'source_wait' -> read it like an uploaded file
+                        dest = tmp_dir / "input.mp4"
+                        download_file(s3_input, dest)
+                        got = {"path": dest, "duration": sf.get("prefetched_duration"), "bytes": dest.stat().st_size,
+                               "relay": sf.get("prefetched_relay")}
+                        logger.info("[worker] prefetched source job_id=%s relay=%s", job_id, sf.get("prefetched_relay"))
+                    elif _yt_direct_blocked(sf):
                         raise SourceFetchError("SOURCE_BOT_CHECK", "direct path skipped: this host was refused recently")
-                    got = fetch_source(sf, mode, s3_input, tmp_dir,
-                                       background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
+                    else:
+                        got = fetch_source(sf, mode, s3_input, tmp_dir,
+                                           background_upload=os.environ.get("SONYA_SOURCE_UPLOAD_BG", "1") != "0")
                 except SourceFetchError as exc0:
-                    if exc0.code != "SOURCE_BOT_CHECK" or os.environ.get("SONYA_YT_RELAY", "on") == "off":
+                    if sf.get("prefetched") or os.environ.get("SONYA_YT_RELAY", "on") == "off" or not (
+                            exc0.code == "SOURCE_BOT_CHECK" or (_is_youtube(sf) and exc0.code in _YT_RELAY_ALSO)):
                         raise
                     # 2026-11-17: YouTube refuses Vast IPs ("not a bot"). The job stays here; a relay (bot server,
                     # then the owner's Mac mini) downloads it into s3_input and we read it from there.
@@ -929,7 +947,16 @@ def process_job(job: dict, worker_id: str) -> None:
                         logger.warning("[worker] chat fetch did not start job_id=%s", job_id, exc_info=True)
                 _prof.add("download", time.monotonic() - _t_fetch, start=_t_fetch)
             except SourceFetchError as exc:
-                if exc.code == "SOURCE_BOT_CHECK":
+                if exc.code == "SOURCE_BOT_CHECK" or (_is_youtube(sf) and exc.code in _YT_RELAY_ALSO
+                                                     and not sf.get("prefetched")):
+                    if os.environ.get("SONYA_YT_WAIT", "on") != "off":
+                        # 2026-11-19: every path refused -> the job is parked in 'source_wait' (no GPU held); the VPS
+                        # waiter (scripts/yt_wait.py) retries through the relays for up to 2 h. The user sees «Скачиваем
+                        # видео…», never «YouTube не отдал». An API without 'source_wait' simply requeues (retry=True).
+                        logger.error("[worker] youtube: no path could fetch job_id=%s (%s): parked for the waiter",
+                                     job_id, exc.code)
+                        _fail(job_id, "SOURCE_YT_WAIT", "Скачиваем видео… это может занять дольше обычного", retry=True)
+                        return
                     # every path refused: requeue (retry_count bounds it); the host keeps claiming other jobs
                     logger.error("[worker] youtube_bot_check and no relay could fetch job_id=%s: requeue", job_id)
                     _fail(job_id, exc.code, exc.message, retry=True)

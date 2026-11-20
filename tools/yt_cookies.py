@@ -11,6 +11,10 @@ The owner drops cookies.txt (browser extension "Get cookies.txt LOCALLY", signed
        bot  root@147.45.235.79:/etc/sonya-ytrelay/cookies.txt (over ssh stdin)
   3. rotate: when a relay heartbeat reports cookies "expired" for the active entry, it is marked bad and the next one
      is activated; none left -> the relays' copies are removed (the accountant alerts "cookies протухли").
+  4. check (2026-11-19): every live entry is asked youtube.com/account "signed in?" every SONYA_YT_POOL_CHECK_EVERY
+     (45 min), a dead one every 6 h (a false "expired" comes back); the active one dead -> the next live one is pushed.
+     Summary without secrets {total, live, active, ts} -> S3 worker-v2/yt-relay/pool.json -> the accountant alerts when
+     1 live entry is left (warning) or 0 (urgent: «нужен новый файл cookies»).
 The relays use cookies ONLY on a "not a bot" retry (scripts/url_ingest.py). Nothing here prints a cookie value.
 State without secrets: ~/SONYA/ytrelay/secret/pool.json.
 """
@@ -189,18 +193,110 @@ def rotate(st: dict) -> bool:
     return True
 
 
+CHECK_EVERY = float(os.environ.get("SONYA_YT_POOL_CHECK_EVERY", "2700"))
+RECHECK_BAD_EVERY = float(os.environ.get("SONYA_YT_POOL_RECHECK_BAD", str(6 * 3600)))
+
+
+def due_checks(st: dict, now: float) -> list:
+    """Pure: names of the entries whose check is due (live: every CHECK_EVERY, dead: every RECHECK_BAD_EVERY)."""
+    out = []
+    for e in st["entries"]:
+        every = RECHECK_BAD_EVERY if e.get("bad") else CHECK_EVERY
+        if now - float(e.get("checked") or 0) >= every:
+            out.append(e["name"])
+    return out
+
+
+def apply_check(st: dict, name: str, result: str, now: float) -> bool:
+    """Pure: store one check result. 'error' (network) changes nothing. -> True if the entry flipped live/dead."""
+    for e in st["entries"]:
+        if e["name"] != name:
+            continue
+        if result == "error":
+            return False
+        e["checked"], e["check"] = now, result
+        dead = result != "ok"
+        if bool(e.get("bad")) == dead:
+            return False
+        e["bad"] = dead
+        if dead:
+            e["bad_at"] = now
+        else:
+            e.pop("bad_at", None)
+        if name == st.get("active") or not dead:
+            st["pushed"] = False                     # the active one died / a better one came back: activate() again
+        return True
+    return False
+
+
+def _check_entry(name: str) -> str:
+    data = load(name)
+    if not data:
+        return "error"
+    SECRET.mkdir(parents=True, exist_ok=True)
+    os.chmod(SECRET, 0o700)
+    tmp = SECRET / f".check-{name}.txt"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        sys.path.insert(0, str(Path.home() / "SONYA" / "ytrelay" / "current"))
+        from scripts import yt_relay
+        return yt_relay.check_cookie_file(str(tmp))
+    finally:
+        _shred(tmp)
+
+
+def check_pool(st: dict, now: float, checker=None) -> list:
+    """Due checks -> results applied. -> names that flipped."""
+    checker = checker or _check_entry
+    flipped = []
+    for name in due_checks(st, now):
+        r = checker(name)
+        if apply_check(st, name, r, now):
+            flipped.append(name)
+            log(f"{name}: {'live' if r == 'ok' else 'dead (' + r + ')'}")
+    return flipped
+
+
+def summary(st: dict, now: float) -> dict:
+    live = [e["name"] for e in st["entries"] if not e.get("bad")]
+    return {"ts": now, "total": len(st["entries"]), "live": len(live), "active": st.get("active"),
+            "checked": max([float(e.get("checked") or 0) for e in st["entries"]] + [0])}
+
+
+def publish(st: dict, now: float) -> None:
+    """No secrets: counts + entry names only."""
+    try:
+        sys.path.insert(0, str(Path.home() / "SONYA" / "ytrelay" / "current"))
+        from scripts import yt_relay
+        yt_relay.put_json(yt_relay.prefix() + "pool.json", summary(st, now))
+    except Exception as exc:  # noqa: BLE001 - offline: next tick
+        log(f"pool summary not published: {type(exc).__name__}")
+
+
 def tick() -> int:
     st = _state()
+    now = time.time()
     ingest(st)
     rotate(st)
+    try:
+        check_pool(st, now)
+    except Exception as exc:  # noqa: BLE001 - a check never blocks ingest/activate
+        log(f"pool check error: {type(exc).__name__}")
     activate(st)
     _save(st)
+    if now - float(st.get("published") or 0) >= 600 or st.get("pushed") is False:
+        publish(st, now)
+        st["published"] = now
+        _save(st)
     return 0
 
 
 def status() -> int:
     st = _state()
-    print(json.dumps({"active": st.get("active"), "entries": [{k: e[k] for k in ("name", "bad") if k in e} for e in st["entries"]]}))
+    print(json.dumps({"active": st.get("active"),
+                      "entries": [{k: e[k] for k in ("name", "bad", "check", "checked") if k in e} for e in st["entries"]]}))
     return 0
 
 
