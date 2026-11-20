@@ -28,7 +28,17 @@ comment is about. `scripts/shared/stream_comment.py` (reads: chat replay matched
 «пишет / пишут / спрашивают»; payoff options by shared stems; one Gemini call ≤ 1.5 ₽), pictures and the glitch in
 `scripts/shared/comment_card.py`, chat replay in `scripts/shared/stream_chat.py` (the worker fetches Twitch VOD chat
 over GQL / YouTube live_chat with yt-dlp next to the source while ASR runs). Chosen alone → only comment clips
-(regular ones if none found); «Авто» → ≤ 2 comment clips with editor score ≥ 70.
+(regular ones if none found); «Авто» → ≤ 2 comment clips with final ≥ 78.
+
+**v2 «жесть» (2026-11-20, owner: «надо искать какую-то жесть, долбанину»):** one Gemini call (≤ 1.5 ₽) rates
+every candidate's *spice* (provocation / absurd / roast / scandal / shock / lewd / dark humour / troll) and the
+streamer's *reaction* to the comment itself; the local reaction (loudness, laughs, reply length, pitch, chat burst,
+webcam motion inside the OBS webcam rect vs. the 8 s before the read) is blended in. Taken only when spice ≥ 78
+(ASR-only reads ≥ 84), reaction ≥ 50, final = 0.6·spice + 0.4·reaction (0.3·editor + 0.7·signals) ≥ 76, ≤ 3 per job. Greetings / thanks /
+donations, routine questions and requests never qualify; platform-unsafe ones (calls to violence, extremism,
+hate by nation / race / religion, suicide) are dropped by a local filter and by the editor — мат / пошлость /
+троллинг / чёрный юмор are fine (titles get мат masked). No editor verdict or nothing sharp → no comment clips
+(the regular Streamer moments). `selection.comment.board` lists every candidate with its scores and decision.
 
 ## Switches
 
@@ -40,5 +50,6 @@ over GQL / YouTube live_chat with yt-dlp next to the source while ASR runs). Cho
 | `params.webcam_detector` / `STREAMER_WEBCAM_DETECTOR` | false | YOLO webcam box as a seed |
 | `params.chat_path` | — | Twitch (TwitchDownloader JSON) / YouTube live chat replay |
 | `STREAMER_COMMENT` / `params.comment_moments` | true | «Завозный коммент» pass (off = no comment clips at all) |
+| `STREAMER_COMMENT_CAM` | true | webcam motion as a reaction signal (off = audio / speech / chat only) |
 | `STREAMER_CHAT_FETCH` | on | worker fetches the VOD chat for streamer jobs by link |
 | `STREAMER_CHAT_WAIT_SEC` | 180 | how long the runner waits for a chat fetch still running |
