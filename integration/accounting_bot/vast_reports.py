@@ -26,7 +26,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
 
-KEY_RE = re.compile(r"^vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})$")
+# 2026-11-19: + the ops alerts of accounting/balance.ops_alert (vast-balance:critical:N, yt-wait:…, fleet-budget:…);
+# before, they were claimed and never delivered (the key did not match on either side).
+KEY_RE = re.compile(r"^(vast-(daily:\d{4}-\d{2}-\d{2}|monthly:\d{4}-\d{2}|alert:\d{4}-\d{2}-\d{2})"
+                    r"|[a-z][a-z0-9-]{1,40}(:[A-Za-z0-9._-]{1,64}){1,4})$")
 BASE = "/api/internal/accounting/vast/"
 MAX_TEXT = 3900                        # Telegram limit is 4096
 
