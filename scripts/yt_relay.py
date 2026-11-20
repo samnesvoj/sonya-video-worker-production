@@ -274,18 +274,15 @@ def run_canary(url: str = CANARY_URL) -> Dict[str, Any]:
             url_ingest.cleanup(path)
 
 
-def check_cookies() -> str:
-    """'none' | 'ok' | 'expired' | 'error'. Loads the cookie jar and asks youtube.com whether we are signed in.
-    Never logs a cookie value."""
+def check_cookie_file(path: str) -> str:
+    """'ok' | 'expired' | 'error' for ONE Netscape cookies file: asks youtube.com whether it is signed in.
+    Never logs a cookie value. Used by the relays (active file) and tools/yt_cookies.py (every pool entry)."""
     from scripts import url_ingest
-    if not url_ingest.cookies_configured():
-        return "none"
     import http.cookiejar
     import requests
     try:
-        with url_ingest._CookieCopy() as ck:
-            jar = http.cookiejar.MozillaCookieJar(ck)
-            jar.load(ignore_discard=True, ignore_expires=True)
+        jar = http.cookiejar.MozillaCookieJar(path)
+        jar.load(ignore_discard=True, ignore_expires=True)
         r = requests.get("https://www.youtube.com/account", cookies=jar, timeout=30, allow_redirects=True,
                          headers={"User-Agent": url_ingest._UA, "Accept-Language": "en-US,en;q=0.8"})
         if '"LOGGED_IN":true' in r.text or '"logged_in":"1"' in r.text.lower():
@@ -294,6 +291,65 @@ def check_cookies() -> str:
     except Exception as exc:  # noqa: BLE001
         logger.warning("[yt_relay] cookie check error %s", type(exc).__name__)
         return "error"
+
+
+def check_cookies() -> str:
+    """'none' | 'ok' | 'expired' | 'error' of the relay's active cookies (SONYA_YT_COOKIES)."""
+    from scripts import url_ingest
+    if not url_ingest.cookies_configured():
+        return "none"
+    with url_ingest._CookieCopy() as ck:
+        return check_cookie_file(ck) if ck else "none"
+
+
+# ── waiter side (scripts/yt_wait.py on the VPS: a job parked in 'source_wait', retried with growing pauses) ──
+def submit(job_id: str, sf: Dict[str, Any], mode: str, s3_key: str, now: Optional[float] = None) -> float:
+    """A fresh request for the relays: the statuses of the previous round are removed first (a relay never takes a
+    job it already has a terminal status for). -> created ts."""
+    now = now or time.time()
+    old = list_keys(f"{prefix()}st/{job_id}/")
+    if old:
+        delete_keys(old)
+    put_json(f"{prefix()}req/{job_id}.json", {"job_id": job_id, "sf": sf, "mode": mode, "s3_key": s3_key, "created": now,
+                                              "max_height": os.environ.get("SONYA_YTDLP_MAX_HEIGHT", "1080"),
+                                              "waiter": True})
+    return now
+
+
+def withdraw(job_id: str) -> None:
+    c, b = _s3()
+    try:
+        c.delete_object(Bucket=b, Key=f"{prefix()}req/{job_id}.json")
+    except Exception:  # noqa: BLE001 - the janitor removes it a day later
+        pass
+
+
+def outcome(job_id: str, sts: Dict[str, Dict[str, Any]], hbs: Dict[str, Dict[str, Any]], created: float, now: float,
+            wait_alive: float = 120.0) -> Dict[str, Any]:
+    """Pure: where one relay round stands. -> {"kind": "done"|"user"|"retry"|"wait", ...}
+       done  - a relay uploaded the file (relay, duration)
+       user  - a real answer about the video (private, too long, ...): code, message - no retry changes it
+       retry - every alive relay refused / none alive / stalled: reason
+       wait  - still working"""
+    done = [n for n, s in sts.items() if s.get("state") == "done"]
+    if done:
+        return {"kind": "done", "relay": done[0], "duration": sts[done[0]].get("duration")}
+    failed = {n: s for n, s in sts.items() if s.get("state") == "failed"}
+    for code in _USER_CODES_ORDER:
+        for s in failed.values():
+            if s.get("code") == code:
+                return {"kind": "user", "code": code, "message": s.get("message") or code}
+    alive = {n for n, h in hbs.items() if h.get("fresh")}
+    running = [n for n, s in sts.items() if s.get("state") not in TERMINAL and now - float(s.get("ts") or 0) <= STATUS_STALE]
+    held = any(h.get("fresh") and job_id in (h.get("active") or []) for h in hbs.values())   # a live relay holds it
+    if not running and alive and alive <= set(failed):
+        return {"kind": "retry", "reason": "all relays failed: " + ", ".join(f"{n}={s.get('code')}" for n, s in sorted(failed.items()))}
+    if not alive and not running and now - created > wait_alive:
+        return {"kind": "retry", "reason": "no relay alive"}
+    last = max([float(s.get("ts") or 0) for s in sts.values()] + [created])
+    if not running and not held and now - last > STATUS_STALE + 60:
+        return {"kind": "retry", "reason": "relays stalled"}
+    return {"kind": "wait"}
 
 
 class Relay:
@@ -449,7 +505,7 @@ class Relay:
                 mt = os.path.getmtime(ck) if ck and os.path.exists(ck) else 0.0
                 if mt != getattr(self, "_ck_mtime", None):      # new / rotated / removed cookies: check now
                     self._ck_mtime, self.cookies_checked = mt, 0.0
-                if now - self.cookies_checked > 6 * 3600:
+                if now - self.cookies_checked > float(os.environ.get("SONYA_YT_COOKIE_CHECK_EVERY", "2700")):
                     self.cookies, self.cookies_checked = check_cookies(), now
                 if now - last_canary > float(os.environ.get("SONYA_YT_CANARY_EVERY", "3600")):
                     last_canary = now
