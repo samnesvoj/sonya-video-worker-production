@@ -11,7 +11,7 @@ echo "$1  $A/scripts/prod_generation_api.py" | md5sum -c --quiet
 echo "$2  $W/auth.js" | md5sum -c --quiet
 install -m0644 $S/api/bot_bridge_routes.py $A/scripts/bot_bridge_routes.py
 install -m0644 $S/api/prod_generation_api.py $A/scripts/prod_generation_api.py
-install -m0644 $S/api/test_bot_bridge.py $A/tests/test_bot_bridge.py
+install -m0644 $S/api/test_bot_bridge.py $A/tests/test_bot_bridge.py   # = bot_bridge_api_tests.py here (the site repo runs it; this repo has no site API)
 systemctl restart sonya-api; sleep 5; systemctl is-active sonya-api
 curl -sf -o /dev/null http://127.0.0.1:8000/api/health && echo api health ok || { echo "API DOWN - rolling back"; install -m0644 $B/prod_generation_api.py $A/scripts/prod_generation_api.py; rm -f $A/scripts/bot_bridge_routes.py; systemctl restart sonya-api; exit 1; }
 install -m0644 $S/web/auth.js $W/auth.js
