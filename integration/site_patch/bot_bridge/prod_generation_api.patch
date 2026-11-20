@@ -1,0 +1,11 @@
+--- a/scripts/prod_generation_api.py	2026-11-20 10:05:29
++++ b/scripts/prod_generation_api.py	2026-11-20 14:20:12
+@@ -398,6 +398,8 @@
+ app.include_router(direct_upload_router)
+ from scripts.presets_routes import router as presets_router  # 2026-11-20 «Пресеты» app: GET/PUT /api/presets
+ app.include_router(presets_router)
++from scripts.bot_bridge_routes import router as bot_bridge_router  # 2026-11-20 @sonya_group_ai: link -> mode -> plan -> job
++app.include_router(bot_bridge_router)
+ 
+ # ── Mode registry ——————————————————————————————————————————————————————————————
+ 

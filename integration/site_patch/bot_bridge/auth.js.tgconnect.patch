@@ -1,0 +1,60 @@
+--- a/auth.js	2026-11-17 03:54:30
++++ b/auth.js	2026-11-20 14:33:05
+@@ -1196,6 +1196,9 @@
+       : `С возвращением, ${user.email}!`,
+       'success');
+   }
++
++  // Came from the bot («Войти и привязать», ?tg=connect): finish the Telegram link right after sign-in.
++  if (user && _pendingTgConnect) { _pendingTgConnect = false; _tgConnectGo(); return; }
+ 
+   // Guest picked a plan before signing in -- bring them straight back to
+   // it (same mode, plan and consent), one click away from paying.
+@@ -1749,6 +1752,31 @@
+ }
+ 
+ /* ─────────────────────────────────────────────
++   TELEGRAM CONNECT (from the bot: /?tg=connect)
++───────────────────────────────────────────── */
++let _pendingTgConnect = false;
++async function _tgConnectGo() {
++  try {
++    const st = await apiFetch('/telegram/status');
++    if (st.ok) {
++      const d = await safeJson(st);
++      if (d && d.linked) {
++        showToast('Telegram уже подключён — вернитесь в бота и нажмите «Я привязал — продолжить».', 'success');
++        return;
++      }
++    }
++    const res = await apiFetch('/telegram/link-token', { method: 'POST', body: '{}' });
++    const data = await safeJson(res);
++    if (res.ok && data && data.deep_link) {
++      showToast('Открываем Telegram…', 'info');
++      window.location.href = data.deep_link;
++      return;
++    }
++  } catch (e) { /* fall through */ }
++  showToast('Не удалось подключить Telegram. Попробуйте ещё раз.', 'error');
++}
++
++/* ─────────────────────────────────────────────
+    TOAST
+ ───────────────────────────────────────────── */
+ function showToast(message, type = 'info') {
+@@ -1913,6 +1941,15 @@
+   // instead of the paywall.
+   refreshAuthState().then(function () {
+     var params = new URLSearchParams(window.location.search);
++    if (params.get('tg') === 'connect') {
++      // @sonya_group_ai «Войти и привязать» (2026-11-20): signed in -> the existing link-token -> back to the bot;
++      // a guest signs in first (the bot keeps the video link and continues after /start TOKEN).
++      params.delete('tg');
++      var q = params.toString();
++      history.replaceState(null, '', window.location.pathname + (q ? '?' + q : '') + window.location.hash);
++      if (authState.user) _tgConnectGo();
++      else { _pendingTgConnect = true; openAuthModal('login', 'Войдите, чтобы подключить Telegram к SONYA'); }
++    }
+     if (params.get('paywall') === '1') {
+       if (authState.user) openPaywallModal();
+       else openAuthModal('login');
