@@ -295,3 +295,18 @@ def test_capacity_state_file_and_alerts(tmp_path, ledger):
     assert c["alerts"]                                                         # reminder
     c = cp.tick(p, 0, 1, Decimal("20"), [], NOW + 8000, ledger=ledger)
     assert c["state"] == "ok" and any(a.startswith("vast-nofunds-ok") for a in c["alerts"])
+
+
+def test_ops_alert_keys_are_deliverable():
+    """2026-11-19: ops alerts (balance, YouTube, budget) were claimed by the bot and never delivered: key format."""
+    from accounting.internal_api import KEY_RE as api_re
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("vr", str(Path(__file__).resolve().parents[1] / "integration/accounting_bot/vast_reports.py"))
+    vr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vr)
+    for k in ("vast-daily:2026-11-19", "vast-monthly:2026-11", "vast-balance:critical:166208", "fleet-budget:day_limit:20775",
+              "yt-wait:1795151096:0", "yt-wait-gaveup:551ea1ed-be5e-4d59-bbbe-000646214dca", "yt-pool-0:83108",
+              "vast-nofunds:1795151096:1", "yt-cookies:bot:20776"):
+        assert api_re.match(k) and vr.KEY_RE.match(k), k
+    for k in ("../x", "a", "yt-wait", "yt wait:1", "x:" + "a" * 70, "vast-daily:2026-11-19/../sent"):
+        assert not api_re.match(k) and not vr.KEY_RE.match(k), k
