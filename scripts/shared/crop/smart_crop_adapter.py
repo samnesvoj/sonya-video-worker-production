@@ -986,13 +986,17 @@ def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[fl
                   track: Dict[str, Any], clip_start: float, *, fps: float = 30.0, has_audio: bool = True,
                   insert: Optional[Dict[str, Any]] = None, subtitle_path: Optional[str] = None,
                   encoder_args: Optional[List[str]] = None, report: Optional[Dict[str, Any]] = None,
-                  audio_gain_db: Optional[float] = None) -> str:
+                  audio_gain_db: Optional[float] = None, overlays: Optional[List[Dict[str, Any]]] = None,
+                  vfx: Optional[str] = None) -> str:
     """ONE ffmpeg pass from the original source: every piece is its own accurately seeked input (a jump cut
     costs no re-encode), the pieces are concatenated, cropped by the track (render_tracked's graph), an optional
     short full-screen insert (``insert`` = {"path", "at" (cut-timeline s), "dur", "gain_db", "has_audio"}) is
     spliced in between two pieces, then subtitles (ASS on the final timeline) are burned.
     Audio: 15 ms fades at every jump (no clicks), the insert gets ``gain_db`` (loudness-matched by the caller)
-    and 60 ms fades in / out. ``audio_gain_db``: the clip's loudness step (scripts/shared/loudness.py) on the result."""
+    and 60 ms fades in / out. ``audio_gain_db``: the clip's loudness step (scripts/shared/loudness.py) on the result.
+    ``overlays`` = [{"path": png, "x", "y", "t0", "t1", "fade_in", "fade_out"}] (output seconds; the «Завозный
+    коммент» chat card / title), ``vfx`` = extra comma-joined video filters on the final timeline (the glitch cut);
+    both go under the subtitles."""
     from scripts.shared.jumpcut import total
     input_video_path, output_path = os.path.abspath(input_video_path), os.path.abspath(output_path)
     ps = [(float(a), float(d)) for a, d in pieces if d > 0]
@@ -1060,8 +1064,22 @@ def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[fl
         fc.append(f"[ovg0][cag0][iv][ia][ovg1][cag1]concat=n=3:v=1:a=1[vcat][acat]")
     else:
         fc.append("[ovg0]null[vcat];[cag0]anull[acat]")
+    vlab = "vcat"
+    for k, ov in enumerate(overlays or []):
+        t0, t1 = float(ov["t0"]), float(ov["t1"])
+        if t1 <= t0:
+            continue
+        j = len([x for x in inputs if x == "-i"])
+        inputs += ["-loop", "1", "-framerate", f"{fps:g}", "-t", f"{t1 + 0.1:.4f}", "-i", os.path.abspath(ov["path"])]
+        fi, fo = float(ov.get("fade_in", 0.0)), float(ov.get("fade_out", 0.0))
+        fades = (f",fade=t=in:st={t0:.4f}:d={fi:.3f}:alpha=1" if fi > 0 else "") + \
+                (f",fade=t=out:st={max(t0, t1 - fo):.4f}:d={fo:.3f}:alpha=1" if fo > 0 else "")
+        fc.append(f"[{j}:v]format=rgba,setpts=PTS-STARTPTS{fades}[ol{k}]")
+        fc.append(f"[{vlab}][ol{k}]overlay=x={int(ov['x'])}:y={int(ov['y'])}:eof_action=pass:repeatlast=0:"
+                  f"enable='between(t,{t0:.4f},{t1:.4f})'[vo{k}]")
+        vlab = f"vo{k}"
     cwd = None
-    tail = "null"
+    tail = vfx or "null"
     if subtitle_path:
         sub = Path(subtitle_path).resolve()
         if not re.fullmatch(r"[A-Za-z0-9._-]+", sub.name):
@@ -1076,7 +1094,7 @@ def render_pieces(input_video_path: str, output_path: str, pieces: List[Tuple[fl
             mask.write_text(glass_mask_ass(json.loads(glass.read_text(encoding="utf-8"))), encoding="utf-8")
             tail = _glass_graph(tail, mask.name)
         tail += f",ass=filename={sub.name}:fontsdir='{fd}'"
-    fc.append(f"[vcat]{tail},format=yuv420p[vout]")
+    fc.append(f"[{vlab}]{tail},format=yuv420p[vout]")
     from scripts.shared.loudness import audio_filter
     a_out = "[acat]"
     if audio_filter(audio_gain_db):

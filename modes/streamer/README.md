@@ -20,6 +20,16 @@ measurements behind every choice: `docs/STREAMER_V2.md`.
 5. **Render**: one ffmpeg pass from the original source (lanczos, burned subtitles on the seam, 60 fps kept,
    6 Mb/s: NVENC on Vast, libx264 with a VBV cap on CPU).
 
+## «Завозный коммент» (moment type `comment`, 2026-11-19)
+
+The streamer reads a viewer's comment aloud and reacts → chat card (nick, colour, text) while it is read, the big
+two-line title for the first ~3.5 s, the reaction, and — when the stream has it — a glitch cut to the moment the
+comment is about. `scripts/shared/stream_comment.py` (reads: chat replay matched to the ASR words, else ASR cues
+«пишет / пишут / спрашивают»; payoff options by shared stems; one Gemini call ≤ 1.5 ₽), pictures and the glitch in
+`scripts/shared/comment_card.py`, chat replay in `scripts/shared/stream_chat.py` (the worker fetches Twitch VOD chat
+over GQL / YouTube live_chat with yt-dlp next to the source while ASR runs). Chosen alone → only comment clips
+(regular ones if none found); «Авто» → ≤ 2 comment clips with editor score ≥ 70.
+
 ## Switches
 
 | env / param | default | |
@@ -29,3 +39,6 @@ measurements behind every choice: `docs/STREAMER_V2.md`.
 | `STREAMER_HWACCEL` | — | `cuda` on Vast, `videotoolbox` on a Mac |
 | `params.webcam_detector` / `STREAMER_WEBCAM_DETECTOR` | false | YOLO webcam box as a seed |
 | `params.chat_path` | — | Twitch (TwitchDownloader JSON) / YouTube live chat replay |
+| `STREAMER_COMMENT` / `params.comment_moments` | true | «Завозный коммент» pass (off = no comment clips at all) |
+| `STREAMER_CHAT_FETCH` | on | worker fetches the VOD chat for streamer jobs by link |
+| `STREAMER_CHAT_WAIT_SEC` | 180 | how long the runner waits for a chat fetch still running |
