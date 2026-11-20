@@ -15,6 +15,7 @@ Pictures and effects of the «Завозный коммент» clip (scripts/sh
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -24,6 +25,15 @@ TITLE_FONT = "Montserrat-Black.ttf"
 CARD_BOLD, CARD_TEXT = "Rubik-Bold.ttf", "Rubik-Medium.ttf"
 ACCENTS = ("#9B4DFF", "#FFE01A", "#FF3D8E")             # purple / yellow / pink, like the reference
 TWITCH_DEFAULT = ("#FF4A4A", "#1E90FF", "#00C46A", "#B266FF", "#FF7F27", "#FF69B4", "#2EC4B6", "#DAA520")
+
+
+_EMOJI = re.compile("[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0000FE00-\U0000FE0F\U0000200D\U00002B00-\U00002BFF"
+                    "\U0001F1E6-\U0001F1FF\U000E0000-\U000E007F]+")
+
+
+def clean_text(text: str) -> str:
+    """Emoji have no glyphs in the card fonts (they come out as boxes): dropped, spaces collapsed."""
+    return re.sub(r"\s+", " ", _EMOJI.sub(" ", text or "")).strip()
 
 
 def _font(name: str, size: int):
@@ -67,6 +77,8 @@ def card_png(out: str, author: str, text: str, color: Optional[str] = None, *, p
              max_w: int = 920, size: int = 44, max_lines: int = 4) -> Dict[str, Any]:
     """-> {"path", "w", "h"}. The plate is semi-opaque black (#0E0E10 @ 88 %) with 22 px rounded corners."""
     from PIL import Image, ImageDraw
+    text = clean_text(text) or "…"
+    author = clean_text(author)
     hidden = not author or author == "зритель"
     nick = "зритель" if hidden else author
     fb, ft = _font(CARD_BOLD, size), _font(CARD_TEXT, size)
@@ -125,7 +137,7 @@ def split_title(text: str) -> List[str]:
 def title_png(out: str, text: str, accent: Sequence[str] = (), *, max_w: int = 1000, size: int = 84) -> Dict[str, Any]:
     """Heavy caps, white with accent words coloured; 9 px black outline + a soft shadow. -> {"path", "w", "h"}"""
     from PIL import Image, ImageDraw, ImageFilter
-    text = " ".join(text.upper().split())
+    text = " ".join(clean_text(text).upper().split())
     acc = [a.upper() for a in accent if a]
     if not acc:                                        # no accents given: the first word and the last one
         ws = text.split()
@@ -171,8 +183,8 @@ def title_png(out: str, text: str, accent: Sequence[str] = (), *, max_w: int = 1
 def layout(seam_y: Optional[int], title_h: int, card_h: int) -> Tuple[int, int]:
     """(title_y, card_y) in the 1080×1920 frame. Template 1/2/3 (webcam on top, game below, subtitles just above
     the seam): the title sits in the lower part of the webcam above the subtitle band, the card at the top of the
-    game. A low seam (template 4: full game, subtitles at ~1500): the title near the top, the card under it."""
-    if seam_y and 600 <= seam_y <= 1150:
+    game (seam 600–1450 px). A low seam (template 4: full game, subtitles at ~1500): the title near the top, the card under it."""
+    if seam_y and 600 <= seam_y <= 1450:
         title_y = max(40, seam_y - 250 - title_h)
         card_y = seam_y + 70
     else:

@@ -220,6 +220,8 @@ def test_nick_color():
 
 
 def test_layout_positions():
+    ty, cy = cc.layout(1180, 170, 220)
+    assert ty + 170 <= 1180 - 200 and cy > 1180
     ty, cy = cc.layout(960, 170, 220)
     assert ty + 170 <= 960 - 200 and cy > 960                                 # title above the subtitle band, card in the game
     ty, cy = cc.layout(1500, 170, 220)
@@ -315,3 +317,8 @@ def test_routine_and_unsure_payoff():
     assert "payoff" not in segs[0]                                          # not sure → no continuation
     assert segs[0]["start"] + segs[0]["duration"] - 110.0 >= scm.MIN_REACTION_SEC   # reaction never cut to nothing
     assert scm._ROUTINE.search("какой у тебя фпс в 4K") and not scm._ROUTINE.search("ты реально первый в стрипухе")
+
+
+def test_card_drops_emoji(tmp_path):
+    assert cc.clean_text("ПЛЯЖ 🏝️ ДАВАЙ 😂😂") == "ПЛЯЖ ДАВАЙ"
+    assert cc.card_png(str(tmp_path / "e.png"), "x", "🏝️")["w"] > 0

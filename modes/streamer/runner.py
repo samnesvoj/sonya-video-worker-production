@@ -325,6 +325,7 @@ def analyze(
             "webcam_boxes_found": 0, "active_speaker_segs": 0}
 
 
+COMMENT_JUMP_GAP = 1.6       # «Завозный коммент»: only pauses longer than this are cut (the reaction stays whole)
 AUTO_COMMENT_SCORE = 70.0     # «Авто»: a comment clip joins the others only when the editor rates it this high
 
 
@@ -509,9 +510,11 @@ def compose_one(
     fps = float(hints.get("fps") or 30.0)
     words = segment.get("words") or []
     loud = [0.0] * int(start) + list(segment.get("loud") or [])
+    gap = float(crop.get("jump_gap", 0.7))
+    if isinstance(segment.get("comment"), dict):      # a reaction is often wordless (laughing, staring): gentler cuts
+        gap = max(gap, COMMENT_JUMP_GAP)
     if crop.get("jump_cuts", True) and words:
-        pieces = jc.pieces(words, start, start + dur, max_gap=float(crop.get("jump_gap", 0.7)), loud=loud or None,
-                           fps=fps)
+        pieces = jc.pieces(words, start, start + dur, max_gap=gap, loud=loud or None, fps=fps)
     else:
         pieces = [(start, dur)]
     li = segment.get("lead_in")
@@ -591,7 +594,7 @@ def compose_one(
 def _comment_overlays(segment: Dict[str, Any], com: Dict[str, Any], pieces, out_dur: float,
                       glitch_at: Optional[float], track: Dict[str, Any], output_path: str
                       ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """«Завозный коммент»: the chat card while the comment is read (+1.2 s, ≥ 3 s on screen), the big two-line title
+    """«Завозный коммент»: the chat card while the comment is read (+1.2 s, ≥ 4 s on screen), the big two-line title
     for the first ~3.5 s (owner: «даётся жирным текстом и пропадает»), the glitch at the cut to the payoff."""
     from scripts.shared import comment_card as cc
     from scripts.shared import jumpcut as jc
@@ -607,7 +610,7 @@ def _comment_overlays(segment: Dict[str, Any], com: Dict[str, Any], pieces, out_
     t1 = jc.to_output(float(com.get("t1", 0.0)), pieces)
     t0 = 0.0 if t0 is None or t0 < 0.6 else t0 - 0.2
     end = (t1 if t1 is not None else t0 + 3.0) + 1.2
-    end = max(end, t0 + 3.0)
+    end = max(end, t0 + 4.0)
     if glitch_at is not None:
         end = min(end, glitch_at - 0.15)
     end = min(end, out_dur)

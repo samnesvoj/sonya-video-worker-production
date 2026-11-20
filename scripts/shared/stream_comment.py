@@ -204,8 +204,8 @@ def reads_from_asr(words, sents: Sequence[Tuple[int, int]]) -> List[Dict[str, An
 
 # ── 2. reaction + local score ───────────────────────────────────────────────
 
-def _reaction(words, sents, r: Dict[str, Any], min_after: float = 6.0, max_after: float = 22.0) -> int:
-    """Index of the last word of the reaction: a sentence end 6–22 s after the read (else the cap)."""
+def _reaction(words, sents, r: Dict[str, Any], min_after: float = 8.0, max_after: float = 25.0) -> int:
+    """Index of the last word of the reaction: a sentence end 8–25 s after the read (else the cap)."""
     end_t = r["t1"]
     best = r["last"]
     for a, b in sents:
@@ -249,7 +249,7 @@ def local_score(r: Dict[str, Any], words, hits, loud: Optional[Sequence[float]])
 # ── 3. payoff options («продолжение») ───────────────────────────────────────
 
 def payoff_options(words, sents, r: Dict[str, Any], excite: Optional[np.ndarray], n: int = 3,
-                   win: float = 16.0, exclude: float = 45.0) -> List[Dict[str, Any]]:
+                   win: float = 16.0, exclude: float = 90.0) -> List[Dict[str, Any]]:
     """Transcript windows elsewhere in the stream that share the comment's content stems. -> [{start, end, text,
     overlap, rel}] (rel = minutes from the read, negative = before it)."""
     stems = {_stem(t) for t in _content([_norm(x) for x in r["text"].split()])}
