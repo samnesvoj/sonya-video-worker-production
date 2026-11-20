@@ -1,0 +1,2547 @@
+From 3a6131e4730835b9ad2e6e0e2f3a09ca5887877f Mon Sep 17 00:00:00 2001
+From: samnesvoj <samnesvoj0@gmail.com>
+Date: Fri, 20 Nov 2026 14:53:25 -0800
+Subject: [PATCH 2/2] =?UTF-8?q?feat:=20link=20=E2=86=92=20mode=20=E2=86=92?=
+ =?UTF-8?q?=20plan=20=E2=86=92=20clips=20right=20in=20the=20bot?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A YouTube / VK / Rutube / Twitch link or a video file (≤ 20 MB) gets a SONYA card: preview, title,
+length (yt-dlp metadata, no download), «Что сделаем?» — Вирал · Стример · Образовательный ·
+Сторителлинг · Хуки · BEEP (Трейлер for admins), Стандарт / 2K, «Стиль: <preset> · изменить».
+
+- not linked -> «Войти и привязать» (site /?tg=connect -> existing link-token deep link); after
+  /start TOKEN the same link continues by itself
+- no access -> the plans of that mode from the site's pricing (prices unchanged), «Оформить» ->
+  the site's ЮKassa checkout; the tracker sees the payment and starts without a click
+  («Я оплатил — запустить» too)
+- longer than the plan -> «Первые N мин» / «Указать начало» (25, 1:10:00, 1ч 5м)
+- one progress message: Скачиваем видео → Анализ → Монтаж → Готово, polite notices (YouTube
+  waits, «высокая нагрузка»); clips come via sonya-tg-deliver, then «Ещё нарезку» / «Открыть в Работах»
+- all via the API bot bridge (/api/telegram/bot/*, SONYA_BOT_BRIDGE_SECRET): the site's own
+  entitlements, quotas, 2K units, length caps and refunds
+- menu «Тарифы» shows the live plans; channel gate and every command unchanged
+- off switch BOT_CUT_FLOW=off; tools/dryrun = fake Telegram + test-mode payment dry run
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bot/cut_texts.py           | 324 +++++++++++++++++++++++++
+ bot/handlers/__init__.py   |   3 +-
+ bot/handlers/cut.py        | 147 ++++++++++++
+ bot/handlers/payment.py    |  18 +-
+ bot/handlers/start.py      |   9 +
+ bot/services/cut_api.py    | 116 +++++++++
+ bot/services/cut_flow.py   | 476 +++++++++++++++++++++++++++++++++++++
+ bot/services/cut_runs.py   | 133 +++++++++++
+ bot/services/media.py      | 163 +++++++++++++
+ main.py                    |  20 ++
+ tests/test_cut_flow.py     | 360 ++++++++++++++++++++++++++++
+ tools/dryrun/fake_tg.py    | 244 +++++++++++++++++++
+ tools/dryrun/run_sim.py    | 226 ++++++++++++++++++
+ tools/dryrun/sim_helper.py | 102 ++++++++
+ 14 files changed, 2335 insertions(+), 6 deletions(-)
+ create mode 100644 bot/cut_texts.py
+ create mode 100644 bot/handlers/cut.py
+ create mode 100644 bot/services/cut_api.py
+ create mode 100644 bot/services/cut_flow.py
+ create mode 100644 bot/services/cut_runs.py
+ create mode 100644 bot/services/media.py
+ create mode 100644 tests/test_cut_flow.py
+ create mode 100644 tools/dryrun/fake_tg.py
+ create mode 100644 tools/dryrun/run_sim.py
+ create mode 100644 tools/dryrun/sim_helper.py
+
+diff --git a/bot/cut_texts.py b/bot/cut_texts.py
+new file mode 100644
+index 0000000..494cf5b
+--- /dev/null
++++ b/bot/cut_texts.py
+@@ -0,0 +1,324 @@
++"""Texts + keyboards of «ссылка → режим → нарезка» (owner 2026-11-20). One tone: short, calm, Russian, HTML,
++almost no emoji (a SONYA emoji pack replaces the few marks later: ✓ ● ○ are plain characters).
++Pure functions — tested in tests/test_cut_texts.py.
++"""
++
++from __future__ import annotations
++
++from html import escape
++
++from aiogram.types import InlineKeyboardButton as B
++from aiogram.types import InlineKeyboardMarkup
++
++from .services.media import PLATFORM_RU, fmt_duration
++
++MANAGER_URL = "https://t.me/SonyaAiManager"
++
++CLIPS = {
++    "viral": "Вирал", "streamer": "Стример", "educational": "Образовательный",
++    "story": "Сторителлинг", "hooks": "Хуки", "beep": "BEEP", "trailer": "Трейлер",
++}
++HIGH_CLIPS = ("viral", "story", "hooks")
++PLAN_MODE_OF_CLIP = {"viral": "cut", "story": "cut", "hooks": "cut", "educational": "cut",
++                     "streamer": "streamer", "beep": "beep", "trailer": "trailer"}
++PLAN_MODE_RU = {"cut": "Нарезка", "streamer": "Стример", "beep": "BEEP", "gen": "Gen", "trailer": "Трейлер"}
++STEPS = (("download", "Скачиваем видео"), ("analyze", "Анализ"), ("edit", "Монтаж"), ("done", "Готово"))
++
++
++def plural(n: int, one: str, few: str, many: str) -> str:
++    n10, n100 = n % 10, n % 100
++    if n10 == 1 and n100 != 11:
++        return one
++    if 2 <= n10 <= 4 and not 12 <= n100 <= 14:
++        return few
++    return many
++
++
++def rub(amount) -> str:
++    n = int(amount)
++    return f"{n:,}".replace(",", " ") + " ₽"
++
++
++def minutes_ru(m: int) -> str:
++    if m >= 60 and m % 60 == 0:
++        h = m // 60
++        return f"{h} ч"
++    return f"{m} мин"
++
++
++def cb(run_id: str, action: str, arg: str = "") -> str:
++    return f"cut:{run_id}:{action}" + (f":{arg}" if arg else "")
++
++
++# ── the card ──────────────────────────────────────────────────────────────────
++
++def header(run) -> str:
++    title = escape(run.title) if run.title else ("Видео из Telegram" if run.file_id else "Видео по ссылке")
++    bits = [PLATFORM_RU.get(run.platform, "Ссылка")]
++    if run.duration:
++        bits.append(fmt_duration(run.duration))
++    return f"<b>{title}</b>\n{' · '.join(bits)}"
++
++
++def card_text(run, quality_available: bool = True) -> str:
++    lines = [header(run), "", "<b>Что сделаем?</b>"]
++    if quality_available:
++        if run.quality == "high":
++            lines.append("Качество: 2K — резче, примерно в 3 раза дольше, спишется 3 обработки "
++                         "(Вирал, Сторителлинг, Хуки)")
++        else:
++            lines.append("Качество: Стандарт")
++    return "\n".join(lines)
++
++
++def card_keyboard(run, presets_url: str, quality_available: bool = True) -> InlineKeyboardMarkup:
++    rows = [
++        [B(text="Вирал", callback_data=cb(run.id, "m", "viral")),
++         B(text="Стример", callback_data=cb(run.id, "m", "streamer")),
++         B(text="Образовательный", callback_data=cb(run.id, "m", "educational"))],
++        [B(text="Сторителлинг", callback_data=cb(run.id, "m", "story")),
++         B(text="Хуки", callback_data=cb(run.id, "m", "hooks")),
++         B(text="BEEP", callback_data=cb(run.id, "m", "beep"))],
++    ]
++    if run.is_admin:
++        rows.append([B(text="Трейлер · админ", callback_data=cb(run.id, "m", "trailer"))])
++    if quality_available:
++        std = "✓ Стандарт" if run.quality != "high" else "Стандарт"
++        high = "✓ 2K" if run.quality == "high" else "2K"
++        rows.append([B(text=std, callback_data=cb(run.id, "q", "standard")),
++                     B(text=high, callback_data=cb(run.id, "q", "high"))])
++    rows.append([B(text=f"Стиль: {run.preset or 'Стандарт SONYA'} · изменить", url=presets_url)])
++    return InlineKeyboardMarkup(inline_keyboard=rows)
++
++
++# ── account link ──────────────────────────────────────────────────────────────
++
++def link_text(run) -> str:
++    return (f"{header(run)}\n\n<b>Привяжите аккаунт SONYA</b>\n"
++            "Обработки и тариф хранятся в аккаунте на sonya.group. Войдите и подключите Telegram — "
++            "это один раз. Ссылку я запомнил: после привязки сразу продолжу.")
++
++
++def link_keyboard(run, connect_url: str) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup(inline_keyboard=[
++        [B(text="Войти и привязать", url=connect_url)],
++        [B(text="Я привязал — продолжить", callback_data=cb(run.id, "relink"))],
++        [B(text="Назад", callback_data=cb(run.id, "back"))],
++    ])
++
++
++# ── tariffs ───────────────────────────────────────────────────────────────────
++
++def _plan_name(p: dict) -> str:
++    pid = p["plan_id"]
++    if p.get("kind") == "pack":
++        return f"Пакет {PLAN_MODE_RU.get(p['mode'], p['mode'])}"
++    tier = pid.split("_", 1)[-1].capitalize()
++    return tier
++
++
++def _plan_line(p: dict) -> str:
++    if p.get("kind") == "pack":
++        unit = "изображений" if p["mode"] == "gen" else plural(p["ops"], "обработка", "обработки", "обработок")
++        return f"<b>{_plan_name(p)}</b> · {rub(p['price'])}\n{p['ops']} {unit}, не сгорает"
++    ops = plural(p["ops"], "обработка", "обработки", "обработок")
++    return (f"<b>{_plan_name(p)}</b> · {rub(p['price'])}/мес\n"
++            f"{p['ops']} {ops} · видео до {minutes_ru(p['max_source_minutes'])}")
++
++
++def plans_for(plans: list[dict], plan_mode: str) -> list[dict]:
++    order = {"start": 0, "pro": 1, "studio": 2}
++    out = [p for p in plans if p.get("mode") == plan_mode]
++    return sorted(out, key=lambda p: (order.get(p["plan_id"].split("_", 1)[-1], 9), p["price"]))
++
++
++def reason_text(code: str | None, message: str | None) -> str:
++    if code == "FREE_PLAN_USED":
++        return "Бесплатная обработка уже использована."
++    if code == "PLAN_LIMIT_REACHED":
++        return escape(message or "Обработки на тарифе закончились.")
++    if code in ("MODE_NOT_IN_PLAN", "SUBSCRIPTION_EXPIRED"):
++        return escape(message or "Для этого режима нужен тариф.")
++    return escape(message) if message else "Для обработки нужен тариф."
++
++
++def tariffs_text(run, plans: list[dict], plan_mode: str, code: str | None, message: str | None) -> str:
++    mine = plans_for(plans, plan_mode)
++    title = "Пакет BEEP" if plan_mode == "beep" else f"Тариф «{PLAN_MODE_RU.get(plan_mode, plan_mode)}»"
++    parts = [header(run), "", f"<b>{title}</b>", reason_text(code, message), ""]
++    parts += [_plan_line(p) for p in mine]
++    parts += ["", "Оплата картой или СБП через ЮKassa. После оплаты запущу нарезку сам."]
++    return "\n".join(parts)
++
++
++def tariffs_keyboard(run, plans: list[dict], plan_mode: str, tariffs_url: str) -> InlineKeyboardMarkup:
++    mine = plans_for(plans, plan_mode)
++    rows = [[B(text=f"Оформить {_plan_name(p)} · {rub(p['price'])}", callback_data=cb(run.id, "buy", p["plan_id"]))]
++            for p in mine]
++    rows.append([B(text="Все тарифы на сайте", url=tariffs_url)])
++    rows.append([B(text="Назад", callback_data=cb(run.id, "back"))])
++    return InlineKeyboardMarkup(inline_keyboard=rows)
++
++
++def pay_text(run, plan: dict) -> str:
++    name = f"{PLAN_MODE_RU.get(plan['mode'], plan['mode'])} {_plan_name(plan)}" if plan.get("kind") != "pack" \
++        else _plan_name(plan)
++    return (f"{header(run)}\n\n<b>{name} — {rub(plan['price'])}</b>\n"
++            "Оплата на защищённой странице ЮKassa. Как только платёж пройдёт, я сам запущу нарезку.")
++
++
++def pay_keyboard(run, plan: dict, pay_url: str) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup(inline_keyboard=[
++        [B(text=f"Оплатить {rub(plan['price'])}", url=pay_url)],
++        [B(text="Я оплатил — запустить", callback_data=cb(run.id, "paid"))],
++        [B(text="Назад к тарифам", callback_data=cb(run.id, "tariffs"))],
++    ])
++
++
++def general_pricing_text(plans: list[dict]) -> str:
++    parts = ["<b>Тарифы SONYA</b>", ""]
++    for mode, title in (("cut", "Нарезка — Вирал, Сторителлинг, Хуки, Образовательный"), ("streamer", "Стример")):
++        mine = plans_for(plans, mode)
++        if mine:
++            parts.append(f"<b>{title}</b>")
++            parts += [_plan_line(p) for p in mine]
++            parts.append("")
++    packs = [p for p in plans if p.get("kind") == "pack"]
++    if packs:
++        parts.append("<b>Пакеты</b>")
++        parts += [_plan_line(p) for p in packs]
++        parts.append("")
++    parts.append("Пришлите ссылку на видео — подберу тариф под режим и запущу нарезку сразу после оплаты.")
++    return "\n".join(parts)
++
++
++# ── segment of a long video ───────────────────────────────────────────────────
++
++def segment_text(run, cap_min: int) -> str:
++    dur = fmt_duration(run.duration) if run.duration else "дольше лимита"
++    return (f"{header(run)}\n\n<b>Видео длиннее лимита</b>\n"
++            f"Видео идёт {dur}, на вашем тарифе — до {minutes_ru(cap_min)} за раз. Какой отрезок взять?")
++
++
++def segment_keyboard(run, cap_min: int) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup(inline_keyboard=[
++        [B(text=f"Первые {minutes_ru(cap_min)}", callback_data=cb(run.id, "first"))],
++        [B(text="Указать начало", callback_data=cb(run.id, "start_at"))],
++        [B(text="Назад", callback_data=cb(run.id, "back"))],
++    ])
++
++
++def ask_start_text(cap_min: int) -> str:
++    return (f"Напишите, с какой минуты начать — например <code>25</code> или <code>1:10:00</code>. "
++            f"Возьму {minutes_ru(cap_min)} от этой точки.")
++
++
++# ── progress ──────────────────────────────────────────────────────────────────
++
++def mode_line(run) -> str:
++    bits = [CLIPS.get(run.clip or "", "")]
++    if run.clip in HIGH_CLIPS:
++        bits.append("2K" if run.quality == "high" else "Стандарт")
++    if run.preset and run.preset != "Стандарт SONYA" and run.clip != "beep":
++        bits.append(escape(run.preset))
++    if run.trim_end:
++        st = int(run.trim_start or 0)
++        bits.append(f"отрезок {fmt_clock(st)}–{fmt_clock(int(run.trim_end))}")
++    return " · ".join(b for b in bits if b)
++
++
++def fmt_clock(sec: int) -> str:
++    h, rem = divmod(int(sec), 3600)
++    m, s = divmod(rem, 60)
++    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
++
++
++def progress_text(run) -> str:
++    lines = [header(run), mode_line(run), ""]
++    if run.state == "starting" or not run.stage:
++        lines.append("Запускаю…")
++        return "\n".join(lines)
++    stage = run.stage
++    downloaded = bool(run.extra.get("downloaded"))
++    queue = stage == "queue"
++    cur = {"download": 0, "analyze": 1, "edit": 2, "done": 3}.get(stage, 1 if downloaded else 0)
++    if queue:
++        cur = 1 if downloaded else 0
++    for i, (_key, label) in enumerate(STEPS):
++        if i < cur or stage == "done":
++            lines.append(f"✓ {label}")
++        elif i == cur:
++            suffix = " · в очереди" if queue else "…"
++            lines.append(f"● <b>{label}</b>{suffix}")
++        else:
++            lines.append(f"○ {label}")
++    if run.notice:
++        lines += ["", f"<i>{escape(run.notice)}</i>"]
++    return "\n".join(lines)
++
++
++def done_text(run) -> str:
++    n = run.clips
++    word = plural(n, "клип", "клипа", "клипов")
++    return (f"{header(run)}\n{mode_line(run)}\n\n<b>Готово — {n} {word}.</b>\n"
++            "Присылаю их сюда, следом — ссылка на все в «Работах».")
++
++
++def final_text(run) -> str:
++    n = run.clips
++    return f"Все {n} {plural(n, 'клип', 'клипа', 'клипов')} выше. Что дальше?" if n != 1 else "Клип выше. Что дальше?"
++
++
++def final_keyboard(run, works_url: str) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup(inline_keyboard=[
++        [B(text="Ещё нарезку", callback_data=cb(run.id, "again")),
++         B(text="Открыть в Работах", url=works_url)],
++    ])
++
++
++def failed_text(run, reason: str) -> str:
++    return f"{header(run)}\n{mode_line(run)}\n\n<b>Не получилось.</b> {reason}"
++
++
++def failed_keyboard(run) -> InlineKeyboardMarkup:
++    return InlineKeyboardMarkup(inline_keyboard=[
++        [B(text="Другой режим", callback_data=cb(run.id, "again")),
++         B(text="Написать нам", url=MANAGER_URL)],
++    ])
++
++
++# ── errors in plain words ─────────────────────────────────────────────────────
++
++NOTICE_YT = "YouTube сейчас отдаёт видео медленно — ждём его. Это может занять до пары часов, клипы пришлём сами."
++NOTICE_LOAD = "Высокая нагрузка — клипы будут чуть позже, пришлём сюда сами."
++UNSUPPORTED = ("Такие ссылки я пока не беру. Подойдут YouTube, VK Видео, Rutube и Twitch — "
++               "или пришлите сам видеофайл.")
++TOO_BIG_FILE = ("Файл больше 20 МБ — Telegram не даёт ботам скачивать такие. "
++                "Пришлите ссылку на видео или загрузите файл на сайте.")
++BUSY = "Сейчас уже идёт обработка — дождитесь её, и запущу следующую."
++DOWN = "SONYA сейчас недоступна. Попробуйте через пару минут."
++GENERIC_FAIL = ("Не вышло сделать клипы из этого видео. Попробуйте другой режим или другое видео — "
++                "или напишите нам, разберёмся.")
++NOT_CHARGED = " Обработка не списана."
++
++
++def human_error(code: str | None, message: str | None) -> str:
++    c = (code or "").upper()
++    if c in ("UNSUPPORTED_URL",):
++        return UNSUPPORTED
++    if c in ("UNSAFE_URL",):
++        return "Эта ссылка недоступна для загрузки. Проверьте, что видео открыто для всех."
++    if c in ("HTTP_429", "RATE_LIMITED", "TOO_MANY_ACTIVE_JOBS", "CONCURRENT_LIMIT"):
++        return BUSY
++    if c in ("UNAVAILABLE", "NOT_CONFIGURED", "HTTP_502", "HTTP_503", "HTTP_500", "DB_ERROR", "INTERNAL_ERROR",
++             "STORAGE_ERROR"):
++        return DOWN
++    if c in ("TRAILER_DISABLED", "MODE_DISABLED"):
++        return "Этот режим сейчас выключен."
++    if message and c.startswith(("SOURCE_", "DOWNLOAD_", "LIMIT_")):
++        return escape(message)
++    if c in ("DOWNLOAD_FAILED", "LIMIT_EXCEEDED", "INVALID_VIDEO") and message:
++        return escape(message)
++    if message and c in ("SOURCE_TRIM_RANGE", "TRIM_RANGE", "QUALITY_UNITS_SHORT"):
++        return escape(message)
++    return GENERIC_FAIL
+diff --git a/bot/handlers/__init__.py b/bot/handlers/__init__.py
+index 2fc7c08..24b8df9 100644
+--- a/bot/handlers/__init__.py
++++ b/bot/handlers/__init__.py
+@@ -2,7 +2,7 @@
+ 
+ from aiogram import Router
+ 
+-from . import account, consent, help, notifications, payment, start
++from . import account, consent, cut, help, notifications, payment, start
+ 
+ main_router = Router(name="main")
+ main_router.include_router(start.router)
+@@ -11,5 +11,6 @@ main_router.include_router(account.router)
+ main_router.include_router(help.router)
+ main_router.include_router(payment.router)
+ main_router.include_router(notifications.router)
++main_router.include_router(cut.router)  # last: links / videos / segment start
+ 
+ __all__ = ["main_router"]
+diff --git a/bot/handlers/cut.py b/bot/handlers/cut.py
+new file mode 100644
+index 0000000..35bb57d
+--- /dev/null
++++ b/bot/handlers/cut.py
+@@ -0,0 +1,147 @@
++"""A link or a video sent to the bot -> the SONYA card (owner 2026-11-20). Logic: bot/services/cut_flow.py.
++
++Registered LAST in main_router, so commands / consent / FAQ keep their handlers. Plain text without a link is
++only taken when this person was asked for the segment start; anything else falls through untouched.
++"""
++
++from __future__ import annotations
++
++import logging
++
++from aiogram import F, Router
++from aiogram.types import CallbackQuery, LinkPreviewOptions, Message
++
++from .. import cut_texts as T
++from ..services.cut_flow import TG_FILE_LIMIT, CutFlow
++from ..services.media import VideoMeta, find_link, parse_start, platform_of, probe
++
++logger = logging.getLogger(__name__)
++router = Router(name="cut")
++
++_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
++
++
++def _video_of(message: Message):
++    if message.video:
++        return message.video
++    d = message.document
++    if d and (d.mime_type or "").startswith("video/"):
++        return d
++    return None
++
++
++@router.message(F.chat.type == "private", F.text, ~F.text.startswith("/"))
++async def on_text(message: Message, cut_flow: CutFlow) -> None:
++    if message.from_user is None:
++        return
++    url = find_link(message.text)
++    if not url:
++        run = cut_flow.runs.latest(message.from_user.id, ("await_start",), max_age_sec=3600)
++        if run is None:
++            await message.answer("Пришлите ссылку на видео — YouTube, VK Видео, Rutube, Twitch — или сам файл, "
++                                 "и я сделаю клипы.\nВопрос по SONYA — напишите менеджеру @SonyaAiManager.")
++            return
++        sec = parse_start(message.text or "")
++        if sec is None:
++            await message.answer("Не понял время. Напишите, например, <code>25</code> (минута) или <code>1:10:00</code>.")
++            return
++        async with cut_flow.lock(run.id):
++            err = await cut_flow.set_segment(run, sec)
++        if err:
++            await message.answer(err)
++        return
++    platform = platform_of(url)
++    if platform is None:
++        await message.answer(T.UNSUPPORTED, link_preview_options=_NO_PREVIEW)
++        return
++    ph = await message.answer("Смотрю видео…", link_preview_options=_NO_PREVIEW)
++    meta = await probe(url)
++    run = cut_flow.new_run(message.from_user.id, message.chat.id, meta, url=url)
++    logger.info("cut: card run=%s platform=%s duration=%s", run.id, platform, int(meta.duration or 0))
++    await cut_flow.show_card(run, placeholder_id=ph.message_id)
++
++
++@router.message(F.chat.type == "private", F.video | F.document)
++async def on_video(message: Message, cut_flow: CutFlow) -> None:
++    if message.from_user is None:
++        return
++    v = _video_of(message)
++    if v is None:
++        await message.answer("Пришлите видео или ссылку на него — сделаю клипы.")
++        return
++    if v.file_size and v.file_size > TG_FILE_LIMIT:
++        await message.answer(T.TOO_BIG_FILE)
++        return
++    meta = VideoMeta(platform="file", title=(getattr(v, "file_name", None) or "")[:120],
++                     duration=float(v.duration) if getattr(v, "duration", None) else None)
++    run = cut_flow.new_run(message.from_user.id, message.chat.id, meta, file_id=v.file_id,
++                           file_name=getattr(v, "file_name", None) or "telegram_video.mp4", file_size=v.file_size)
++    await cut_flow.show_card(run)
++
++
++@router.callback_query(F.data.startswith("cut:"))
++async def on_callback(callback: CallbackQuery, cut_flow: CutFlow) -> None:
++    parts = (callback.data or "").split(":")
++    if len(parts) < 3 or callback.from_user is None:
++        await callback.answer()
++        return
++    run = cut_flow.runs.get(parts[1])
++    if run is None or run.user_id != callback.from_user.id:
++        await callback.answer("Эта карточка устарела. Пришлите ссылку ещё раз.", show_alert=True)
++        return
++    action, arg = parts[2], (parts[3] if len(parts) > 3 else "")
++    lock = cut_flow.lock(run.id)
++    if lock.locked():
++        await callback.answer("Секунду…")
++        return
++    async with lock:
++        run = cut_flow.runs.get(run.id) or run
++        alert = await _dispatch(cut_flow, run, action, arg)
++    await callback.answer(alert or None, show_alert=bool(alert and len(alert) > 40))
++
++
++async def _dispatch(flow: CutFlow, run, action: str, arg: str) -> str | None:
++    busy = run.state in ("starting", "ingest", "job", "delivering")
++    if action == "again":
++        new = flow.copy_run(run)
++        await flow.show_card(new)
++        return None
++    if busy:
++        return "Уже обрабатываю это видео."
++    if action == "m":
++        if arg not in T.CLIPS or (arg == "trailer" and not run.is_admin):
++            return None
++        run.clip = arg
++        run.trim_start = run.trim_end = None
++        await flow.proceed(run)
++    elif action == "q":
++        run.quality = "high" if arg == "high" else "standard"
++        await flow.back_to_card(run)
++    elif action == "std":
++        run.quality = "standard"
++        run.extra["quality_effective"] = "standard"
++        await flow.proceed(run)
++    elif action == "back":
++        run.trim_start = run.trim_end = None
++        await flow.back_to_card(run)
++    elif action == "relink":
++        acc = await flow.account(run.user_id)
++        if not (acc and acc.get("linked")):
++            return "Пока не вижу привязки. Войдите на сайте и нажмите «Подключить Telegram»."
++        await flow.proceed(run)
++    elif action == "tariffs":
++        await flow.show_tariffs(run)
++    elif action == "buy":
++        return await flow.buy(run, arg)
++    elif action == "paid":
++        if not await flow.check_payment(run):
++            return "Платёж пока не пришёл. Если вы оплатили — подождите минуту, я проверяю сам."
++    elif action == "first":
++        cap = (run.max_minutes or 60) * 60
++        run.trim_start, run.trim_end = 0.0, float(min(cap, run.duration or cap))
++        await flow.start(run)
++    elif action == "start_at":
++        run.state = "await_start"
++        flow.runs.save(run)
++        await flow.bot.send_message(run.chat_id, T.ask_start_text(run.max_minutes or 60))
++    return None
+diff --git a/bot/handlers/payment.py b/bot/handlers/payment.py
+index e65edb9..12d2b86 100644
+--- a/bot/handlers/payment.py
++++ b/bot/handlers/payment.py
+@@ -6,19 +6,27 @@ from aiogram import F, Router
+ from aiogram.types import CallbackQuery
+ 
+ from .. import texts
++from ..cut_texts import general_pricing_text
+ from ..keyboards import build_payment_keyboard
++from ..services.cut_flow import CutFlow
+ 
+ router = Router(name="payment")
+ 
+ 
+ @router.callback_query(F.data == "menu:payment")
+-async def cb_payment(callback: CallbackQuery) -> None:
++async def cb_payment(callback: CallbackQuery, cut_flow: "CutFlow | None" = None) -> None:
+     await callback.answer()
+ 
+     if callback.message is None:
+         return
+ 
+-    await callback.message.answer(
+-        texts.PAYMENT_TEXT,
+-        reply_markup=build_payment_keyboard(),
+-    )
++    # 2026-11-20: live plans from the site (scripts/pricing.py via the bot bridge); the old text if unreachable.
++    text = texts.PAYMENT_TEXT
++    if cut_flow is not None:
++        try:
++            plans = await cut_flow.plans()
++            if plans:
++                text = general_pricing_text(plans)
++        except Exception:  # noqa: BLE001
++            pass
++    await callback.message.answer(text, reply_markup=build_payment_keyboard())
+diff --git a/bot/handlers/start.py b/bot/handlers/start.py
+index 822b1da..0c508b4 100644
+--- a/bot/handlers/start.py
++++ b/bot/handlers/start.py
+@@ -10,6 +10,7 @@ from .. import texts
+ from ..config import Settings
+ from ..consent_store import ConsentStore
+ from ..keyboards import build_consent_keyboard
++from ..services.cut_flow import CutFlow
+ from ..services.sonya_api import SonyaApiClient, SonyaApiError
+ from ..services.user import UserStore
+ from .menu import send_main_menu
+@@ -40,6 +41,7 @@ async def cmd_start(
+     consent_store: ConsentStore,
+     user_store: UserStore,
+     sonya_api: SonyaApiClient,
++    cut_flow: "CutFlow | None" = None,
+ ) -> None:
+     if message.from_user is None:
+         await message.answer(texts.CONSENT_TEXT)
+@@ -80,6 +82,13 @@ async def cmd_start(
+ 
+         logger.info("event=telegram_link_success user_id=%s", user_id)
+         await message.answer("Telegram подключён к SONYA.")
++        # A link sent before the account was linked: carry on with it right away (cut flow, 2026-11-20).
++        if cut_flow is not None:
++            try:
++                if await cut_flow.resume_after_link(user_id):
++                    return
++            except Exception as exc:  # noqa: BLE001 - never break /start
++                logger.warning("event=cut_resume_failed user_id=%s type=%s", user_id, type(exc).__name__)
+ 
+     consent = consent_store.get(user_id)
+     versions = settings.document_versions
+diff --git a/bot/services/cut_api.py b/bot/services/cut_api.py
+new file mode 100644
+index 0000000..834f8c9
+--- /dev/null
++++ b/bot/services/cut_api.py
+@@ -0,0 +1,116 @@
++"""Client for the SONYA API bot bridge (/api/telegram/bot/*, scripts/bot_bridge_routes.py on the site VPS).
++
++Authenticated with SONYA_BOT_BRIDGE_SECRET (header X-Sonya-Bot-Secret), acts for the SONYA account linked to the
++Telegram user. Errors come back as CutApiError(status, code, message, detail) - never with the secret or a URL.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++from typing import Any
++
++import aiohttp
++
++from bot.config import SonyaApiConfig
++
++logger = logging.getLogger(__name__)
++
++
++class CutApiError(RuntimeError):
++    def __init__(self, status: int, code: str, message: str | None = None, detail: dict | None = None):
++        super().__init__(code)
++        self.status = status
++        self.code = code
++        self.message = message
++        self.detail = detail or {}
++
++
++class CutApi:
++    def __init__(self, config: SonyaApiConfig, timeout: float = 30.0) -> None:
++        self._config = config
++        self._timeout = aiohttp.ClientTimeout(total=timeout)
++
++    @property
++    def configured(self) -> bool:
++        return bool(self._config.base_url and self._config.bridge_secret)
++
++    def _url(self, path: str) -> str:
++        return (self._config.base_url or "").rstrip("/") + "/telegram/bot/" + path
++
++    def _headers(self) -> dict:
++        return {"X-Sonya-Bot-Secret": self._config.bridge_secret or ""}
++
++    @staticmethod
++    async def _result(resp: aiohttp.ClientResponse) -> Any:
++        try:
++            data = await resp.json(content_type=None)
++        except (json.JSONDecodeError, aiohttp.ContentTypeError, ValueError):
++            data = {}
++        if 200 <= resp.status < 300:
++            return data
++        detail = data.get("detail") if isinstance(data, dict) else None
++        if isinstance(detail, dict):
++            code = str(detail.get("code") or detail.get("error") or f"http_{resp.status}")
++            raise CutApiError(resp.status, code, detail.get("message"), detail)
++        raise CutApiError(resp.status, f"http_{resp.status}", detail if isinstance(detail, str) else None)
++
++    async def _post(self, path: str, payload: dict, timeout: float | None = None) -> Any:
++        if not self.configured:
++            raise CutApiError(0, "not_configured")
++        to = aiohttp.ClientTimeout(total=timeout) if timeout else self._timeout
++        try:
++            async with aiohttp.ClientSession(timeout=to) as s:
++                async with s.post(self._url(path), json=payload, headers=self._headers()) as resp:
++                    return await self._result(resp)
++        except CutApiError:
++            raise
++        except Exception as exc:  # network / timeout: no URL, no secret in the log
++            logger.warning("cut api %s unavailable: %s", path, type(exc).__name__)
++            raise CutApiError(0, "unavailable") from exc
++
++    async def account(self, tg: int) -> dict:
++        return await self._post("account", {"telegram_user_id": tg})
++
++    async def pricing(self) -> dict:
++        return await self._post("pricing", {})
++
++    async def job_from_url(self, tg: int, url: str, clip: str, quality: str, key: str,
++                           trim_start: float | None = None, trim_end: float | None = None) -> dict:
++        return await self._post("jobs/url", {"telegram_user_id": tg, "url": url, "clip": clip, "quality": quality,
++                                             "key": key, "trim_start_sec": trim_start, "trim_end_sec": trim_end})
++
++    async def job_from_file(self, tg: int, data: bytes, filename: str, clip: str, quality: str, key: str,
++                            trim_start: float | None = None, trim_end: float | None = None) -> dict:
++        if not self.configured:
++            raise CutApiError(0, "not_configured")
++        form = aiohttp.FormData()
++        form.add_field("telegram_user_id", str(tg))
++        form.add_field("clip", clip)
++        form.add_field("quality", quality)
++        form.add_field("key", key)
++        if trim_end:
++            form.add_field("trim_start_sec", str(trim_start or 0))
++            form.add_field("trim_end_sec", str(trim_end))
++        form.add_field("file", data, filename=filename or "telegram_video.mp4", content_type="video/mp4")
++        try:
++            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=300)) as s:
++                async with s.post(self._url("jobs/file"), data=form, headers=self._headers()) as resp:
++                    return await self._result(resp)
++        except CutApiError:
++            raise
++        except Exception as exc:
++            logger.warning("cut api jobs/file unavailable: %s", type(exc).__name__)
++            raise CutApiError(0, "unavailable") from exc
++
++    async def ingest(self, tg: int, ingest_id: str) -> dict:
++        return await self._post("ingest", {"telegram_user_id": tg, "ingest_id": ingest_id})
++
++    async def job(self, tg: int, job_id: str) -> dict:
++        return await self._post("job", {"telegram_user_id": tg, "job_id": job_id})
++
++    async def checkout(self, tg: int, plan_id: str, key: str) -> dict:
++        return await self._post("checkout", {"telegram_user_id": tg, "plan_id": plan_id, "key": key}, timeout=45)
++
++    async def payment(self, tg: int, invoice_id: int) -> dict:
++        return await self._post("payment", {"telegram_user_id": tg, "invoice_id": invoice_id})
+diff --git a/bot/services/cut_flow.py b/bot/services/cut_flow.py
+new file mode 100644
+index 0000000..b25ff6c
+--- /dev/null
++++ b/bot/services/cut_flow.py
+@@ -0,0 +1,476 @@
++"""«Ссылка → режим → подписка → нарезка» (owner 2026-11-20): the logic behind the card, shared by the handlers
++(bot/handlers/cut.py) and the background tracker (progress, payments, delivery). Telegram + the SONYA bridge only;
++billing, limits and refunds are the site's own (scripts/bot_bridge_routes.py)."""
++
++from __future__ import annotations
++
++import asyncio
++import io
++import logging
++import re
++import secrets
++import time
++
++from aiogram import Bot
++from aiogram.exceptions import TelegramBadRequest
++from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
++
++from .. import cut_texts as T
++from .cut_api import CutApi, CutApiError
++from .cut_runs import Run, RunStore
++from .media import VideoMeta
++
++logger = logging.getLogger(__name__)
++
++SITE = "https://sonya.group"
++PAYWALL = ("FREE_PLAN_USED", "MODE_NOT_IN_PLAN", "SUBSCRIPTION_EXPIRED", "PLAN_LIMIT_REACHED")
++VIA_WORKER = ("youtube", "rutube", "twitch")       # the GPU worker downloads these (API source_fetch)
++TG_FILE_LIMIT = 20 * 1024 * 1024                    # Bot API getFile limit
++TICK = 6.0
++PAY_CHECK_EVERY = 15.0
++PAY_WAIT_SEC = 45 * 60
++JOB_TRACK_SEC = 8 * 3600
++DELIVERY_WAIT_SEC = 20 * 60
++MAX_RUNNING = 3
++_NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
++
++
++class CutFlow:
++    def __init__(self, bot: Bot, api: CutApi, runs: RunStore) -> None:
++        self.bot = bot
++        self.api = api
++        self.runs = runs
++        self._locks: dict[str, asyncio.Lock] = {}
++        self._pricing: tuple[float, list] = (0.0, [])
++        self._task: asyncio.Task | None = None
++
++    def lock(self, run_id: str) -> asyncio.Lock:
++        return self._locks.setdefault(run_id, asyncio.Lock())
++
++    # ── account / pricing ──────────────────────────────────────────────────
++    async def account(self, tg: int) -> dict | None:
++        try:
++            return await self.api.account(tg)
++        except CutApiError as exc:
++            logger.warning("cut: account lookup failed code=%s", exc.code)
++            return None
++
++    async def plans(self) -> list[dict]:
++        ts, plans = self._pricing
++        if plans and time.time() - ts < 600:
++            return plans
++        data = await self.api.pricing()
++        plans = list(data.get("plans") or [])
++        self._pricing = (time.time(), plans)
++        return plans
++
++    @staticmethod
++    def _urls(acc: dict | None) -> dict:
++        u = (acc or {}).get("urls") or {}
++        return {"presets": u.get("presets") or SITE + "/#/presets", "works": u.get("works") or SITE + "/#/works",
++                "tariffs": u.get("tariffs") or SITE + "/?paywall=1", "connect": (acc or {}).get("connect_url")
++                or SITE + "/?tg=connect"}
++
++    @staticmethod
++    def _quality_on(acc: dict | None) -> bool:
++        return bool(((acc or {}).get("quality") or {}).get("available", True))
++
++    # ── rendering: the card message is edited in place ───────────────────
++    async def render(self, run: Run, text: str, kb: InlineKeyboardMarkup | None = None) -> None:
++        if text == run.last_text and kb is None and run.card_msg_id:
++            self.runs.save(run)
++            return
++        sent = False
++        if run.card_msg_id:
++            try:
++                if run.card_is_photo:
++                    await self.bot.edit_message_caption(chat_id=run.chat_id, message_id=run.card_msg_id,
++                                                        caption=text, reply_markup=kb)
++                else:
++                    await self.bot.edit_message_text(chat_id=run.chat_id, message_id=run.card_msg_id, text=text,
++                                                     reply_markup=kb, link_preview_options=_NO_PREVIEW)
++                sent = True
++            except TelegramBadRequest as exc:
++                sent = "not modified" in str(exc).lower()   # else: deleted / too old -> a new message below
++        if not sent:
++            m = await self.bot.send_message(run.chat_id, text, reply_markup=kb, link_preview_options=_NO_PREVIEW)
++            run.card_msg_id, run.card_is_photo = m.message_id, False
++        run.last_text = text
++        self.runs.save(run)
++
++    async def show_card(self, run: Run, placeholder_id: int | None = None) -> None:
++        acc = await self.account(run.user_id)
++        if acc and acc.get("linked"):
++            run.is_admin = bool(acc.get("is_admin"))
++            run.preset = str((acc.get("preset") or {}).get("name") or "")
++            if (acc.get("preset") or {}).get("quality") == "high" and self._quality_on(acc):
++                run.quality = "high"
++        q_on = self._quality_on(acc)
++        text = T.card_text(run, q_on)
++        kb = T.card_keyboard(run, self._urls(acc)["presets"], q_on)
++        run.state = "card"
++        if run.thumb:
++            try:
++                m = await self.bot.send_photo(run.chat_id, run.thumb, caption=text, reply_markup=kb)
++                run.card_msg_id, run.card_is_photo = m.message_id, True
++                if placeholder_id:
++                    await self._delete(run.chat_id, placeholder_id)
++                run.last_text = text
++                self.runs.save(run)
++                return
++            except Exception as exc:  # noqa: BLE001 - a preview Telegram can't fetch: text card
++                logger.info("cut: preview not sent (%s)", type(exc).__name__)
++        run.card_msg_id, run.card_is_photo = placeholder_id, False
++        run.last_text = ""
++        await self.render(run, text, kb)
++
++    async def _delete(self, chat_id: int, message_id: int) -> None:
++        try:
++            await self.bot.delete_message(chat_id, message_id)
++        except Exception:  # noqa: BLE001
++            pass
++
++    async def back_to_card(self, run: Run) -> None:
++        acc = await self.account(run.user_id)
++        run.state = "card"
++        q_on = self._quality_on(acc)
++        await self.render(run, T.card_text(run, q_on), T.card_keyboard(run, self._urls(acc)["presets"], q_on))
++
++    # ── a new source ───────────────────────────────────────────────────────
++    def new_run(self, user_id: int, chat_id: int, meta: VideoMeta, url: str | None = None,
++                file_id: str | None = None, file_name: str | None = None, file_size: int | None = None) -> Run:
++        return self.runs.new(user_id, chat_id, url=url, file_id=file_id, file_name=file_name, file_size=file_size,
++                             platform=meta.platform, title=meta.title, duration=meta.duration, thumb=meta.thumb)
++
++    def copy_run(self, run: Run) -> Run:
++        return self.runs.new(run.user_id, run.chat_id, url=run.url, file_id=run.file_id, file_name=run.file_name,
++                             file_size=run.file_size, platform=run.platform, title=run.title, duration=run.duration,
++                             thumb=run.thumb, quality=run.quality, preset=run.preset, is_admin=run.is_admin)
++
++    # ── the decision chain after a mode is picked ──────────────────────────
++    async def proceed(self, run: Run) -> None:
++        acc = await self.account(run.user_id)
++        if acc is None:
++            await self.fail(run, T.DOWN, retry=True)
++            return
++        urls = self._urls(acc)
++        if not acc.get("linked"):
++            run.state = "need_link"
++            await self.render(run, T.link_text(run), T.link_keyboard(run, urls["connect"]))
++            return
++        run.is_admin = bool(acc.get("is_admin"))
++        run.preset = str((acc.get("preset") or {}).get("name") or "")
++        access = (acc.get("access") or {}).get(run.clip or "")
++        if access is None:
++            await self.back_to_card(run)
++            return
++        if not access.get("allowed"):
++            await self.show_tariffs(run, access.get("code"), access.get("message"))
++            return
++        if run.clip not in T.HIGH_CLIPS or not self._quality_on(acc):
++            run.extra["quality_effective"] = "standard"
++        else:
++            run.extra["quality_effective"] = run.quality
++        units = int(((acc.get("quality") or {}).get("units")) or 3)
++        left = access.get("left")
++        if run.extra["quality_effective"] == "high" and left is not None and left < units:
++            await self.offer_standard(run, T.escape(
++                f"Качество 2K списывает {units} обработки, а осталось {left}. Стандарт списывает 1."))
++            return
++        cap = int(access.get("max_source_minutes") or 0)
++        run.max_minutes = cap or None
++        if cap and run.duration and run.duration > cap * 60 + 2 and not run.trim_end:
++            await self.ask_segment(run)
++            return
++        await self.start(run)
++
++    async def offer_standard(self, run: Run, reason: str) -> None:
++        from aiogram.types import InlineKeyboardButton as B
++        run.state = "card"
++        kb = InlineKeyboardMarkup(inline_keyboard=[
++            [B(text="Запустить в Стандарте", callback_data=T.cb(run.id, "std"))],
++            [B(text="Тарифы", callback_data=T.cb(run.id, "tariffs")), B(text="Назад", callback_data=T.cb(run.id, "back"))],
++        ])
++        await self.render(run, f"{T.header(run)}\n\n{reason}", kb)
++
++    async def show_tariffs(self, run: Run, code: str | None = None, message: str | None = None) -> None:
++        plan_mode = T.PLAN_MODE_OF_CLIP.get(run.clip or "viral", "cut")
++        try:
++            plans = await self.plans()
++        except CutApiError:
++            await self.fail(run, T.DOWN, retry=True)
++            return
++        if not T.plans_for(plans, plan_mode):
++            await self.fail(run, T.reason_text(code, message), retry=True)
++            return
++        run.state = "tariffs"
++        if code:
++            run.extra["deny_code"], run.extra["deny_msg"] = code, message
++        acc_urls = self._urls(None)
++        await self.render(run, T.tariffs_text(run, plans, plan_mode, run.extra.get("deny_code"),
++                                              run.extra.get("deny_msg")),
++                          T.tariffs_keyboard(run, plans, plan_mode, acc_urls["tariffs"]))
++
++    async def buy(self, run: Run, plan_id: str) -> str | None:
++        """Create the site's ЮKassa payment for the linked account. Returns an alert text for the callback, if any."""
++        plans = await self.plans()
++        plan = next((p for p in plans if p["plan_id"] == plan_id), None)
++        if plan is None:
++            return "Тариф не найден."
++        try:
++            res = await self.api.checkout(run.user_id, plan_id, key=f"{run.key}-{plan_id}")
++        except CutApiError as exc:
++            if exc.code == "subscription_active":
++                await self.proceed(run)
++                return "Этот тариф у вас уже активен."
++            if exc.status == 401:
++                await self.proceed(run)
++                return None
++            if exc.code in ("payment_unavailable", "payment_provider_unavailable", "unavailable"):
++                return "Оплата сейчас недоступна. Попробуйте через минуту или оформите на сайте."
++            return "Не получилось создать платёж. Попробуйте ещё раз."
++        if res.get("status") == "paid":
++            await self.proceed(run)
++            return None
++        run.invoice_id = int(res["invoice_id"]) if res.get("invoice_id") is not None else None
++        run.plan_id, run.pay_url = plan_id, res.get("redirect_url")
++        if not run.pay_url:
++            return "Не получилось создать платёж. Попробуйте ещё раз."
++        run.state = "await_payment"
++        run.extra["pay_since"] = time.time()
++        await self.render(run, T.pay_text(run, plan), T.pay_keyboard(run, plan, run.pay_url))
++        return None
++
++    async def check_payment(self, run: Run) -> bool:
++        if not run.invoice_id:
++            return False
++        try:
++            st = await self.api.payment(run.user_id, run.invoice_id)
++        except CutApiError:
++            return False
++        if st.get("status") == "paid":
++            logger.info("cut: payment paid run=%s plan=%s", run.id, run.plan_id)
++            run.invoice_id = None
++            await self.proceed(run)
++            return True
++        if st.get("status") in ("failed", "canceled", "cancelled"):
++            run.invoice_id = None
++            await self.show_tariffs(run)
++        return False
++
++    async def ask_segment(self, run: Run, cap: int | None = None) -> None:
++        cap = cap or run.max_minutes or 60
++        run.max_minutes = cap
++        run.state = "need_segment"
++        await self.render(run, T.segment_text(run, cap), T.segment_keyboard(run, cap))
++
++    async def set_segment(self, run: Run, start_sec: float) -> str | None:
++        cap = (run.max_minutes or 60) * 60
++        if run.duration and start_sec >= run.duration - 5:
++            return "Это позже конца видео. Напишите начало раньше."
++        end = start_sec + cap
++        if run.duration:
++            end = min(end, run.duration)
++        run.trim_start, run.trim_end = float(start_sec), float(end)
++        await self.start(run)
++        return None
++
++    # ── start ──────────────────────────────────────────────────────────────
++    async def start(self, run: Run) -> None:
++        if self.runs.count_running(run.user_id) >= MAX_RUNNING:
++            await self.fail(run, T.BUSY, retry=True)
++            return
++        run.state, run.stage, run.notice, run.error = "starting", None, None, None
++        run.key = secrets.token_hex(8)               # a new attempt = a new idempotency key
++        run.started_at = time.time()
++        quality = run.extra.get("quality_effective") or "standard"
++        await self.render(run, T.progress_text(run))
++        try:
++            if run.url:
++                res = await self.api.job_from_url(run.user_id, run.url, run.clip or "viral", quality, run.key,
++                                                  run.trim_start, run.trim_end)
++                run.ingest_id, run.state, run.stage = res.get("ingest_id"), "ingest", "download"
++                run.extra["downloaded"] = False
++            else:
++                data = await self._download_tg(run)
++                if data is None:
++                    await self.fail(run, T.TOO_BIG_FILE)
++                    return
++                res = await self.api.job_from_file(run.user_id, data, run.file_name or "telegram_video.mp4",
++                                                   run.clip or "viral", quality, run.key, run.trim_start, run.trim_end)
++                run.job_id, run.state, run.stage = res.get("job_id"), "job", "queue"
++                run.extra["downloaded"] = True
++        except CutApiError as exc:
++            await self.on_api_error(run, exc)
++            return
++        logger.info("cut: started run=%s clip=%s src=%s", run.id, run.clip, "url" if run.url else "file")
++        await self.render(run, T.progress_text(run))
++
++    async def _download_tg(self, run: Run) -> bytes | None:
++        if run.file_size and run.file_size > TG_FILE_LIMIT:
++            return None
++        buf = io.BytesIO()
++        try:
++            await self.bot.download(run.file_id, destination=buf, timeout=120)
++        except TelegramBadRequest:
++            return None
++        return buf.getvalue()
++
++    async def on_api_error(self, run: Run, exc: CutApiError) -> None:
++        d = exc.detail or {}
++        if exc.status == 401 and exc.code == "not_linked":
++            await self.proceed(run)
++        elif exc.status == 402 and exc.code in PAYWALL:
++            await self.show_tariffs(run, exc.code, exc.message)
++        elif exc.code == "QUALITY_UNITS_SHORT":
++            await self.offer_standard(run, T.escape(exc.message or "Для 2K не хватает обработок."))
++        elif exc.code == "SOURCE_TOO_LONG" or exc.status == 413:
++            if d.get("source_minutes") and not run.duration:
++                run.duration = float(d["source_minutes"]) * 60
++            await self.ask_segment(run, int(d.get("max_source_minutes") or run.max_minutes or 60))
++        elif exc.status == 429:
++            daily = str(d.get("reason") or "") == "daily_limit_reached"
++            await self.fail(run, "На сегодня лимит запусков исчерпан — попробуйте завтра." if daily else T.BUSY,
++                            retry=True)
++        else:
++            await self.fail(run, T.human_error(exc.code, exc.message), retry=True)
++
++    async def fail(self, run: Run, reason: str, retry: bool = True) -> None:
++        run.state = "failed"
++        run.error = reason
++        await self.render(run, T.failed_text(run, reason), T.failed_keyboard(run) if retry else None)
++
++    # ── link done elsewhere (site → deep link /start TOKEN) ────────────────
++    async def resume_after_link(self, user_id: int) -> bool:
++        run = self.runs.latest(user_id, ("need_link",), max_age_sec=3 * 3600)
++        if not run:
++            return False
++        async with self.lock(run.id):
++            # the old card is far up the chat now: close it, carry on in a new message at the bottom
++            await self.render(run, f"{T.header(run)}\n\nАккаунт привязан — продолжаю ниже.")
++            run.card_msg_id, run.card_is_photo, run.last_text = None, False, ""
++            await self.proceed(run)
++        return True
++
++    # ── background: progress / payment / delivery ──────────────────────────
++    def start_tracker(self) -> None:
++        if self._task is None:
++            self._task = asyncio.create_task(self._loop())
++
++    async def _loop(self) -> None:
++        n = 0
++        while True:
++            try:
++                for run in self.runs.active():
++                    lk = self.lock(run.id)
++                    if lk.locked():
++                        continue
++                    async with lk:
++                        fresh = self.runs.get(run.id)
++                        if fresh and fresh.state == run.state:
++                            await self.tick(fresh)
++                n += 1
++                if n % 600 == 0:
++                    self.runs.prune()
++            except asyncio.CancelledError:
++                raise
++            except Exception as exc:  # noqa: BLE001 - the loop never dies
++                logger.warning("cut tracker pass failed: %s", type(exc).__name__)
++            await asyncio.sleep(TICK)
++
++    async def tick(self, run: Run) -> None:
++        now = time.time()
++        try:
++            if run.state == "await_payment":
++                if now - float(run.extra.get("pay_checked") or 0) >= PAY_CHECK_EVERY:
++                    run.extra["pay_checked"] = now
++                    self.runs.save(run)
++                    if not await self.check_payment(run) and now - float(run.extra.get("pay_since") or now) > PAY_WAIT_SEC:
++                        run.state = "tariffs"           # stop polling; «Я оплатил» still works
++                        self.runs.save(run)
++            elif run.state == "ingest":
++                await self._tick_ingest(run)
++            elif run.state == "job":
++                await self._tick_job(run)
++            elif run.state == "delivering":
++                await self._tick_delivery(run)
++            elif run.state == "starting" and now - (run.started_at or now) > 600:
++                await self.fail(run, T.DOWN)
++        except CutApiError as exc:
++            if exc.status == 404 and run.state == "ingest":
++                await self.fail(run, "Загрузка по ссылке прервалась. Попробуйте ещё раз — обработка не списана.")
++            elif exc.status in (401,):
++                await self.fail(run, "Аккаунт SONYA отвязан от этого Telegram. Клипы будут в «Работах» на сайте.")
++            else:
++                logger.info("cut: tick run=%s api %s", run.id, exc.code)
++
++    async def _tick_ingest(self, run: Run) -> None:
++        st = await self.api.ingest(run.user_id, run.ingest_id or "")
++        status = st.get("status")
++        if status == "queued" and st.get("job_id"):
++            run.job_id, run.state, run.stage = st["job_id"], "job", "queue"
++            run.extra["downloaded"] = run.platform not in VIA_WORKER
++            await self.render(run, T.progress_text(run))
++        elif status == "failed":
++            code = str(st.get("error") or "")
++            if code in PAYWALL:
++                await self.show_tariffs(run, code, st.get("message"))
++            elif code == "SOURCE_TOO_LONG":
++                if st.get("source_minutes"):
++                    run.duration = float(st["source_minutes"]) * 60
++                await self.ask_segment(run, int(st.get("max_source_minutes") or run.max_minutes or 60))
++            else:
++                await self.fail(run, T.human_error(code, st.get("message")) + T.NOT_CHARGED)
++        else:
++            run.stage = "download"
++            await self.render(run, T.progress_text(run))
++
++    async def _tick_job(self, run: Run) -> None:
++        now = time.time()
++        j = await self.api.job(run.user_id, run.job_id or "")
++        status, stage = j.get("status"), j.get("stage")
++        notice = None
++        if status == "source_wait":
++            notice = T.NOTICE_YT
++        elif j.get("notice"):
++            notice = T.NOTICE_LOAD
++        run.notice = notice
++        if stage == "done":
++            run.clips = int(j.get("clips") or 0)
++            run.stage, run.state, run.done_at = "done", "delivering", now
++            run.extra["works_url"] = j.get("works_url")
++            await self.render(run, T.done_text(run))
++            return
++        if stage == "failed":
++            code, msg = j.get("error_code"), j.get("error")
++            if code == "SOURCE_TOO_LONG" or (msg and "максимум" in str(msg) and "мин" in str(msg)):
++                m = re.search(r"(\d+)\s*мин", str(msg or ""))
++                if m and not run.duration:
++                    run.duration = float(m.group(1)) * 60
++                await self.ask_segment(run)
++                return
++            reason = T.human_error(code, msg)
++            if j.get("refunded"):
++                reason += T.NOT_CHARGED
++            await self.fail(run, reason)
++            return
++        run.stage = stage
++        if now - (run.started_at or now) > JOB_TRACK_SEC:
++            run.state = "done"
++            await self.render(run, T.progress_text(run) + "\n\nОбработка идёт дольше обычного — клипы придут сюда, "
++                                                         "как только будут готовы.")
++            return
++        await self.render(run, T.progress_text(run))
++
++    async def _tick_delivery(self, run: Run) -> None:
++        now = time.time()
++        j = await self.api.job(run.user_id, run.job_id or "")
++        delivered = j.get("delivered")
++        settled = int(delivered or 0) + int(j.get("delivery_failed") or 0)
++        if (delivered is not None and settled >= run.clips) or now - (run.done_at or now) > DELIVERY_WAIT_SEC \
++                or run.clips == 0:
++            run.state = "done"
++            self.runs.save(run)
++            await asyncio.sleep(1.5)                    # let the last clip land first
++            await self.bot.send_message(run.chat_id, T.final_text(run),
++                                        reply_markup=T.final_keyboard(run, run.extra.get("works_url") or SITE + "/#/works"))
+diff --git a/bot/services/cut_runs.py b/bot/services/cut_runs.py
+new file mode 100644
+index 0000000..da5c92a
+--- /dev/null
++++ b/bot/services/cut_runs.py
+@@ -0,0 +1,133 @@
++"""One «run» = one video a person sent the bot: card -> mode -> (link / plan / segment) -> job -> clips.
++
++Kept in the bot's sqlite (same file as users/consents) so a bot restart resumes the progress messages.
++States: card, need_link, tariffs, await_payment, need_segment, await_start, starting, ingest, job, delivering,
++done, failed, cancelled.
++"""
++
++from __future__ import annotations
++
++import json
++import secrets
++import sqlite3
++import threading
++import time
++from dataclasses import asdict, dataclass, field
++from pathlib import Path
++
++ACTIVE = ("starting", "ingest", "job", "delivering", "await_payment")
++
++_SCHEMA = """
++CREATE TABLE IF NOT EXISTS cut_runs (
++    id TEXT PRIMARY KEY,
++    user_id INTEGER NOT NULL,
++    chat_id INTEGER NOT NULL,
++    data TEXT NOT NULL,
++    state TEXT NOT NULL,
++    created REAL NOT NULL,
++    updated REAL NOT NULL
++);
++CREATE INDEX IF NOT EXISTS cut_runs_user ON cut_runs(user_id, updated);
++CREATE INDEX IF NOT EXISTS cut_runs_state ON cut_runs(state);
++"""
++
++
++@dataclass
++class Run:
++    id: str
++    user_id: int
++    chat_id: int
++    state: str = "card"
++    url: str | None = None
++    file_id: str | None = None
++    file_name: str | None = None
++    file_size: int | None = None
++    platform: str = "link"
++    title: str = ""
++    duration: float | None = None
++    thumb: str | None = None
++    card_msg_id: int | None = None
++    card_is_photo: bool = False
++    clip: str | None = None
++    quality: str = "standard"
++    trim_start: float | None = None
++    trim_end: float | None = None
++    max_minutes: int | None = None
++    key: str = ""
++    ingest_id: str | None = None
++    job_id: str | None = None
++    stage: str | None = None
++    notice: str | None = None
++    clips: int = 0
++    invoice_id: int | None = None
++    plan_id: str | None = None
++    pay_url: str | None = None
++    preset: str = ""
++    is_admin: bool = False
++    last_text: str = ""
++    error: str | None = None
++    started_at: float | None = None
++    done_at: float | None = None
++    extra: dict = field(default_factory=dict)
++    created: float = 0.0
++    updated: float = 0.0
++
++
++class RunStore:
++    def __init__(self, db_path: Path | str) -> None:
++        self._path = str(db_path)
++        self._lock = threading.Lock()
++        Path(self._path).parent.mkdir(parents=True, exist_ok=True)
++        with self._conn() as c:
++            c.executescript(_SCHEMA)
++
++    def _conn(self) -> sqlite3.Connection:
++        return sqlite3.connect(self._path, timeout=10)
++
++    def new(self, user_id: int, chat_id: int, **fields) -> Run:
++        now = time.time()
++        run = Run(id=secrets.token_hex(4), user_id=user_id, chat_id=chat_id, key=secrets.token_hex(8),
++                  created=now, updated=now, **fields)
++        self.save(run)
++        return run
++
++    def save(self, run: Run) -> None:
++        run.updated = time.time()
++        d = asdict(run)
++        with self._lock, self._conn() as c:
++            c.execute("INSERT INTO cut_runs(id,user_id,chat_id,data,state,created,updated) VALUES(?,?,?,?,?,?,?) "
++                      "ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state, updated=excluded.updated",
++                      (run.id, run.user_id, run.chat_id, json.dumps(d, ensure_ascii=False), run.state,
++                       run.created, run.updated))
++
++    @staticmethod
++    def _load(row) -> Run:
++        d = json.loads(row[0])
++        known = set(Run.__dataclass_fields__)
++        return Run(**{k: v for k, v in d.items() if k in known})
++
++    def get(self, run_id: str) -> Run | None:
++        with self._conn() as c:
++            row = c.execute("SELECT data FROM cut_runs WHERE id=?", (run_id,)).fetchone()
++        return self._load(row) if row else None
++
++    def active(self) -> list[Run]:
++        q = "SELECT data FROM cut_runs WHERE state IN (%s) ORDER BY updated" % ",".join("?" * len(ACTIVE))
++        with self._conn() as c:
++            return [self._load(r) for r in c.execute(q, ACTIVE).fetchall()]
++
++    def latest(self, user_id: int, states: tuple[str, ...], max_age_sec: float = 3600) -> Run | None:
++        q = ("SELECT data FROM cut_runs WHERE user_id=? AND updated>? AND state IN (%s) ORDER BY updated DESC LIMIT 1"
++             % ",".join("?" * len(states)))
++        with self._conn() as c:
++            row = c.execute(q, (user_id, time.time() - max_age_sec, *states)).fetchone()
++        return self._load(row) if row else None
++
++    def count_running(self, user_id: int) -> int:
++        with self._conn() as c:
++            return c.execute("SELECT count(*) FROM cut_runs WHERE user_id=? AND state IN ('starting','ingest','job')",
++                             (user_id,)).fetchone()[0]
++
++    def prune(self, max_age_sec: float = 14 * 86400) -> None:
++        with self._lock, self._conn() as c:
++            c.execute("DELETE FROM cut_runs WHERE updated < ?", (time.time() - max_age_sec,))
+diff --git a/bot/services/media.py b/bot/services/media.py
+new file mode 100644
+index 0000000..e5a3c1d
+--- /dev/null
++++ b/bot/services/media.py
+@@ -0,0 +1,163 @@
++"""Links the bot accepts + the video's title / length / preview WITHOUT downloading it.
++
++Metadata: `yt-dlp -J --skip-download` (the YouTube relay's yt-dlp on this server, YTDLP_BIN), hard timeout;
++fallback for YouTube = the public oEmbed (title + preview, no length). Anything failing -> an empty card
++(the job itself still checks the length on the server).
++"""
++
++from __future__ import annotations
++
++import asyncio
++import json
++import logging
++import os
++import re
++from dataclasses import dataclass, field
++
++import aiohttp
++
++logger = logging.getLogger(__name__)
++
++YTDLP_BIN = os.environ.get("YTDLP_BIN", "/opt/sonya-ytrelay/venv/bin/yt-dlp")
++PROBE_TIMEOUT = float(os.environ.get("BOT_PROBE_TIMEOUT", "20"))
++
++_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.I)
++_PLATFORMS = (
++    ("youtube", re.compile(r"^https?://(?:[a-z0-9-]+\.)?(?:youtube\.com|youtu\.be)/", re.I)),
++    ("vk", re.compile(r"^https?://(?:[a-z0-9-]+\.)?(?:vk\.com|vk\.ru|vkvideo\.ru)/", re.I)),
++    ("rutube", re.compile(r"^https?://(?:[a-z0-9-]+\.)?rutube\.ru/", re.I)),
++    ("twitch", re.compile(r"^https?://(?:[a-z0-9-]+\.)?twitch\.tv/", re.I)),
++)
++PLATFORM_RU = {"youtube": "YouTube", "vk": "VK Видео", "rutube": "Rutube", "twitch": "Twitch", "file": "Файл"}
++_YT_ID = re.compile(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([A-Za-z0-9_-]{11})")
++
++
++@dataclass
++class VideoMeta:
++    platform: str
++    title: str = ""
++    duration: float | None = None
++    thumb: str | None = None
++    uploader: str = ""
++    extra: dict = field(default_factory=dict)
++
++
++def find_link(text: str | None) -> str | None:
++    """The first http(s) link in a message (trailing punctuation stripped)."""
++    if not text:
++        return None
++    m = _URL_RE.search(text)
++    return m.group(0).rstrip(").,;!?»\"'") if m else None
++
++
++def platform_of(url: str) -> str | None:
++    for name, rx in _PLATFORMS:
++        if rx.match(url):
++            return name
++    return None
++
++
++def fmt_duration(sec: float | None) -> str:
++    if not sec:
++        return ""
++    s = int(round(sec))
++    h, m = divmod(s // 60, 60)
++    if h:
++        return f"{h} ч {m:02d} мин"
++    if s >= 60:
++        return f"{s // 60} мин {s % 60:02d} с" if s < 600 and s % 60 else f"{s // 60} мин"
++    return f"{s} с"
++
++
++def parse_start(text: str) -> float | None:
++    """«25» = 25 min, «1:10» = 1 min 10 s, «1:10:00» = 1 h 10 min, «1ч 5м», «90 мин» -> seconds; None if unreadable."""
++    t = (text or "").strip().lower().replace(",", ".")
++    if not t:
++        return None
++    if re.fullmatch(r"\d{1,2}(:\d{1,2}){1,2}", t):
++        parts = [int(x) for x in t.split(":")]
++        if any(p >= 60 for p in parts[1:]):
++            return None
++        sec = 0
++        for p in parts:
++            sec = sec * 60 + p
++        return float(sec)
++    m = re.fullmatch(r"(?:(\d+)\s*(?:ч|час[а-я]*|h))?\s*(?:(\d+(?:\.\d+)?)\s*(?:м|мин[а-я]*|m|min))?\s*", t)
++    if m and (m.group(1) or m.group(2)):
++        return float(int(m.group(1) or 0) * 3600 + float(m.group(2) or 0) * 60)
++    if re.fullmatch(r"\d+(?:\.\d+)?", t):
++        return float(t) * 60
++    return None
++
++
++async def _ytdlp(url: str) -> dict | None:
++    if not os.path.exists(YTDLP_BIN):
++        return None
++    try:
++        proc = await asyncio.create_subprocess_exec(
++            YTDLP_BIN, "-J", "--skip-download", "--no-playlist", "--no-warnings", "--socket-timeout", "10", url,
++            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, cwd="/tmp")
++    except Exception as exc:  # noqa: BLE001
++        logger.warning("probe: cannot start yt-dlp: %s", type(exc).__name__)
++        return None
++    try:
++        out, _ = await asyncio.wait_for(proc.communicate(), timeout=PROBE_TIMEOUT)
++    except asyncio.TimeoutError:
++        proc.kill()
++        return None
++    if proc.returncode != 0 or not out:
++        return None
++    try:
++        j = json.loads(out.decode("utf-8", "replace"))
++    except ValueError:
++        return None
++    return j if isinstance(j, dict) else None
++
++
++async def _oembed(url: str) -> dict | None:
++    try:
++        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as s:
++            async with s.get("https://www.youtube.com/oembed", params={"url": url, "format": "json"}) as r:
++                if r.status == 200:
++                    return await r.json(content_type=None)
++    except Exception:  # noqa: BLE001
++        return None
++    return None
++
++
++def _thumb(platform: str, url: str, j: dict) -> str | None:
++    if platform == "youtube":
++        m = _YT_ID.search(url) or _YT_ID.search(str(j.get("webpage_url") or ""))
++        if m:
++            return f"https://i.ytimg.com/vi/{m.group(1)}/hqdefault.jpg"
++    th = j.get("thumbnail")
++    if isinstance(th, str) and th.startswith("https://"):
++        return th
++    for t in reversed(j.get("thumbnails") or []):
++        u = t.get("url") if isinstance(t, dict) else None
++        if isinstance(u, str) and u.startswith("https://") and not u.endswith(".webp"):
++            return u
++    return None
++
++
++async def probe(url: str) -> VideoMeta:
++    platform = platform_of(url) or "link"
++    meta = VideoMeta(platform=platform)
++    j = await _ytdlp(url)
++    if j:
++        meta.title = str(j.get("title") or j.get("fulltitle") or "")[:200]
++        try:
++            meta.duration = float(j["duration"]) if j.get("duration") else None
++        except (TypeError, ValueError):
++            meta.duration = None
++        meta.uploader = str(j.get("uploader") or j.get("channel") or "")[:80]
++        meta.thumb = _thumb(platform, url, j)
++        meta.extra["is_live"] = bool(j.get("is_live"))
++        return meta
++    if platform == "youtube":
++        o = await _oembed(url)
++        if o:
++            meta.title = str(o.get("title") or "")[:200]
++            meta.uploader = str(o.get("author_name") or "")[:80]
++            meta.thumb = _thumb(platform, url, {})
++    return meta
+diff --git a/main.py b/main.py
+index cd90fdd..53f31ac 100644
+--- a/main.py
++++ b/main.py
+@@ -28,6 +28,9 @@ import os
+ 
+ from bot.middlewares import ActivityMiddleware, SubscriptionGateMiddleware
+ from bot.scheduler import start_scheduler
++from bot.services.cut_api import CutApi
++from bot.services.cut_flow import CutFlow
++from bot.services.cut_runs import RunStore
+ from bot.services.sonya_api import SonyaApiClient
+ from bot.services.user import UserStore
+ 
+@@ -50,9 +53,16 @@ async def main() -> None:
+     user_store = UserStore(settings.db_path)
+     sonya_api = SonyaApiClient(settings.sonya_api)
+ 
++    # TELEGRAM_API_BASE: tests only (a local fake Bot API); production talks to api.telegram.org as before.
++    session = None
++    if os.environ.get("TELEGRAM_API_BASE"):
++        from aiogram.client.session.aiohttp import AiohttpSession
++        from aiogram.client.telegram import TelegramAPIServer
++        session = AiohttpSession(api=TelegramAPIServer.from_base(os.environ["TELEGRAM_API_BASE"]))
+     bot = Bot(
+         token=settings.bot_token,
+         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
++        session=session,
+     )
+     dispatcher = Dispatcher()
+     dispatcher.include_router(main_router)
+@@ -73,6 +83,16 @@ async def main() -> None:
+     dispatcher["consent_store"] = consent_store
+     dispatcher["user_store"] = user_store
+     dispatcher["sonya_api"] = sonya_api
++    # «ссылка → режим → подписка → нарезка» (2026-11-20). BOT_CUT_FLOW=off -> links get the old silence.
++    cut_flow = CutFlow(bot, CutApi(settings.sonya_api), RunStore(settings.db_path))
++    dispatcher["cut_flow"] = cut_flow
++    if (os.environ.get("BOT_CUT_FLOW") or "on").strip().lower() not in ("off", "0", "false", "no"):
++        cut_flow.start_tracker()
++        logger.info("Cut flow on")
++    else:
++        from bot.handlers import cut as _cut
++        main_router.sub_routers.remove(_cut.router)
++        logger.info("Cut flow off")
+ 
+     scheduler = start_scheduler(
+         bot, user_store, engagement_enabled=settings.engagement_enabled
+diff --git a/tests/test_cut_flow.py b/tests/test_cut_flow.py
+new file mode 100644
+index 0000000..2322e31
+--- /dev/null
++++ b/tests/test_cut_flow.py
+@@ -0,0 +1,360 @@
++"""«Ссылка → режим → подписка → нарезка»: texts, link parsing, and the CutFlow decision chain with fakes
++(no Telegram, no SONYA API)."""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from bot import cut_texts as T
++from bot.services import media
++from bot.services.cut_api import CutApiError
++from bot.services.cut_flow import CutFlow
++from bot.services.cut_runs import RunStore
++
++PLANS = [
++    {"plan_id": "cut_start", "mode": "cut", "kind": "subscription", "price": 1090, "ops": 30, "max_source_minutes": 60},
++    {"plan_id": "cut_pro", "mode": "cut", "kind": "subscription", "price": 2690, "ops": 50, "max_source_minutes": 120},
++    {"plan_id": "cut_studio", "mode": "cut", "kind": "subscription", "price": 4990, "ops": 80, "max_source_minutes": 180},
++    {"plan_id": "streamer_start", "mode": "streamer", "kind": "subscription", "price": 1990, "ops": 10,
++     "max_source_minutes": 240},
++    {"plan_id": "beep_10", "mode": "beep", "kind": "pack", "price": 249, "ops": 10, "max_source_minutes": 0},
++    {"plan_id": "gen_100", "mode": "gen", "kind": "pack", "price": 349, "ops": 100, "max_source_minutes": 0},
++]
++
++
++def account(allowed=True, left=5, cap=60, admin=False, code=None):
++    a = {"allowed": allowed, "left": left, "max_source_minutes": cap, "code": code,
++         "message": "Бесплатная генерация уже использована. Выберите тариф SONYA." if code else None}
++    return {"linked": True, "is_admin": admin, "access": {c: dict(a) for c in T.CLIPS if c != "trailer" or admin},
++            "preset": {"name": "Мой стиль", "quality": "standard"}, "quality": {"available": True, "units": 3},
++            "urls": {"presets": "https://sonya.group/#/presets", "works": "https://sonya.group/#/works",
++                     "tariffs": "https://sonya.group/?paywall=1"}}
++
++
++class FakeBot:
++    def __init__(self):
++        self.sent, self.edits, self.photos, self.log = [], [], [], []
++        self._id = 100
++
++    def _msg(self):
++        self._id += 1
++        return SimpleNamespace(message_id=self._id)
++
++    async def send_message(self, chat_id, text, reply_markup=None, **kw):
++        self.sent.append((text, reply_markup))
++        self.log.append((text, reply_markup))
++        return self._msg()
++
++    async def send_photo(self, chat_id, photo, caption=None, reply_markup=None, **kw):
++        self.photos.append((caption, reply_markup))
++        self.log.append((caption, reply_markup))
++        return self._msg()
++
++    async def edit_message_text(self, chat_id=None, message_id=None, text=None, reply_markup=None, **kw):
++        self.edits.append((text, reply_markup))
++        self.log.append((text, reply_markup))
++
++    async def edit_message_caption(self, chat_id=None, message_id=None, caption=None, reply_markup=None, **kw):
++        self.edits.append((caption, reply_markup))
++        self.log.append((caption, reply_markup))
++
++    async def delete_message(self, chat_id, message_id):
++        pass
++
++    def last(self):
++        return self.log[-1] if self.log else (None, None)
++
++
++def buttons(kb):
++    return [b.text for row in kb.inline_keyboard for b in row] if kb else []
++
++
++@pytest.fixture
++def flow(tmp_path):
++    api = SimpleNamespace(account=AsyncMock(return_value=account()), pricing=AsyncMock(return_value={"plans": PLANS}),
++                          job_from_url=AsyncMock(return_value={"ingest_id": "ing-1"}),
++                          job_from_file=AsyncMock(return_value={"job_id": "job-1"}),
++                          ingest=AsyncMock(), job=AsyncMock(), checkout=AsyncMock(), payment=AsyncMock())
++    f = CutFlow(FakeBot(), api, RunStore(tmp_path / "b.db"))
++    return f
++
++
++def mkrun(flow, duration=600.0, platform="vk", url="https://vk.com/video1_2"):
++    meta = media.VideoMeta(platform=platform, title="Интервью <года>", duration=duration)
++    return flow.new_run(42, 42, meta, url=url)
++
++
++# ── parsing ───────────────────────────────────────────────────────────────────
++
++def test_find_link_and_platform():
++    assert media.find_link("смотри https://youtu.be/abc123xyz00, круто") == "https://youtu.be/abc123xyz00"
++    assert media.find_link("без ссылки") is None
++    assert media.platform_of("https://www.youtube.com/watch?v=x") == "youtube"
++    assert media.platform_of("https://vkvideo.ru/video-1_2") == "vk"
++    assert media.platform_of("https://rutube.ru/video/abc/") == "rutube"
++    assert media.platform_of("https://www.twitch.tv/videos/1") == "twitch"
++    assert media.platform_of("https://example.com/v.mp4") is None
++
++
++def test_parse_start():
++    assert media.parse_start("25") == 1500
++    assert media.parse_start("1:10:00") == 4200
++    assert media.parse_start("12:30") == 750
++    assert media.parse_start("1ч 5м") == 3900
++    assert media.parse_start("90 мин") == 5400
++    assert media.parse_start("1:75") is None and media.parse_start("когда-нибудь") is None
++
++
++def test_fmt_duration():
++    assert media.fmt_duration(8040) == "2 ч 14 мин"
++    assert media.fmt_duration(754) == "12 мин"
++    assert media.fmt_duration(95) == "1 мин 35 с"
++    assert media.fmt_duration(None) == ""
++
++
++# ── texts ─────────────────────────────────────────────────────────────────────
++
++def test_card_escapes_and_keyboard(flow):
++    run = mkrun(flow)
++    text = T.card_text(run)
++    assert "&lt;года&gt;" in text and "VK Видео · 10 мин" in text and "Что сделаем?" in text
++    names = buttons(T.card_keyboard(run, "https://sonya.group/#/presets"))
++    assert names[:6] == ["Вирал", "Стример", "Образовательный", "Сторителлинг", "Хуки", "BEEP"]
++    assert "Трейлер · админ" not in names and "✓ Стандарт" in names
++    assert any(n.startswith("Стиль: Стандарт SONYA") for n in names)
++    run.is_admin = True
++    assert "Трейлер · админ" in buttons(T.card_keyboard(run, "u"))
++    for row in T.card_keyboard(run, "u").inline_keyboard:
++        for b in row:
++            assert b.callback_data is None or len(b.callback_data.encode()) <= 64
++
++
++def test_tariffs_text_prices():
++    run = SimpleNamespace(title="Видео", file_id=None, platform="vk", duration=None)
++    t = T.tariffs_text(run, PLANS, "cut", "FREE_PLAN_USED", None)
++    assert "1 090 ₽/мес" in t and "50 обработок · видео до 2 ч" in t and "Бесплатная обработка" in t
++    assert "BEEP" not in t
++    b = T.tariffs_text(run, PLANS, "beep", "FREE_PLAN_USED", None)
++    assert "249 ₽" in b and "10 обработок, не сгорает" in b
++    g = T.general_pricing_text(PLANS)
++    assert "Пакет Gen" in g and "100 изображений" in g and "Стример" in g
++
++
++def test_progress_steps(flow):
++    run = mkrun(flow)
++    run.clip, run.state, run.stage = "viral", "job", "analyze"
++    t = T.progress_text(run)
++    assert "✓ Скачиваем видео" in t and "● <b>Анализ</b>…" in t and "○ Монтаж" in t and "○ Готово" in t
++    assert "Вирал · Стандарт · Мой стиль" not in t       # no preset yet
++    run.stage, run.notice = "queue", T.NOTICE_LOAD
++    run.extra["downloaded"] = False
++    t = T.progress_text(run)
++    assert "● <b>Скачиваем видео</b> · в очереди" in t and "Высокая нагрузка" in t
++
++
++def test_human_errors():
++    assert T.human_error("unsupported_url", None) == T.UNSUPPORTED
++    assert T.human_error("unavailable", None) == T.DOWN
++    assert T.human_error("SOURCE_PRIVATE", "Видео закрыто автором.") == "Видео закрыто автором."
++    assert T.human_error("RUNNER_FAILED", "NO_CLIPS: traceback") == T.GENERIC_FAIL   # never a raw error
++
++
++# ── the decision chain ────────────────────────────────────────────────────────
++
++@pytest.mark.asyncio
++async def test_card_then_viral_starts(flow):
++    run = mkrun(flow)
++    await flow.show_card(run)
++    assert run.preset == "Мой стиль"
++    run.clip = "viral"
++    await flow.proceed(run)
++    flow.api.job_from_url.assert_awaited_once()
++    args = flow.api.job_from_url.await_args.args
++    assert args[:4] == (42, "https://vk.com/video1_2", "viral", "standard")
++    saved = flow.runs.get(run.id)
++    assert saved.state == "ingest" and saved.ingest_id == "ing-1"
++    assert "Скачиваем видео" in flow.bot.last()[0]
++
++
++@pytest.mark.asyncio
++async def test_not_linked_shows_login_then_resumes(flow):
++    flow.api.account.return_value = {"linked": False, "connect_url": "https://sonya.group/?tg=connect"}
++    run = mkrun(flow)
++    run.clip = "story"
++    await flow.proceed(run)
++    text, kb = flow.bot.last()
++    assert "Привяжите аккаунт SONYA" in text and "Войти и привязать" in buttons(kb)
++    assert kb.inline_keyboard[0][0].url == "https://sonya.group/?tg=connect"
++    assert flow.runs.get(run.id).state == "need_link"
++    flow.api.account.return_value = account()
++    assert await flow.resume_after_link(42) is True
++    assert flow.runs.get(run.id).state == "ingest"
++    assert flow.api.job_from_url.await_args.args[2] == "story"
++
++
++@pytest.mark.asyncio
++async def test_no_access_tariffs_then_pay_then_auto_start(flow):
++    flow.api.account.return_value = account(allowed=False, code="FREE_PLAN_USED")
++    run = mkrun(flow)
++    run.clip = "hooks"
++    await flow.proceed(run)
++    text, kb = flow.bot.last()
++    assert "Тариф «Нарезка»" in text and "Оформить Pro · 2 690 ₽" in buttons(kb)
++    flow.api.checkout.return_value = {"invoice_id": 77, "status": "pending", "redirect_url": "https://yoomoney.ru/c/x"}
++    assert await flow.buy(run, "cut_pro") is None
++    text, kb = flow.bot.last()
++    assert "Нарезка Pro — 2 690 ₽" in text and kb.inline_keyboard[0][0].url == "https://yoomoney.ru/c/x"
++    assert flow.runs.get(run.id).state == "await_payment"
++    flow.api.payment.return_value = {"status": "pending"}
++    assert await flow.check_payment(run) is False
++    flow.api.payment.return_value = {"status": "paid"}
++    flow.api.account.return_value = account()
++    assert await flow.check_payment(run) is True
++    assert flow.runs.get(run.id).state == "ingest"
++
++
++@pytest.mark.asyncio
++async def test_beep_gets_pack(flow):
++    flow.api.account.return_value = account(allowed=False, code="FREE_PLAN_USED")
++    run = mkrun(flow)
++    run.clip = "beep"
++    await flow.proceed(run)
++    assert buttons(flow.bot.last()[1])[0] == "Оформить Пакет BEEP · 249 ₽"
++
++
++@pytest.mark.asyncio
++async def test_long_video_segment_first_and_custom(flow):
++    run = mkrun(flow, duration=8040)          # 2 h 14 min, cap 60
++    run.clip = "viral"
++    await flow.proceed(run)
++    text, kb = flow.bot.last()
++    assert "Видео идёт 2 ч 14 мин" in text and "до 1 ч" in text and buttons(kb)[:2] == ["Первые 1 ч", "Указать начало"]
++    assert flow.api.job_from_url.await_count == 0
++    err = await flow.set_segment(run, 8100)
++    assert err and flow.api.job_from_url.await_count == 0
++    assert await flow.set_segment(run, 1500) is None
++    a = flow.api.job_from_url.await_args.args
++    assert a[5:] == (1500.0, 5100.0)
++
++
++@pytest.mark.asyncio
++async def test_2k_short_offers_standard(flow):
++    flow.api.account.return_value = account(left=1)
++    run = mkrun(flow)
++    run.clip, run.quality = "viral", "high"
++    await flow.proceed(run)
++    text, kb = flow.bot.last()
++    assert "списывает 3 обработки, а осталось 1" in text and buttons(kb)[0] == "Запустить в Стандарте"
++    # Streamer ignores 2K -> starts as standard
++    run.clip = "streamer"
++    await flow.proceed(run)
++    assert flow.api.job_from_url.await_args.args[3] == "standard"
++
++
++@pytest.mark.asyncio
++async def test_api_402_on_start_goes_to_tariffs(flow):
++    flow.api.job_from_url.side_effect = CutApiError(402, "PLAN_LIMIT_REACHED", "Лимит тарифа исчерпан: 30 из 30.")
++    run = mkrun(flow)
++    run.clip = "viral"
++    await flow.proceed(run)
++    assert "Лимит тарифа исчерпан: 30 из 30." in flow.bot.last()[0]
++
++
++@pytest.mark.asyncio
++async def test_busy_and_down(flow):
++    flow.api.job_from_url.side_effect = CutApiError(429, "quota_exceeded", None, {"reason": "too_many_active_jobs"})
++    run = mkrun(flow)
++    run.clip = "viral"
++    await flow.proceed(run)
++    assert T.BUSY in flow.bot.last()[0]
++    flow.api.account.side_effect = CutApiError(0, "unavailable")
++    flow.api.account.return_value = None
++    run2 = mkrun(flow)
++    run2.clip = "viral"
++    await flow.proceed(run2)
++    assert T.DOWN in flow.bot.last()[0]
++
++
++@pytest.mark.asyncio
++async def test_tracker_ingest_job_done_delivery(flow):
++    run = mkrun(flow, platform="youtube", url="https://youtu.be/abcdefghijk")
++    run.clip = "viral"
++    await flow.proceed(run)
++    run = flow.runs.get(run.id)
++    flow.api.ingest.return_value = {"status": "queued", "job_id": "job-7"}
++    await flow.tick(run)
++    run = flow.runs.get(run.id)
++    assert run.state == "job" and run.extra["downloaded"] is False       # YouTube: the worker downloads
++    flow.api.job.return_value = {"status": "source_wait", "stage": "download", "notice": "x"}
++    await flow.tick(run)
++    assert "YouTube сейчас отдаёт видео медленно" in flow.bot.last()[0]
++    flow.api.job.return_value = {"status": "queued", "stage": "queue", "notice": "Высокая нагрузка"}
++    await flow.tick(flow.runs.get(run.id))
++    assert T.NOTICE_LOAD in flow.bot.last()[0]
++    flow.api.job.return_value = {"status": "assembling", "stage": "edit"}
++    await flow.tick(flow.runs.get(run.id))
++    assert "● <b>Монтаж</b>" in flow.bot.last()[0]
++    flow.api.job.return_value = {"status": "completed", "stage": "done", "clips": 8, "works_url": "https://w"}
++    await flow.tick(flow.runs.get(run.id))
++    assert "Готово — 8 клипов" in flow.bot.last()[0] and flow.runs.get(run.id).state == "delivering"
++    flow.api.job.return_value = {"status": "completed", "stage": "done", "clips": 8, "delivered": 5}
++    n = len(flow.bot.sent)
++    await flow.tick(flow.runs.get(run.id))
++    assert len(flow.bot.sent) == n                     # still delivering
++    flow.api.job.return_value = {"status": "completed", "stage": "done", "clips": 8, "delivered": 8}
++    await flow.tick(flow.runs.get(run.id))
++    text, kb = flow.bot.sent[-1]
++    assert text == "Все 8 клипов выше. Что дальше?" and buttons(kb) == ["Ещё нарезку", "Открыть в Работах"]
++    assert flow.runs.get(run.id).state == "done"
++
++
++@pytest.mark.asyncio
++async def test_tracker_failures(flow):
++    run = mkrun(flow)
++    run.clip = "viral"
++    await flow.proceed(run)
++    flow.api.ingest.return_value = {"status": "failed", "error": "download_failed",
++                                    "message": "Не удалось скачать видео по ссылке."}
++    await flow.tick(flow.runs.get(run.id))
++    assert "Не удалось скачать видео по ссылке. Обработка не списана." in flow.bot.last()[0]
++    run2 = mkrun(flow)
++    run2.clip = "viral"
++    await flow.proceed(run2)
++    run2 = flow.runs.get(run2.id)
++    run2.state, run2.job_id = "job", "j"
++    flow.runs.save(run2)
++    flow.api.job.return_value = {"status": "failed", "stage": "failed", "error_code": "SOURCE_TOO_LONG",
++                                 "error": "Видео длится 134 мин, а максимум — 60 минут."}
++    run2.duration = None
++    await flow.tick(run2)
++    assert "Видео длиннее лимита" in flow.bot.last()[0] and flow.runs.get(run2.id).state == "need_segment"
++    flow.api.job.return_value = {"status": "failed", "stage": "failed", "error_code": "RUNNER_FAILED",
++                                 "error": "NO_CLIPS: x"}
++    r3 = flow.runs.get(run2.id)
++    r3.state = "job"
++    await flow.tick(r3)
++    assert T.GENERIC_FAIL in flow.bot.last()[0] and "Другой режим" in buttons(flow.bot.last()[1])
++
++
++@pytest.mark.asyncio
++async def test_file_source(flow):
++    flow.bot.download = AsyncMock(side_effect=lambda fid, destination, timeout: destination.write(b"vid"))
++    meta = media.VideoMeta(platform="file", title="clip.mp4", duration=90)
++    run = flow.new_run(42, 42, meta, file_id="F1", file_name="clip.mp4", file_size=3)
++    run.clip = "beep"
++    await flow.proceed(run)
++    a = flow.api.job_from_file.await_args.args
++    assert a[1] == b"vid" and a[2] == "clip.mp4" and a[3] == "beep"
++    assert flow.runs.get(run.id).state == "job"
++
++
++@pytest.mark.asyncio
++async def test_too_big_file(flow):
++    meta = media.VideoMeta(platform="file")
++    run = flow.new_run(42, 42, meta, file_id="F1", file_size=30 * 1024 * 1024)
++    run.clip = "viral"
++    await flow.proceed(run)
++    assert T.TOO_BIG_FILE in flow.bot.last()[0]
+diff --git a/tools/dryrun/fake_tg.py b/tools/dryrun/fake_tg.py
+new file mode 100644
+index 0000000..b812bd0
+--- /dev/null
++++ b/tools/dryrun/fake_tg.py
+@@ -0,0 +1,244 @@
++"""A local fake Telegram Bot API (just what @sonya_group_ai uses) + a scripted «user» to drive the real bot code.
++
++The bot process runs with TELEGRAM_API_BASE=http://127.0.0.1:<port> and talks to this server instead of Telegram.
++Everything the bot sends / edits is kept per message, so the final chat can be printed as a transcript.
++"""
++from __future__ import annotations
++
++import asyncio
++import json
++import time
++
++from aiohttp import web
++
++BOT_USER = {"id": 8659524434, "is_bot": True, "first_name": "SONYA", "username": "sonya_group_ai"}
++
++
++class FakeTelegram:
++    def __init__(self, member_ids=None):
++        self.updates: list[dict] = []
++        self.update_id = 1000
++        self.msg_id = 500
++        self.messages: dict[int, dict] = {}       # message_id -> current state (+ history of edits)
++        self.order: list[int] = []
++        self.alerts: list[tuple[float, str]] = []
++        self.calls: list[tuple[float, str]] = []
++        self.last_call = time.time()
++        self.member_ids = member_ids              # None = everybody subscribed
++        self.cond = asyncio.Condition()
++
++    # ── user side ────────────────────────────────────────────────────────────
++    def _user(self, uid):
++        return {"id": uid, "is_bot": False, "first_name": "Тест", "username": f"test{uid}", "language_code": "ru"}
++
++    async def push(self, upd: dict):
++        async with self.cond:
++            self.update_id += 1
++            upd["update_id"] = self.update_id
++            self.updates.append(upd)
++            self.cond.notify_all()
++
++    async def user_text(self, uid: int, text: str):
++        self.msg_id += 1
++        m = {"message_id": self.msg_id, "date": int(time.time()), "chat": {"id": uid, "type": "private"},
++             "from": self._user(uid), "text": text}
++        if text.startswith("/"):
++            m["entities"] = [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
++        self.messages[self.msg_id] = {"from": "user", "text": text, "history": []}
++        self.order.append(self.msg_id)
++        await self.push({"message": m})
++
++    async def user_video(self, uid: int, path: str, name: str = "interview.mp4", duration: int = 6):
++        import os
++        self.msg_id += 1
++        self.files = getattr(self, "files", {})
++        self.files["vid1"] = path
++        m = {"message_id": self.msg_id, "date": int(time.time()), "chat": {"id": uid, "type": "private"},
++             "from": self._user(uid), "video": {"file_id": "vid1", "file_unique_id": "vidu1", "width": 640,
++                                                 "height": 360, "duration": duration, "file_name": name,
++                                                 "mime_type": "video/mp4", "file_size": os.path.getsize(path)}}
++        self.messages[self.msg_id] = {"from": "user", "text": f"[видеофайл {name}, {duration} с]", "history": []}
++        self.order.append(self.msg_id)
++        await self.push({"message": m})
++
++    async def file(self, request: web.Request):
++        return web.FileResponse(self.files["vid1"])
++
++    def find_button(self, text_prefix: str):
++        for mid in reversed(self.order):
++            st = self.messages[mid]
++            for row in (st.get("markup") or {}).get("inline_keyboard", []):
++                for b in row:
++                    if b.get("text", "").startswith(text_prefix):
++                        return mid, b
++        raise KeyError(text_prefix)
++
++    async def click(self, uid: int, text_prefix: str):
++        mid, b = self.find_button(text_prefix)
++        if "callback_data" not in b:
++            raise ValueError(f"{text_prefix} is a url button: {b.get('url')}")
++        self.messages[mid].setdefault("clicks", []).append(b["text"])
++        await self.push({"callback_query": {"id": str(self.update_id), "from": self._user(uid), "chat_instance": "1",
++                                            "data": b["callback_data"],
++                                            "message": self._msg_json(mid, uid)}})
++
++    async def idle(self, quiet: float = 2.5, timeout: float = 60):
++        t0 = time.time()
++        while time.time() - t0 < timeout:
++            await asyncio.sleep(0.3)
++            if time.time() - self.last_call > quiet and not self.updates:
++                return
++        raise TimeoutError("bot did not settle")
++
++    async def wait_for(self, pred, timeout: float = 90):
++        t0 = time.time()
++        while time.time() - t0 < timeout:
++            try:
++                if pred():
++                    return True
++            except (KeyError, IndexError, ValueError):
++                pass
++            await asyncio.sleep(0.3)
++        raise TimeoutError("condition not reached")
++
++    def last_bot_text(self) -> str:
++        for mid in reversed(self.order):
++            st = self.messages[mid]
++            if st["from"] == "bot" and not st.get("deleted"):
++                return st.get("text") or st.get("caption") or ""
++        return ""
++
++    # ── bot side ─────────────────────────────────────────────────────────────
++    def _msg_json(self, mid: int, chat_id: int) -> dict:
++        st = self.messages[mid]
++        m = {"message_id": mid, "date": int(time.time()), "chat": {"id": chat_id, "type": "private"},
++             "from": BOT_USER if st["from"] == "bot" else self._user(chat_id)}
++        if st.get("photo"):
++            m["photo"] = [{"file_id": "ph", "file_unique_id": "phu", "width": 480, "height": 360}]
++            if st.get("caption"):
++                m["caption"] = st["caption"]
++        else:
++            m["text"] = st.get("text") or ""
++        if st.get("markup"):
++            m["reply_markup"] = st["markup"]
++        return m
++
++    @staticmethod
++    async def _params(request: web.Request) -> dict:
++        if request.content_type == "application/json":
++            return await request.json()
++        data = await request.post()
++        out = {}
++        for k, v in data.items():
++            out[k] = v if isinstance(v, str) else "<file>"
++        for k in ("reply_markup", "link_preview_options"):
++            if isinstance(out.get(k), str):
++                try:
++                    out[k] = json.loads(out[k])
++                except ValueError:
++                    pass
++        return out
++
++    async def handle(self, request: web.Request):
++        method = request.match_info["method"]
++        p = await self._params(request)
++        if method != "getUpdates":
++            self.last_call = time.time()
++            self.calls.append((time.time(), method))
++        ok = lambda r: web.json_response({"ok": True, "result": r})  # noqa: E731
++        if method == "getMe":
++            return ok(BOT_USER)
++        if method in ("deleteWebhook", "setMyCommands", "sendChatAction", "setChatMenuButton"):
++            return ok(True)
++        if method == "getFile":
++            import os
++            return ok({"file_id": p["file_id"], "file_unique_id": "u", "file_size": os.path.getsize(self.files["vid1"]),
++                       "file_path": "videos/file_1.mp4"})
++        if method == "getUpdates":
++            offset = int(p.get("offset") or 0)
++            timeout = min(float(p.get("timeout") or 0), 2.0)
++            async with self.cond:
++                self.updates = [u for u in self.updates if u["update_id"] >= offset]
++                if not self.updates and timeout:
++                    try:
++                        await asyncio.wait_for(self.cond.wait(), timeout)
++                    except asyncio.TimeoutError:
++                        pass
++                res = [u for u in self.updates if u["update_id"] >= offset]
++                self.updates = []
++            return ok(res)
++        if method == "getChatMember":
++            uid = int(p["user_id"])
++            status = "member" if self.member_ids is None or uid in self.member_ids else "left"
++            return ok({"status": status, "user": self._user(uid)})
++        if method in ("sendMessage", "sendPhoto"):
++            self.msg_id += 1
++            chat = int(p["chat_id"])
++            st = {"from": "bot", "history": [], "markup": p.get("reply_markup")}
++            if method == "sendPhoto":
++                st["photo"] = p.get("photo")
++                st["caption"] = p.get("caption")
++            else:
++                st["text"] = p.get("text")
++            self.messages[self.msg_id] = st
++            self.order.append(self.msg_id)
++            return ok(self._msg_json(self.msg_id, chat))
++        if method in ("editMessageText", "editMessageCaption", "editMessageReplyMarkup"):
++            mid = int(p["message_id"])
++            st = self.messages[mid]
++            st["history"].append(st.get("text") or st.get("caption"))
++            if method == "editMessageText":
++                if st.get("photo"):
++                    return web.json_response({"ok": False, "error_code": 400,
++                                              "description": "Bad Request: there is no text in the message to edit"}, status=400)
++                st["text"] = p.get("text")
++            elif method == "editMessageCaption":
++                st["caption"] = p.get("caption")
++            st["markup"] = p.get("reply_markup")
++            return ok(self._msg_json(mid, int(p["chat_id"])))
++        if method == "deleteMessage":
++            self.messages[int(p["message_id"])]["deleted"] = True
++            return ok(True)
++        if method == "answerCallbackQuery":
++            if p.get("text"):
++                self.alerts.append((time.time(), p["text"]))
++            return ok(True)
++        return web.json_response({"ok": False, "error_code": 400, "description": f"fake: {method} not supported"},
++                                 status=400)
++
++    def app(self) -> web.Application:
++        a = web.Application(client_max_size=60 * 1024 * 1024)
++        a.router.add_route("*", "/bot{token}/{method}", self.handle)
++        a.router.add_get("/file/bot{token}/{path:.*}", self.file)
++        return a
++
++    # ── transcript ───────────────────────────────────────────────────────────
++    def transcript(self) -> str:
++        import re
++        out = []
++        for mid in self.order:
++            st = self.messages[mid]
++            if st["from"] == "user":
++                out.append(f"\n👤 {st['text']}")
++                continue
++            body = st.get("caption") if st.get("photo") else st.get("text")
++            plain = re.sub(r"<[^>]+>", "", body or "").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
++            tag = "[превью] " if st.get("photo") else ""
++            if st.get("deleted"):
++                out.append(f"🤖 (удалено) {plain}")
++                continue
++            mid_frame = next((h for h in st["history"] if h and "● " in h), None)
++            if mid_frame:
++                out.append("🤖 ⋯ промежуточный вид:\n   " + re.sub(r"<[^>]+>", "", mid_frame).replace("\n", "\n   "))
++            if st["history"]:
++                steps = [re.sub(r"<[^>]+>", "", h or "").split("\n")[-1] for h in st["history"]]
++                out.append("🤖 (сообщение обновлялось %d раз: %s)" % (len(st["history"]), " → ".join(
++                    dict.fromkeys(s for s in steps if s))))
++            out.append("🤖 " + tag + plain.replace("\n", "\n   "))
++            for row in (st.get("markup") or {}).get("inline_keyboard", []):
++                out.append("   " + "  ".join(f"[{b['text']}{' ↗' if b.get('url') else ''}]" for b in row))
++            for c in st.get("clicks", []):
++                out.append(f"   👆 нажато: {c}")
++        if self.alerts:
++            out.append("\nВсплывающие ответы: " + " | ".join(a for _, a in self.alerts))
++        return "\n".join(out)
+diff --git a/tools/dryrun/run_sim.py b/tools/dryrun/run_sim.py
+new file mode 100644
+index 0000000..17e722a
+--- /dev/null
++++ b/tools/dryrun/run_sim.py
+@@ -0,0 +1,226 @@
++"""Dry run of «ссылка → режим → подписка → нарезка» with the REAL new bot code and the REAL production bridge
++(sonya.group/api/telegram/bot/*), a fake Telegram (fake_tg.py) and the test account loadtest+1.
++
++Not touched: real Telegram users, money, Vast. Payment = test mode in the local bridge proxy (checkout/payment are
++answered here, never sent to ЮKassa). Every job the bot creates is cancelled on the server within a second
++(sim_helper.py cancel); the later stages of such a job (анализ → монтаж → готово, 8 clips delivered) are replayed
++by the proxy so the whole progress message can be seen.
++
++  ../venv/bin/python run_sim.py            -> run/transcript.txt, run/bot.log, run/server.log
++"""
++from __future__ import annotations
++
++import asyncio
++import os
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++import aiohttp
++from aiohttp import web
++
++sys.path.insert(0, str(Path(__file__).parent))
++from fake_tg import FakeTelegram  # noqa: E402
++
++HERE = Path(__file__).parent
++RUN = HERE / "run"
++WORK = HERE.parent / "work"
++PY = HERE.parent / "venv" / "bin" / "python"
++SITE = "root@217.199.252.163"
++U = 900000001            # the scripted user (fake Telegram id, linked to loadtest+1 during the run)
++U_NOSUB = 900000003      # not subscribed to the channel -> the gate
++TG_PORT, PROXY_PORT = 8091, 8092
++REMOTE_PY = "cd /opt/sonya && set -a && . ./.env.local && set +a && .venv/bin/python /root/botlink-stage/sim_helper.py"
++
++LINK_SHORT = "https://www.youtube.com/watch?v=arj7oStGLkU"   # TED, ~14 min
++LINK_PAY = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"     # 3.5 min
++LINK_LONG = "https://www.youtube.com/watch?v=rfscVS0vtbw"    # 4.5 h lecture
++LINK_2K = "https://youtu.be/jNQXAC9IVRw"                     # 19 s
++
++
++class Proxy:
++    """/api/telegram/bot/* -> production, except the payment (test mode) and the replayed stages of cancelled jobs."""
++
++    def __init__(self):
++        self.paid = False
++        self.pay_calls = 0
++        self.replay: dict[str, int] = {}
++        self.log: list[str] = []
++
++    async def handle(self, request: web.Request):
++        full = request.match_info["path"]                    # after /api/
++        path = full.removeprefix("telegram/bot/")
++        body = await request.read()
++        if path == "checkout":
++            self.log.append("checkout (test mode, not sent to ЮKassa)")
++            return web.json_response({"invoice_id": 990001, "status": "pending", "reused": False,
++                                      "redirect_url": "https://yoomoney.ru/checkout/payments/v2/contract?orderId=DRYRUN"})
++        if path == "payment":
++            self.pay_calls += 1
++            return web.json_response({"status": "paid" if self.paid else "pending", "plan_id": "cut_pro"})
++        headers = {k: v for k, v in request.headers.items() if k.lower() in ("x-sonya-bot-secret", "content-type")}
++        async with aiohttp.ClientSession() as s:
++            async with s.post("https://sonya.group/api/" + full, data=body, headers=headers) as r:
++                data = await r.read()
++                status = r.status
++        if path == "job" and status == 200:
++            import json
++            j = json.loads(data)
++            if j.get("status") == "cancelled" and "dry-run" in str(j.get("error") or ""):
++                n = self.replay.get(j["job_id"], 0)
++                self.replay[j["job_id"]] = n + 1
++                seq = [("analyzing", "analyze"), ("mode_running", "analyze"), ("subtitles", "edit"),
++                       ("assembling", "edit")]
++                if n < len(seq):
++                    j.update(status=seq[n][0], stage=seq[n][1], error=None, error_code=None)
++                else:
++                    j.update(status="completed", stage="done", clips=8, error=None, error_code=None,
++                             delivered=min(8, (n - len(seq)) * 4), delivery_failed=0)
++                self.log.append(f"job {j['job_id'][:8]} replay -> {j['status']}")
++                return web.json_response(j)
++        self.log.append(f"{path} -> {status}")
++        return web.Response(body=data, status=status, content_type="application/json")
++
++    def app(self):
++        a = web.Application()
++        a.router.add_post("/api/{path:.*}", self.handle)
++        return a
++
++
++def ssh(cmd: str) -> str:
++    return subprocess.run(["ssh", SITE, cmd], capture_output=True, text=True, timeout=120).stdout.strip()
++
++
++async def main():
++    RUN.mkdir(exist_ok=True)
++    import shutil
++    shutil.rmtree(RUN)
++    RUN.mkdir()
++    print(ssh(f"{REMOTE_PY} setup"))
++    token = subprocess.run(["ssh", SITE, "cat /root/botlink-stage/sim_link_token"], capture_output=True,
++                           text=True).stdout.strip()                     # kept in memory, never printed
++    tg, proxy = FakeTelegram(member_ids=None), Proxy()
++    tg.member_ids = None
++    runners = []
++    for app, port in ((tg.app(), TG_PORT), (proxy.app(), PROXY_PORT)):
++        r = web.AppRunner(app)
++        await r.setup()
++        await web.TCPSite(r, "127.0.0.1", port).start()
++        runners.append(r)
++
++    secret = (HERE / ".secret.env").read_text().split("=", 1)[1].strip()
++    env = dict(os.environ, BOT_TOKEN="123456:DRYRUN", TELEGRAM_API_BASE=f"http://127.0.0.1:{TG_PORT}",
++               SONYA_API_BASE_URL=f"http://127.0.0.1:{PROXY_PORT}/api", SONYA_BOT_BRIDGE_SECRET=secret,
++               DB_PATH=str(RUN / "bot.db"), LOG_DIR=str(RUN / "logs"), REQUIRED_CHANNEL="@sonya_rf_ai",
++               MINIAPP_URL="https://sonya.group/", YTDLP_BIN=str(Path.home() / "SONYA/ytrelay/venv/bin/yt-dlp"),
++               PYTHONUNBUFFERED="1")
++    botlog = open(RUN / "bot.log", "w")
++    bot = subprocess.Popen([str(PY), "main.py"], cwd=WORK, env=env, stdout=botlog, stderr=subprocess.STDOUT)
++    canceller = await asyncio.create_subprocess_exec("ssh", SITE, f"{REMOTE_PY} cancel 900",
++                                                     stdout=open(RUN / "server.log", "w"), stderr=subprocess.STDOUT)
++    steps: list[str] = []
++
++    def mark(s):
++        steps.append(s)
++        tg.messages[max(tg.order)]["mark"] = s if tg.order else None
++        print("·", s, flush=True)
++
++    try:
++        await asyncio.sleep(3)
++        # 0. the channel gate still works (a not-subscribed person sends a link)
++        tg.member_ids = {U}
++        await tg.user_text(U_NOSUB, LINK_SHORT)
++        await tg.wait_for(lambda: "подпишитесь" in tg.last_bot_text())
++        mark("gate: not subscribed -> «Подпишитесь»")
++        # 1. /start + consent + menu «Тарифы» (live prices)
++        await tg.user_text(U, "/start")
++        await tg.idle()
++        await tg.click(U, "✅ Принять")
++        await tg.idle()
++        await tg.click(U, "Тарифы")
++        await tg.wait_for(lambda: "Тарифы SONYA" in tg.last_bot_text())
++        mark("menu «Тарифы» -> live pricing")
++        # 2. a link while the Telegram is NOT linked -> card -> Вирал -> «Привяжите аккаунт»
++        await tg.user_text(U, LINK_SHORT)
++        await tg.wait_for(lambda: "Что сделаем?" in tg.last_bot_text(), 60)
++        mark("card (yt-dlp metadata, no download)")
++        await tg.click(U, "Вирал")
++        await tg.wait_for(lambda: "Привяжите аккаунт" in tg.last_bot_text())
++        await tg.click(U, "Я привязал")
++        await tg.idle()
++        mark("not linked -> login button; «Я привязал» before linking -> alert")
++        # 3. the site's deep link /start TOKEN -> linked -> the same link continues by itself
++        await tg.user_text(U, "/start " + token)
++        await tg.wait_for(lambda: any("Готово — 8" in (m.get("text") or m.get("caption") or "")
++                                      for m in tg.messages.values()), 150)
++        await tg.wait_for(lambda: "Что дальше?" in tg.last_bot_text(), 120)
++        mark("linked via /start TOKEN -> resumed -> job created+cancelled -> replayed stages -> final buttons")
++        # 4. paywall: free quota spent -> tariffs -> «Оформить Pro» (test mode) -> paid -> starts by itself
++        print(ssh(f"{REMOTE_PY} paywall on"))
++        await tg.user_text(U, LINK_PAY)
++        await tg.wait_for(lambda: "Что сделаем?" in tg.last_bot_text(), 60)
++        await tg.click(U, "Хуки")
++        await tg.wait_for(lambda: tg.find_button("Оформить Pro"), 30)
++        await tg.click(U, "Оформить Pro")
++        await tg.wait_for(lambda: "защищённой странице ЮKassa" in tg.last_bot_text())
++        await tg.click(U, "Я оплатил")
++        await tg.idle()
++        mark("tariffs -> checkout -> «Я оплатил» while pending -> alert")
++        print(ssh(f"{REMOTE_PY} paywall off"))
++        proxy.paid = True
++        await tg.wait_for(lambda: sum(1 for m in tg.messages.values() if "Что дальше?" in (m.get("text") or "")) >= 2, 180)
++        mark("payment seen by the tracker -> started without a click -> final buttons")
++        # 5. a long video -> segment -> «Указать начало» -> 1:10:00
++        await tg.user_text(U, LINK_LONG)
++        await tg.wait_for(lambda: "Что сделаем?" in tg.last_bot_text(), 60)
++        await tg.click(U, "Образовательный")
++        await tg.wait_for(lambda: "Видео длиннее лимита" in tg.last_bot_text())
++        await tg.click(U, "Указать начало")
++        await tg.wait_for(lambda: "с какой минуты" in tg.last_bot_text())
++        await tg.user_text(U, "1:10:00")
++        await tg.wait_for(lambda: sum(1 for m in tg.messages.values() if "Что дальше?" in (m.get("text") or "")) >= 3, 180)
++        mark("long video -> segment 1:10:00 + 60 min -> job")
++        # 6. 2K -> Сторителлинг (3 units of the free quota, restored at teardown)
++        await tg.user_text(U, LINK_2K)
++        await tg.wait_for(lambda: "Что сделаем?" in tg.last_bot_text(), 60)
++        await tg.click(U, "2K")
++        await tg.idle()
++        await tg.click(U, "Сторителлинг")
++        await tg.wait_for(lambda: sum(1 for m in tg.messages.values() if "Что дальше?" in (m.get("text") or "")) >= 4, 180)
++        mark("2K + Сторителлинг -> job (quality high)")
++        # 6b. a video file sent to the bot -> card -> BEEP -> uploaded to the bridge (multipart) -> job
++        await tg.user_video(U, str(HERE / "test6s.mp4"))
++        await tg.wait_for(lambda: "Что сделаем?" in tg.last_bot_text(), 30)
++        await tg.click(U, "BEEP")
++        await tg.wait_for(lambda: sum(1 for m in tg.messages.values() if "Что дальше?" in (m.get("text") or "")) >= 5, 180)
++        mark("video file -> BEEP -> upload -> job")
++        # 7. plain words / unsupported link / existing commands
++        await tg.user_text(U, "https://example.com/video.mp4")
++        await tg.idle()
++        await tg.user_text(U, "привет")
++        await tg.idle()
++        await tg.user_text(U, "/help")
++        await tg.idle()
++        await tg.user_text(U, "/account")
++        await tg.idle()
++        mark("unsupported link, plain text, /help, /account")
++    except Exception as exc:  # noqa: BLE001
++        print("SCENARIO STOPPED:", type(exc).__name__, exc)
++    finally:
++        (RUN / "transcript.txt").write_text(tg.transcript())
++        (RUN / "proxy.log").write_text("\n".join(proxy.log))
++        bot.terminate()
++        try:
++            canceller.terminate()
++        except ProcessLookupError:
++            pass
++        ssh("pkill -f 'sim_helper.py cancel' || true")
++        print(ssh(f"{REMOTE_PY} teardown"))
++        for r in runners:
++            await r.cleanup()
++        print("\n".join(steps))
++
++
++if __name__ == "__main__":
++    asyncio.run(main())
+diff --git a/tools/dryrun/sim_helper.py b/tools/dryrun/sim_helper.py
+new file mode 100644
+index 0000000..0b4f5ab
+--- /dev/null
++++ b/tools/dryrun/sim_helper.py
+@@ -0,0 +1,102 @@
++"""Dry-run helper on the site VPS (run with /opt/sonya/.venv/bin/python, cwd /opt/sonya, env .env.local).
++Test account only (loadtest+1@sonya.invalid). Never prints tokens/secrets: the link token goes to a 0600 file.
++
++  setup           remember the account's telegram + free-quota fields, unlink, write a one-time link token file
++  paywall on|off  free quota spent (free_video_limit = used) / back to the remembered limit
++  cancel SECONDS  every 0.3 s: cancel any queued/source_wait job of the account created after setup (no Vast)
++  teardown        cancel leftovers, restore the remembered fields, report the jobs created by the run
++"""
++import json
++import os
++import sys
++import time
++
++import psycopg2
++import psycopg2.extras
++
++EMAIL = "loadtest+1@sonya.invalid"
++STATE = "/root/botlink-stage/sim_state.json"
++TOKEN_FILE = "/root/botlink-stage/sim_link_token"
++
++
++def conn():
++    c = psycopg2.connect(os.environ["DATABASE_URL"], cursor_factory=psycopg2.extras.RealDictCursor)
++    c.autocommit = True
++    return c
++
++
++def user(cur):
++    cur.execute("SELECT * FROM users WHERE email=%s", (EMAIL,))
++    return cur.fetchone()
++
++
++def main():
++    cmd = sys.argv[1]
++    c = conn()
++    cur = c.cursor()
++    u = user(cur)
++    if cmd == "setup":
++        st = {k: (u[k].isoformat() if hasattr(u[k], "isoformat") else u[k]) for k in
++              ("id", "telegram_linked", "telegram_user_id", "telegram_chat_id", "telegram_linked_at",
++               "free_video_limit", "free_video_used")}
++        cur.execute("SELECT now() AS t")
++        st["t0"] = cur.fetchone()["t"].isoformat()
++        json.dump(st, open(STATE, "w"))
++        cur.execute("UPDATE users SET telegram_linked=false, telegram_user_id=NULL, telegram_chat_id=NULL, "
++                    "telegram_linked_at=NULL WHERE id=%s", (u["id"],))
++        sys.path.insert(0, "/opt/sonya")
++        from scripts import telegram_store
++        tok = telegram_store.create_link_token(str(u["id"]))
++        raw = tok.get("token") if isinstance(tok, dict) else tok
++        fd = os.open(TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++        os.write(fd, str(raw).encode())
++        os.close(fd)
++        print("setup ok user", str(u["id"])[:8], "free", u["free_video_used"], "/", u["free_video_limit"])
++    elif cmd == "paywall":
++        st = json.load(open(STATE))
++        if sys.argv[2] == "on":
++            cur.execute("UPDATE users SET free_video_limit=free_video_used WHERE id=%s", (u["id"],))
++        else:
++            cur.execute("UPDATE users SET free_video_limit=free_video_used + %s WHERE id=%s",
++                        (max(1, st["free_video_limit"] - st["free_video_used"]), u["id"]))
++        print("paywall", sys.argv[2])
++    elif cmd == "cancel":
++        st = json.load(open(STATE))
++        end = time.time() + float(sys.argv[2])
++        while time.time() < end:
++            cur.execute("UPDATE generation_jobs SET status='cancelled', error='bot dry-run (test, cancelled at once)', "
++                        "updated_at=now() WHERE user_id::text=%s AND created_at > %s AND status IN ('queued','source_wait') "
++                        "RETURNING id, mode, params->>'clipType' AS clip, created_at", (st["id"], st["t0"]))
++            for r in cur.fetchall():
++                age = time.time() - r["created_at"].timestamp()
++                print("cancelled", str(r["id"])[:8], r["mode"], r["clip"], "after %.1f s" % age, flush=True)
++            time.sleep(0.3)
++    elif cmd == "teardown":
++        st = json.load(open(STATE))
++        cur.execute("UPDATE generation_jobs SET status='cancelled', error='bot dry-run (test)' WHERE user_id::text=%s "
++                    "AND created_at > %s AND status NOT IN ('completed','failed','cancelled') RETURNING id",
++                    (st["id"], st["t0"]))
++        left = cur.fetchall()
++        cur.execute("SELECT id, mode, status, worker_id, params->>'clipType' clip, params->'settings'->>'quality' q, "
++                    "params->>'trim_start_sec' ts, params->>'trim_end_sec' te, params->>'frontend' fe, "
++                    "params->'settings'->>'preset' preset, s3_input_key FROM generation_jobs "
++                    "WHERE user_id::text=%s AND created_at > %s ORDER BY created_at", (st["id"], st["t0"]))
++        jobs = cur.fetchall()
++        cur.execute("UPDATE users SET telegram_linked=%s, telegram_user_id=%s, telegram_chat_id=%s, telegram_linked_at=%s, "
++                    "free_video_limit=%s, free_video_used=%s WHERE id=%s",
++                    (st["telegram_linked"], st["telegram_user_id"], st["telegram_chat_id"], st["telegram_linked_at"],
++                     st["free_video_limit"], st["free_video_used"], u["id"]))
++        cur.execute("UPDATE telegram_link_tokens SET used_at=COALESCE(used_at, now()) WHERE user_id::text=%s", (st["id"],))
++        for j in jobs:
++            print("job", str(j["id"])[:8], j["mode"], j["clip"], j["status"], "worker=%s" % (j["worker_id"] or "-"),
++                  "q=%s" % j["q"], "trim=%s-%s" % (j["ts"], j["te"]), j["fe"], "preset=%s" % j["preset"])
++        print("leftovers cancelled:", len(left), "| restored free %s/%s, telegram_linked=%s" % (
++            st["free_video_used"], st["free_video_limit"], st["telegram_linked"]))
++        try:
++            os.remove(TOKEN_FILE)
++        except OSError:
++            pass
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.50.1 (Apple Git-155)
+

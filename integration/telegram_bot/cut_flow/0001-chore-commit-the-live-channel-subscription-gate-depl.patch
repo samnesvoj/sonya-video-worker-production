@@ -1,0 +1,152 @@
+From b188ec5651660701d37bf8d1989751fa4a4a40ed Mon Sep 17 00:00:00 2001
+From: samnesvoj <samnesvoj0@gmail.com>
+Date: Fri, 20 Nov 2026 14:53:25 -0800
+Subject: [PATCH 1/2] chore: commit the live channel-subscription gate
+ (deployed 2026-11-15, never committed)
+
+REQUIRED_CHANNEL (@sonya_rf_ai) gate + SUBGATE_EXEMPT_IDS, exactly as running on the bot server.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ bot/middlewares/__init__.py     |  3 +-
+ bot/middlewares/subscription.py | 86 +++++++++++++++++++++++++++++++++
+ main.py                         | 11 ++++-
+ 3 files changed, 98 insertions(+), 2 deletions(-)
+ create mode 100644 bot/middlewares/subscription.py
+
+diff --git a/bot/middlewares/__init__.py b/bot/middlewares/__init__.py
+index e5a0e36..7b9fd07 100644
+--- a/bot/middlewares/__init__.py
++++ b/bot/middlewares/__init__.py
+@@ -1,5 +1,6 @@
+ """Aiogram middlewares."""
+ 
+ from .activity import ActivityMiddleware
++from .subscription import SubscriptionGateMiddleware
+ 
+-__all__ = ["ActivityMiddleware"]
++__all__ = ["ActivityMiddleware", "SubscriptionGateMiddleware"]
+diff --git a/bot/middlewares/subscription.py b/bot/middlewares/subscription.py
+new file mode 100644
+index 0000000..c36c739
+--- /dev/null
++++ b/bot/middlewares/subscription.py
+@@ -0,0 +1,86 @@
++"""Channel-subscription gate (owner request 2026-11-15).
++
++Users must be subscribed to REQUIRED_CHANNEL (e.g. @sonya_rf_ai) to use the
++bot. Non-subscribers get a «Подписаться» / «Я подписался» prompt instead of
++the handler. If the bot cannot check membership (not an admin of the
++channel, API error) the gate fails OPEN so the bot never goes dark.
++Disabled when REQUIRED_CHANNEL is empty.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import time
++from typing import Any, Awaitable, Callable
++
++from aiogram import BaseMiddleware, Bot
++from aiogram.types import (CallbackQuery, InlineKeyboardButton,
++                           InlineKeyboardMarkup, Message, TelegramObject)
++
++logger = logging.getLogger(__name__)
++
++CHECK_CB = "subgate:check"
++_OK_STATUSES = {"creator", "administrator", "member"}
++
++
++class SubscriptionGateMiddleware(BaseMiddleware):
++    def __init__(self, channel: str, admin_ids: set[int] | None = None) -> None:
++        self.channel = channel if channel.startswith("@") or channel.lstrip("-").isdigit() else "@" + channel
++        self.url = "https://t.me/" + self.channel.lstrip("@")
++        self.admin_ids = admin_ids or set()
++        self._ok_until: dict[int, float] = {}
++        self._warned = False
++
++    async def _is_subscribed(self, bot: Bot, user_id: int) -> bool:
++        now = time.monotonic()
++        if self._ok_until.get(user_id, 0) > now:
++            return True
++        try:
++            m = await bot.get_chat_member(self.channel, user_id)
++        except Exception as exc:  # bot not admin / network: fail open
++            if not self._warned:
++                logger.warning("subscription gate: cannot check %s (%s) - letting users through", self.channel, exc)
++                self._warned = True
++            return True
++        status = getattr(m.status, "value", m.status)
++        ok = status in _OK_STATUSES or (status == "restricted" and getattr(m, "is_member", False))
++        if ok:
++            self._ok_until[user_id] = now + 600
++        return ok
++
++    def _keyboard(self) -> InlineKeyboardMarkup:
++        return InlineKeyboardMarkup(inline_keyboard=[
++            [InlineKeyboardButton(text="Подписаться на SONYA AI", url=self.url)],
++            [InlineKeyboardButton(text="Я подписался ✓", callback_data=CHECK_CB)],
++        ])
++
++    TEXT = ("Чтобы пользоваться ботом SONYA, подпишитесь на наш канал — "
++            "там новости, примеры нарезок и бонусы.\n\nПосле подписки нажмите «Я подписался».")
++
++    async def __call__(self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
++                       event: TelegramObject, data: dict[str, Any]) -> Any:
++        user = getattr(event, "from_user", None)
++        chat = event.chat if isinstance(event, Message) else (event.message.chat if isinstance(event, CallbackQuery) and event.message else None)
++        if user is None or user.is_bot or chat is None or chat.type != "private" or user.id in self.admin_ids:
++            return await handler(event, data)
++        bot: Bot = data["bot"]
++        if isinstance(event, CallbackQuery) and event.data == CHECK_CB:
++            self._ok_until.pop(user.id, None)
++            if await self._is_subscribed(bot, user.id):
++                await event.answer("Спасибо за подписку!")
++                try:
++                    await event.message.edit_text("Спасибо за подписку! Теперь бот доступен — нажмите /start.")
++                except Exception:
++                    await bot.send_message(user.id, "Спасибо за подписку! Теперь бот доступен — нажмите /start.")
++            else:
++                await event.answer("Подписка пока не видна. Подпишитесь и нажмите ещё раз.", show_alert=True)
++            return None
++        if await self._is_subscribed(bot, user.id):
++            return await handler(event, data)
++        if isinstance(event, CallbackQuery):
++            await event.answer()
++            await bot.send_message(user.id, self.TEXT, reply_markup=self._keyboard())
++        else:
++            await event.answer(self.TEXT, reply_markup=self._keyboard())
++        return None
+diff --git a/main.py b/main.py
+index a3969bf..cd90fdd 100644
+--- a/main.py
++++ b/main.py
+@@ -24,7 +24,9 @@ from bot.config import ConfigError, load_settings
+ from bot.consent_store import ConsentStore
+ from bot.handlers import main_router
+ from bot.logging_setup import setup_logging
+-from bot.middlewares import ActivityMiddleware
++import os
++
++from bot.middlewares import ActivityMiddleware, SubscriptionGateMiddleware
+ from bot.scheduler import start_scheduler
+ from bot.services.sonya_api import SonyaApiClient
+ from bot.services.user import UserStore
+@@ -57,6 +59,13 @@ async def main() -> None:
+     activity_middleware = ActivityMiddleware(user_store)
+     dispatcher.message.outer_middleware(activity_middleware)
+     dispatcher.callback_query.outer_middleware(activity_middleware)
++    required_channel = (os.environ.get("REQUIRED_CHANNEL") or "").strip()
++    if required_channel:
++        gate_admins = {int(x) for x in (os.environ.get("SUBGATE_EXEMPT_IDS") or "").replace(" ", "").split(",") if x}
++        gate = SubscriptionGateMiddleware(required_channel, gate_admins)
++        dispatcher.message.outer_middleware(gate)
++        dispatcher.callback_query.outer_middleware(gate)
++        logger.info("Subscription gate on: %s", gate.channel)
+ 
+     # Make settings/consent_store available to all handlers via DI without
+     # needing globals.
+-- 
+2.50.1 (Apple Git-155)
+
