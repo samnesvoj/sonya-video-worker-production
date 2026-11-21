@@ -1,0 +1,20 @@
+[Unit]
+Description=SONYA self-check beacon (disk + services -> S3 worker-v2/health/beacon/bot.json; read by the VPS health check)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/sonya-ytrelay/env
+ExecStart=/opt/sonya-ytrelay/venv/bin/python /opt/sonya-health-beacon/health_beacon.py --disk / --services sonya-accounting-bot,sonya-group-bot,sonya-ytrelay --s3 worker-v2/health/beacon/bot.json
+Nice=10
+TimeoutStartSec=60
+[Unit]
+Description=SONYA self-check beacon every 5 min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

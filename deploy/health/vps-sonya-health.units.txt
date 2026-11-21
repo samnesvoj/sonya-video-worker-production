@@ -1,0 +1,26 @@
+[Unit]
+Description=SONYA self-check (API, DB, queue, fleet, Vast balance, YouTube, Telegram, accountant, disks, SSL) -> owner alerts
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/sonya-fleet/current
+EnvironmentFile=/opt/sonya/.env.local
+EnvironmentFile=/etc/sonya-fleet/fleet.env
+Environment=PYTHONPATH=/opt/sonya-fleet/current
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sonya/.venv/bin/python -m scripts.ops.health_run run
+UMask=0077
+Nice=10
+TimeoutStartSec=180
+[Unit]
+Description=SONYA self-check every 15 min
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:00/15
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

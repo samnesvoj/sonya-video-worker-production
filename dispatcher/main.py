@@ -16,6 +16,7 @@ import sys
 import time
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 from dispatcher.config import FleetConfig
 from dispatcher.fleet import FleetManager
@@ -109,6 +110,21 @@ def _accounting_secret(env=os.environ) -> str:
     return Path(f).read_text().strip()
 
 
+HEALTH_JSON = Path(os.environ.get("SONYA_HEALTH_DIR", "/var/lib/sonya-health")) / "health.json"
+_POLL = {"t": 0.0}
+
+
+def health_owns_alerts(env=os.environ, now: Optional[float] = None) -> bool:
+    """SONYA_HEALTH_ALERTS=on and the self-check ran in the last 45 min: the balance / YouTube / no-funds alerts are sent
+    by it (once per problem + «починилось») instead of the repeating ones here. If it stops, the old ones come back."""
+    if env.get("SONYA_HEALTH_ALERTS", "off") != "on":
+        return False
+    try:
+        return (now or time.time()) - HEALTH_JSON.stat().st_mtime < 2700
+    except OSError:
+        return False
+
+
 def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: no cover - thread on the VPS
     """Signed internal API for the accounting bot on 127.0.0.1 (nginx proxies /api/internal/accounting/vast/ here)."""
     import threading
@@ -134,7 +150,22 @@ def start_accounting_api(fleet: FleetManager, svc, env=os.environ):  # pragma: n
             log.warning("fleet_lines_error %s", type(exc).__name__)
         return text
 
-    api = AccountingApi(svc, _accounting_secret(env), summary=summary)
+    def status(now: float) -> str:
+        from scripts.ops import health
+        try:
+            snap = json.loads(HEALTH_JSON.read_text())
+        except Exception:  # noqa: BLE001
+            snap = None
+        return health.status_text(snap, now)
+
+    def on_claim(now: float) -> None:
+        if now - _POLL["t"] >= 60:
+            _POLL["t"] = now
+            tmp = STATE_DIR / "acct_poll.tmp"
+            tmp.write_text(json.dumps({"ts": now}))
+            tmp.replace(STATE_DIR / "acct_poll.json")
+
+    api = AccountingApi(svc, _accounting_secret(env), summary=summary, status=status, on_claim=on_claim)
 
     class H(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
@@ -188,8 +219,9 @@ def run(once: bool = False) -> int:  # pragma: no cover - exercised on the VPS
                 k = check_alert(ledger, fleet.store, svc.rates, time.time(), Decimal(os.environ.get("SONYA_ACCOUNTING_ALERT_RUB_DAY", "500")))
                 if k:
                     log.info("report_built %s", k)
-                for k in watch_balance(fleet, ledger) + watch_youtube(ledger):
-                    log.info("report_built %s", k)
+                if not health_owns_alerts():
+                    for k in watch_balance(fleet, ledger) + watch_youtube(ledger):
+                        log.info("report_built %s", k)
                 from accounting.fleet_stats import check_budget_alerts
                 for k in check_budget_alerts(ledger, fleet.store, time.time()):
                     log.info("report_built %s", k)
@@ -337,7 +369,8 @@ def watch_capacity(fleet: FleetManager, ledger, env=os.environ, every: float = 6
         snap = fleet.queue.snapshot(fleet.cfg.pool_modes, fleet.cfg.label_prefix)
         up = len(fleet.store.all(capacity.UP_STATES))
         ev = fleet.store.events_since(now - 1200, ("create_failed", "create_failed_next", "resume_failed"))
-        cur = capacity.tick(STATE_DIR / "capacity.json", snap.pending, up, _balance(fleet, now), ev, now, ledger=ledger,
+        cur = capacity.tick(STATE_DIR / "capacity.json", snap.pending, up, _balance(fleet, now), ev, now,
+                            ledger=None if health_owns_alerts(env, now) else ledger,
                             threshold=Decimal(env.get("SONYA_VAST_NOFUNDS_USD", "0.30")))
     except Exception as exc:  # noqa: BLE001
         log.warning("capacity_error %s", type(exc).__name__)

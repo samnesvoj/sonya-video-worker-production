@@ -59,7 +59,7 @@ def send_formatted(api: Any, chat: int, text: str, parse_mode: Optional[str] = N
         return api.send(chat, to_plain(text), reply_to) if reply_to else api.send(chat, to_plain(text))
 
 
-COMMANDS = ("/vast", "/vast_day")
+COMMANDS = ("/vast", "/vast_day", "/status")
 
 
 def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes) -> str:
@@ -96,6 +96,10 @@ class VastReportPuller:
     def summary_message(self) -> Tuple[str, Optional[str]]:
         return self._message("summary", {})
 
+    def status_message(self) -> Tuple[str, Optional[str]]:
+        """/status: SONYA self-check «всё ок / что сломано» (scripts/ops/health.py on the server)."""
+        return self._message("status", {})
+
     def daily_message(self, day: str = "") -> Tuple[str, Optional[str]]:
         """Detailed report for a closed MSK day ('' = yesterday); read-only on SONYA."""
         status, data = self._post(BASE + "daily", {"day": str(day or "")[:10]})
@@ -118,10 +122,14 @@ class VastReportPuller:
         if cmd not in COMMANDS:
             return False
         try:
-            msg, pm = self.summary_message() if cmd == "/vast" else self.daily_message(parts[1] if len(parts) > 1 else "")
+            if cmd == "/status":
+                msg, pm = self.status_message()
+            else:
+                msg, pm = self.summary_message() if cmd == "/vast" else self.daily_message(parts[1] if len(parts) > 1 else "")
         except Exception as exc:  # noqa: BLE001
             self.log.warning("vast_command_error %s", type(exc).__name__)
-            msg, pm = "Не получилось получить данные Vast с сервера SONYA. Попробуй чуть позже.", None
+            msg, pm = ("Сервер SONYA не ответил на /status — возможно, он сам лежит. Попробуй через минуту; если снова так — "
+                       "проверь sonya.group." if cmd == "/status" else "Не получилось получить данные Vast с сервера SONYA. Попробуй чуть позже."), None
         send_formatted(self.api, chat, msg, pm, reply_to)
         return True
 
