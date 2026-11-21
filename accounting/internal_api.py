@@ -2,6 +2,7 @@
 Signed internal API the EXISTING accounting bot polls (same pattern as /api/internal/fiscal/*: outbound-only bot, HMAC, nonce).
   POST /api/internal/accounting/vast/claim            -> {"reports":[{report_key, kind, period, text, attempt}]}
   POST /api/internal/accounting/vast/summary          -> {"text": "...", "parse_mode": "HTML"}   (bot's /vast command)
+  POST /api/internal/accounting/vast/status           -> {"text", "parse_mode"}  (/status: self-check, scripts/ops/health.py)
   POST /api/internal/accounting/vast/daily            body {"day": "YYYY-MM-DD"|"DD.MM"|""} -> {"text", "parse_mode"}  (/vast_day; read-only)
   POST /api/internal/accounting/vast/{key}/sent       body {"message_id": "..."}
   POST /api/internal/accounting/vast/{key}/failed     body {"error": "..."}
@@ -31,8 +32,10 @@ def sign(secret: bytes, ts: str, nonce: str, method: str, path: str, body: bytes
 
 class AccountingApi:
     def __init__(self, service, secret: str, clock: Callable[[], float] = time.time, summary: Optional[Callable[[float], str]] = None,
-                 parse_mode: Optional[str] = "HTML"):
+                 parse_mode: Optional[str] = "HTML", status: Optional[Callable[[float], str]] = None,
+                 on_claim: Optional[Callable[[float], None]] = None):
         self.svc, self._secret, self.clock, self._summary, self.parse_mode = service, secret.encode(), clock, summary, parse_mode
+        self._status, self._on_claim = status, on_claim
         self._nonces: Dict[str, float] = {}
 
     def _verify(self, headers: Dict[str, str], method: str, path: str, body: bytes) -> bool:
@@ -58,7 +61,17 @@ class AccountingApi:
         now = self.clock()
         base = "/api/internal/accounting/vast/"
         if method == "POST" and path == base + "claim":
+            if self._on_claim:
+                try:
+                    self._on_claim(now)        # the self-check watches that the bot keeps polling
+                except Exception:  # noqa: BLE001
+                    pass
             return 200, {"reports": self.svc.claim(now, limit=1)}
+        if method == "POST" and path == base + "status" and self._status:
+            try:
+                return 200, self._msg(self._status(now))
+            except Exception:  # noqa: BLE001
+                return 502, {"error": "status_failed"}
         if method == "POST" and path == base + "summary" and self._summary:
             try:
                 return 200, self._msg(self._summary(now))
