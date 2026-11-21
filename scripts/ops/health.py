@@ -362,9 +362,18 @@ def status_text(snap: Optional[dict], now: Optional[float] = None) -> str:
             since = f" — с {msk(i['since'])}" if i.get("since") else ""
             lines.append(f"{'🚨' if c.level == CRIT else '⚠️'} <b>{esc(c.title)}</b>{esc(since)}")
             if c.detail:
-                lines.append("   " + esc(c.detail[:220]))
-    ok = [f"{SPEC.get(c.name, (c.name,))[0]}" + (f" {c.value}" if c.value and c.name in
-          ("vast_balance", "queue", "disk_vps", "disk_bot", "disk_mac", "ssl", "yt_cookies") else "") for c in checks if c.level == OK]
+                lines.append("   " + esc(_short(c.detail)))
+    oks = {c.name: c for c in checks if c.level == OK}
+    ok = []
+    for c in oks.values():
+        if c.name in ("site_public", "yt_bot", "yt_mac", "vast_create", "disk_vps", "disk_bot", "disk_mac"):
+            continue                                   # covered by their parent / grouped below
+        lab = SPEC.get(c.name, (c.name,))[0]
+        ok.append(lab + (f" {c.value}" if c.value and c.name in ("vast_balance", "queue", "yt_cookies", "ssl") else "")
+                  + (f" ({c.value.replace('пути: ', '')})" if c.name == "yt_all" and c.value else ""))
+    disks = [n for n in ("disk_vps", "disk_bot", "disk_mac") if n in oks]
+    if disks:
+        ok.append("диски" + ("" if len(disks) == 3 else " (" + ", ".join(SPEC[n][0].replace("диск ", "") for n in disks) + ")"))
     if ok:
         lines.append("")
         lines.append("<b>Работает:</b> " + esc("; ".join(ok)))
@@ -373,6 +382,16 @@ def status_text(snap: Optional[dict], now: Optional[float] = None) -> str:
     stale = f" ⚠️ самопроверка давно не запускалась" if age > 2700 else ""
     lines.append(f"<i>Проверено {esc(ago(age))}{' назад' if age >= 90 else ''} ({esc(msk(float(snap['ts'])))} МСК){stale}</i>")
     return "\n".join(lines)
+
+
+def _short(text: str, limit: int = 170) -> str:
+    """Whole sentences up to `limit` characters (the alert has the full text)."""
+    out = ""
+    for part in text.replace("! ", "!|").replace(". ", ".|").split("|"):
+        if out and len(out) + len(part) + 1 > limit:
+            break
+        out = (out + " " + part).strip()
+    return out if len(out) <= limit + 60 else out[:limit].rsplit(" ", 1)[0] + "…"
 
 
 def snapshot(checks: List[Check], state: Dict[str, Any], now: float, errors: Optional[Dict[str, str]] = None) -> dict:

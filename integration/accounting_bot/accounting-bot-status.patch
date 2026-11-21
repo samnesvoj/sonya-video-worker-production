@@ -1,0 +1,20 @@
+--- alertkeys-20261120-051650/receipt_worker/telegram_desk.py	2026-11-19 08:34:23.624273352 +0000
++++ health-20261121-034837/receipt_worker/telegram_desk.py	2026-11-21 03:49:46.024884196 +0000
+@@ -59,7 +59,7 @@
+         "3. Ответь на моё сообщение об оплате этой ссылкой.\n"
+         "Я сохраню чек и отправлю его покупателю на почту с auth@sonya.group.\n\n"
+         "/list — оплаты, по которым ещё нет чека\n/balance — сколько денег на Vast\n/vast — расходы на серверы Vast (сегодня, вчера, месяц, баланс)\n"
+-        "/vast_day — подробный отчёт Vast за вчера (или /vast_day 14.11)")
++        "/vast_day — подробный отчёт Vast за вчера (или /vast_day 14.11)\n/status — самопроверка: всё ли работает")
+ 
+ 
+ class TelegramError(RuntimeError):
+@@ -299,7 +299,7 @@
+             except Exception:  # noqa: BLE001
+                 self._reply(sender, "Не получилось узнать баланс Vast. Попробуй чуть позже.")
+             return 1
+-        if text.split(" ")[0].split("@")[0] in ("/vast", "/vast_day"):
++        if text.split(" ")[0].split("@")[0] in ("/vast", "/vast_day", "/status"):
+             command = getattr(self, "vast_command", None)   # vast_reports.VastReportPuller.command (HTML reports)
+             if command is None:
+                 self._reply(sender, "Отчёты Vast не включены.")
