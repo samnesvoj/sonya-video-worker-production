@@ -1,0 +1,77 @@
+--- api-live/prod_generation_api.py	2026-11-22 14:26:48
++++ api-stage/prod_generation_api.py	2026-11-22 15:28:26
+@@ -404,6 +404,8 @@
+ app.include_router(discover_router)
+ from scripts.quota_routes import router as quota_router  # 2026-11-22 limits: GET /api/me/quota, cancel before GPU
+ app.include_router(quota_router)
++from scripts.midroll_routes import router as midroll_router  # 2026-11-22 «Мидролл»: POST /api/midroll/upload, GET /api/midroll/url
++app.include_router(midroll_router)
+ 
+ # ── Mode registry ——————————————————————————————————————————————————————————————
+ 
+@@ -1617,7 +1619,8 @@
+     audit(EVT_JOB_CLAIMED, job_id=job.get("id"), trace_id=trace_id,
+           details={"worker_id": body.worker_id, "mode": job.get("mode")})
+ 
+-    return {"job": _with_ad_banner(job)}
++    from scripts.midroll_routes import with_midroll as _with_midroll
++    return {"job": _with_midroll(_with_ad_banner(job))}
+ 
+ 
+ @app.post("/api/worker/jobs/{job_id}/status")
+--- api-live/presets_routes.py	2026-11-20 10:05:29
++++ api-stage/presets_routes.py	2026-11-22 15:28:20
+@@ -9,7 +9,7 @@
+ 
+ Guests keep their presets in the browser (localStorage) - this API needs a session.
+ Storage: user_presets (migration 023), one JSON document per user, at most MAX_PRESETS looks, each look's
+-settings limited to the job fields the worker already understands (params.settings.* and params.max_clips/hook).
++settings limited to the job fields the worker already understands (params.settings.* and params.max_clips/hook/midroll).
+ Nothing here touches quotas, payments or jobs.
+ """
+ from __future__ import annotations
+@@ -63,9 +63,9 @@
+     return HTTPException(status_code=400, detail={"error": "invalid_presets", "message": msg, "trace_id": trace_id})
+ 
+ 
+-def clean_settings(raw: Any) -> Dict[str, Any]:
++def clean_settings(raw: Any, user_id: Optional[str] = None) -> Dict[str, Any]:
+     """Only known fields with allowed values survive; anything else is dropped (never an error: an older / newer
+-    site may know more fields)."""
++    site may know more fields). midroll (2026-11-22): the user's own uploaded ad + where / how often (midroll_routes)."""
+     out: Dict[str, Any] = {}
+     if not isinstance(raw, dict):
+         return out
+@@ -75,10 +75,13 @@
+     mt = raw.get("moment_types")
+     if isinstance(mt, list):
+         out["moment_types"] = [t for t in mt if isinstance(t, str) and _TYPE.match(t)][:12]
++    if "midroll" in raw:
++        from scripts.midroll_routes import clean as _midroll_clean
++        out["midroll"] = _midroll_clean(raw.get("midroll"), user_id)
+     return out
+ 
+ 
+-def clean_document(body: Any, trace_id: str) -> Dict[str, Any]:
++def clean_document(body: Any, trace_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+     if not isinstance(body, dict):
+         raise _bad("Ожидался JSON-объект.", trace_id)
+     if len(json.dumps(body, ensure_ascii=False)) > MAX_BYTES:
+@@ -95,7 +98,7 @@
+         if not name:
+             raise _bad("У пресета должно быть имя.", trace_id)
+         seen.add(p["id"])
+-        presets.append({"id": p["id"], "name": name, "settings": clean_settings(p.get("settings")),
++        presets.append({"id": p["id"], "name": name, "settings": clean_settings(p.get("settings"), user_id),
+                         "builtin": str(p.get("builtin") or "")[:24] or None})
+     default_id = body.get("default_id")
+     if default_id is not None and not (isinstance(default_id, str) and _ID.match(default_id)):
+@@ -148,7 +151,7 @@
+         body = await request.json()
+     except Exception:
+         raise _bad("Ожидался JSON.", trace_id)
+-    doc = clean_document(body, trace_id)
++    doc = clean_document(body, trace_id, str(user["id"]))
+     try:
+         updated = save(str(user["id"]), doc)
+     except Exception as exc:
