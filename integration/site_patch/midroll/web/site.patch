@@ -1,0 +1,52 @@
+--- site-base/index.html	2026-11-22 14:55:45
++++ web-stage/index.html	2026-11-22 15:32:19
+@@ -99,7 +99,7 @@
+ 		-webkit-background-clip: text !important; background-clip: text !important; -webkit-text-fill-color: transparent !important; }
+ 	</style>
+ 	<link rel="stylesheet" href="night-ux.css?v=20261113">
+-	<script src="app-shell.js?v=20261122-tiktok" data-sx-page="cut"></script>
++	<script src="app-shell.js?v=20261122-midroll" data-sx-page="cut"></script>
+ 
+ 
+ <link rel="canonical" href="https://sonya.group/">
+@@ -1083,8 +1083,8 @@
+ 	</div>
+ 
+ 	<!-- Three.js for cinematic 3D sphere on processing page -->
+-	<script src="/presets/presets-store.js?v=20261120-presets"></script>
+-	<script src="app.js?v=20261123-sttag"></script>
++	<script src="/presets/presets-store.js?v=20261122-midroll"></script>
++	<script src="app.js?v=20261123-midroll"></script>
+ 	<script type="module" src="sphere.js?v=20261006-perf1"></script>
+ 	<!-- Approved Chrome cloth backdrop for the processing page — see
+ 	     cloth/cloth-processing.js and #processing-cloth-host above. -->
+--- site-base/app.js	2026-11-22 10:20:39
++++ web-stage/app.js	2026-11-22 15:32:19
+@@ -759,6 +759,7 @@
+         if (name) name.textContent = p ? p.name : 'Стандарт SONYA';
+         if (!p) { syncCutQuality(); return; }
+         const s = st.full(p.settings);
++        if (name && st.midrollOn && st.midrollOn(s)) name.textContent = p.name + ' · с мидроллом';
+         const check = (sel, val) => document.querySelectorAll(sel).forEach(i => { i.checked = String(i.value) === String(val); });
+         const base = ['minimal', 'basic'].includes(s.subtitleStyle) ? s.subtitleStyle : 'viral';
+         check('input[name="subtitle-style"]', base);
+@@ -900,6 +901,8 @@
+         const s = presetSettings();
+         const out = {};
+         if (!s) return out;
++        // «Мидролл» (2026-11-22): the preset's own ad inside the clips; null = none (the API checks the key is this user's)
++        out.midroll = window.SonyaPresetStore.midrollJob ? window.SonyaPresetStore.midrollJob(s) : null;
+         if (s.max_clips) out.max_clips = s.max_clips;
+         if (s.hook && (clipType === 'viral' || clipType === 'storytelling')) out.hook = 1;
+         return out;
+--- site-base/app-shell.js	2026-11-22 10:45:12
++++ web-stage/app-shell.js	2026-11-22 15:32:19
+@@ -154,7 +154,7 @@
+ 	   A view app with `module` gets its CSS/JS injected the first time it
+ 	   opens (scripts in order), then window[module.global].mount(canvas).
+ 	   Apps without a module keep the empty Phase 1 canvas. */
+-	var MODULE_V = '20261121-discover';
++	var MODULE_V = '20261122-midroll';
+ 	var moduleState = {};
+ 	var moduleTry = 0;
+ 	var MODULE_TIMEOUT = 20000;
