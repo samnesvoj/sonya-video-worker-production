@@ -322,7 +322,9 @@ def _apply_overlays(clip_path: str, input_video_path: str, words: List[Dict], se
     options.setdefault("ledger_path", params.get("edu_ledger_path"))
     options.setdefault("video_id", Path(input_video_path).stem)
     from scripts.shared.ad_banner import kind_of as _ad_banner
-    options["keep_ass"] = _ad_banner(params) is not None   # the worker's ad banner step reads <clip>.ass, then deletes it
+    from scripts.shared.midroll import config as _midroll
+    # the worker's ad banner / mid-roll steps read <clip>.ass, then delete it
+    options["keep_ass"] = _ad_banner(params) is not None or _midroll(params) is not None
     try:
         from modes.educational.overlays import apply_overlays
         from modes.educational.overlays.compose import render_base
