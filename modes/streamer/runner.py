@@ -853,7 +853,8 @@ def run(
         done = list(pool.map(one, range(len(top))))
     _unify_layouts(input_video_path, names, top, done, hints, warnings, workers)
     from scripts.shared.ad_banner import kind_of as _ad_banner
-    keep_ass = _ad_banner(params) is not None         # the worker's ad banner step reads it, then deletes it
+    from scripts.shared.midroll import config as _midroll
+    keep_ass = _ad_banner(params) is not None or _midroll(params) is not None   # ad banner / mid-roll read it, then delete it
     for n in names:                                   # subtitles are burned in: no side files in the upload
         for ext in ((".glass.json", ".glassmask.ass") if keep_ass else (".ass", ".glass.json", ".glassmask.ass")):
             p = Path(n).with_suffix(ext)

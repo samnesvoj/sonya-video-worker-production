@@ -145,7 +145,8 @@ def _make_preview_assets(clip: Path) -> None:
             done = r.returncode == 0
         if not done:
             subprocess.run(cmd(["-c:v", "libx264", "-preset", "veryfast", "-crf", "27"]), check=True, timeout=300)
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "0.5", "-i", str(clip), "-frames:v", "1",
+        from scripts.shared.midroll import POSTER_AT     # a pre-roll moves the poster past the ad
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(POSTER_AT.get(str(clip), 0.5)), "-i", str(clip), "-frames:v", "1",
                         "-vf", "scale=-2:720", "-q:v", "4", str(clip.with_name(clip.stem + "_poster.jpg"))],
                        check=True, timeout=60)
     except Exception as exc:
@@ -1118,11 +1119,30 @@ def process_job(job: dict, worker_id: str) -> None:
             return
 
         # ── 4a. SONYA mini ad banner under the subtitles (per user: params.ad_banner, set by the API) ─
-        from scripts.shared import ad_banner
+        from scripts.shared import ad_banner, midroll
+        _mid = midroll.config(params) if mode in midroll.MODES else None
+        _drop_ass = mode in ("streamer", "educational")
         if ad_banner.kind_of(params) and mode in ad_banner.MODES:
             _update_status(job_id, "assembling")
             with _prof.stage("ad_banner"):
-                ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=mode in ("streamer", "educational"))
+                # the mid-roll (below) still needs the clip's ASS for its word times
+                ad_banner.apply_to_outputs(str(output_dir), mode, params, drop_ass=_drop_ass and not _mid)
+            output_files = [f for f in output_dir.rglob("*") if f.is_file()]
+
+        # ── 4a2. «Мидролл»: the user's own ad inside the clips (params.midroll, from the site's presets) ─
+        if _mid:
+            _update_status(job_id, "assembling")
+            with _prof.stage("midroll"):
+                try:
+                    _mr = midroll.apply_to_outputs(str(output_dir), mode, params, work_dir=str(output_dir.parent))
+                    if isinstance(result, dict):
+                        result.setdefault("warnings", []).extend(midroll.warnings(_mr))
+                except Exception as exc:                     # never lose the clips over the ad
+                    logger.error("[worker] midroll_failed job_id=%s: %s", job_id, str(exc)[:200])
+                finally:
+                    if _drop_ass:
+                        for _a in output_dir.rglob("*.ass"):
+                            _a.unlink(missing_ok=True)
             output_files = [f for f in output_dir.rglob("*") if f.is_file()]
 
         def _upload_one(f: Path):
